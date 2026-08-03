@@ -8,17 +8,51 @@ use PhpOffice\PhpSpreadsheet\Reader\Exception as ReaderException;
 use PhpOffice\PhpSpreadsheet\Reader\IReadFilter;
 use PhpOffice\PhpSpreadsheet\Reader\Xlsx;
 use PhpOffice\PhpSpreadsheet\RichText\RichText;
+use ZipArchive;
 
 final class KeywordWorkbookReader
 {
+    private readonly int $maxFileSizeBytes;
+
+    private readonly int $maxSheets;
+
+    private readonly int $maxRowsPerSheet;
+
+    private readonly int $maxColumnsPerSheet;
+
+    private readonly int $maxSampleRows;
+
+    private readonly int $maxZipEntries;
+
+    private readonly int $maxUncompressedBytes;
+
+    private readonly int $maxEntryUncompressedBytes;
+
+    private readonly int $maxCompressionRatio;
+
     public function __construct(
-        private readonly int $maxFileSizeBytes = 10_485_760,
-        private readonly int $maxSheets = 5,
-        private readonly int $maxRowsPerSheet = 10_000,
-        private readonly int $maxColumnsPerSheet = 50,
-        private readonly int $maxSampleRows = 10,
+        ?int $maxFileSizeBytes = null,
+        ?int $maxSheets = null,
+        ?int $maxRowsPerSheet = null,
+        ?int $maxColumnsPerSheet = null,
+        ?int $maxSampleRows = null,
+        ?int $maxZipEntries = null,
+        ?int $maxUncompressedBytes = null,
+        ?int $maxEntryUncompressedBytes = null,
+        ?int $maxCompressionRatio = null,
     ) {
-        foreach ([$maxFileSizeBytes, $maxSheets, $maxRowsPerSheet, $maxColumnsPerSheet, $maxSampleRows] as $limit) {
+        $limits = config('keyword_intelligence.workbook');
+        $this->maxFileSizeBytes = $maxFileSizeBytes ?? (int) ($limits['max_file_size_bytes'] ?? 10_485_760);
+        $this->maxSheets = $maxSheets ?? (int) ($limits['max_sheets'] ?? 5);
+        $this->maxRowsPerSheet = $maxRowsPerSheet ?? (int) ($limits['max_rows_per_sheet'] ?? 10_000);
+        $this->maxColumnsPerSheet = $maxColumnsPerSheet ?? (int) ($limits['max_columns_per_sheet'] ?? 50);
+        $this->maxSampleRows = $maxSampleRows ?? (int) ($limits['max_sample_rows'] ?? 10);
+        $this->maxZipEntries = $maxZipEntries ?? (int) ($limits['max_zip_entries'] ?? 2_048);
+        $this->maxUncompressedBytes = $maxUncompressedBytes ?? (int) ($limits['max_uncompressed_bytes'] ?? 104_857_600);
+        $this->maxEntryUncompressedBytes = $maxEntryUncompressedBytes ?? (int) ($limits['max_entry_uncompressed_bytes'] ?? 26_214_400);
+        $this->maxCompressionRatio = $maxCompressionRatio ?? (int) ($limits['max_compression_ratio'] ?? 100);
+
+        foreach ([$this->maxFileSizeBytes, $this->maxSheets, $this->maxRowsPerSheet, $this->maxColumnsPerSheet, $this->maxSampleRows, $this->maxZipEntries, $this->maxUncompressedBytes, $this->maxEntryUncompressedBytes, $this->maxCompressionRatio] as $limit) {
             if ($limit < 1) {
                 throw new InvalidArgumentException('Workbook limits must be positive integers.');
             }
@@ -26,11 +60,12 @@ final class KeywordWorkbookReader
     }
 
     /**
-     * @return array{sheets:array<int,array{name:string,headers:array<int,string>,sample_rows:array<int,array<string,mixed>>,row_estimate:int,rows:array<int,array<string,mixed>>}>}
+     * @return array{sheets:array<int,array{name:string,headers:array<int,string>,sample_rows:array<int,array{row_number:int,values:array<string,mixed>}>,row_estimate:int,rows:array<int,array{row_number:int,values:array<string,mixed>}>}>}
      */
     public function inspect(string $absolutePath): array
     {
         $this->assertSafeWorkbook($absolutePath);
+        $this->assertSafeZipArchive($absolutePath);
 
         try {
             $reader = new Xlsx;
@@ -105,6 +140,59 @@ final class KeywordWorkbookReader
         }
     }
 
+    private function assertSafeZipArchive(string $absolutePath): void
+    {
+        $archive = new ZipArchive;
+        $opened = $archive->open($absolutePath, ZipArchive::RDONLY);
+        if ($opened !== true) {
+            throw new InvalidArgumentException('The XLSX workbook must be a readable ZIP archive.');
+        }
+
+        try {
+            if ($archive->numFiles < 0 || $archive->numFiles > $this->maxZipEntries) {
+                throw new InvalidArgumentException('The workbook exceeds the configured ZIP entry limit.');
+            }
+
+            $totalUncompressedBytes = 0;
+            $worksheetCount = 0;
+            for ($index = 0; $index < $archive->numFiles; $index++) {
+                $stat = $archive->statIndex($index);
+                if (! is_array($stat)
+                    || ! isset($stat['name'], $stat['size'], $stat['comp_size'], $stat['encryption_method'])
+                    || ! is_string($stat['name'])
+                    || ! is_int($stat['size'])
+                    || ! is_int($stat['comp_size'])
+                    || $stat['size'] < 0
+                    || $stat['comp_size'] < 0
+                    || $stat['encryption_method'] !== ZipArchive::EM_NONE) {
+                    throw new InvalidArgumentException('The workbook ZIP archive has encrypted or invalid entry metadata.');
+                }
+
+                if ($stat['size'] > $this->maxEntryUncompressedBytes) {
+                    throw new InvalidArgumentException('The workbook ZIP archive exceeds the configured entry size limit.');
+                }
+
+                if ($stat['size'] > $this->maxUncompressedBytes - $totalUncompressedBytes) {
+                    throw new InvalidArgumentException('The workbook ZIP archive exceeds the configured total uncompressed size limit.');
+                }
+                $totalUncompressedBytes += $stat['size'];
+
+                if ($stat['size'] > 0 && ($stat['comp_size'] === 0 || $this->maxCompressionRatio < $stat['size'] / $stat['comp_size'])) {
+                    throw new InvalidArgumentException('The workbook ZIP archive exceeds the configured compression ratio limit.');
+                }
+
+                if (str_starts_with($stat['name'], 'xl/worksheets/') && str_ends_with($stat['name'], '.xml')) {
+                    $worksheetCount++;
+                    if ($worksheetCount > $this->maxSheets) {
+                        throw new InvalidArgumentException('The workbook exceeds the configured sheet limit.');
+                    }
+                }
+            }
+        } finally {
+            $archive->close();
+        }
+    }
+
     /** @return array<int,string> */
     private function headers(object $sheet, int $columnCount): array
     {
@@ -122,7 +210,7 @@ final class KeywordWorkbookReader
     }
 
     /** @param array<int,string> $headers
-     * @return array<int,array<string,mixed>>
+     * @return array<int,array{row_number:int,values:array<string,mixed>}>
      */
     private function rows(object $sheet, array $headers, int $rowEstimate): array
     {
@@ -138,7 +226,7 @@ final class KeywordWorkbookReader
             }
 
             if ($hasValue) {
-                $rows[] = $values;
+                $rows[] = ['row_number' => $row, 'values' => $values];
             }
         }
 

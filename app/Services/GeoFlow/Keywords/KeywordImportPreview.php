@@ -37,10 +37,11 @@ final class KeywordImportPreview
             $suggestedMapping = $mapper->suggest($sheet['headers'], $sourceType);
             $resolvedMapping = $this->resolveMapping($suggestedMapping, $mapping, $sheet['headers']);
 
-            foreach ($sheet['rows'] as $index => $row) {
+            foreach ($sheet['rows'] as $row) {
                 $counts['total_rows']++;
-                $payload = ['sheet' => $sheet['name'], 'row_number' => $index + 2, 'source_payload' => $row];
-                $keyword = $this->mappedValue($row, $resolvedMapping, 'keyword');
+                $values = $row['values'];
+                $payload = ['sheet' => $sheet['name'], 'row_number' => $row['row_number'], 'source_payload' => $values];
+                $keyword = $this->mappedValue($values, $resolvedMapping, 'keyword');
 
                 if (! is_string($keyword) || trim($keyword) === '') {
                     $counts['rejected_rows']++;
@@ -54,8 +55,8 @@ final class KeywordImportPreview
                 try {
                     $normalized = $normalizer->normalize(
                         $keyword,
-                        $this->nullableString($this->mappedValue($row, $resolvedMapping, 'language')),
-                        $this->nullableString($this->mappedValue($row, $resolvedMapping, 'country')),
+                        $this->nullableString($this->mappedValue($values, $resolvedMapping, 'language')),
+                        $this->nullableString($this->mappedValue($values, $resolvedMapping, 'country')),
                     );
                 } catch (InvalidArgumentException $exception) {
                     $counts['rejected_rows']++;
@@ -76,7 +77,7 @@ final class KeywordImportPreview
                             'market_code' => $normalized->marketCode,
                         ],
                         'classification' => $classifier->classify($normalized),
-                        'mapped_values' => $this->mappedValues($row, $resolvedMapping),
+                        'mapped_values' => $this->mappedValues($values, $resolvedMapping),
                     ];
                 }
             }
@@ -95,10 +96,25 @@ final class KeywordImportPreview
     {
         $allowedHeaders = array_flip($headers);
         $resolved = $suggestedMapping;
+        $explicitFields = [];
         foreach ($mapping as $header => $field) {
             if (isset($allowedHeaders[$header]) && in_array($field, self::MAPPABLE_FIELDS, true)) {
-                $resolved[$header] = $field;
+                if (isset($explicitFields[$field])) {
+                    throw new InvalidArgumentException('multiple columns cannot be explicitly mapped to the same canonical field.');
+                }
+
+                $explicitFields[$field] = $header;
             }
+        }
+
+        foreach ($explicitFields as $field => $header) {
+            foreach ($resolved as $resolvedHeader => $resolvedField) {
+                if ($resolvedField === $field) {
+                    unset($resolved[$resolvedHeader]);
+                }
+            }
+
+            $resolved[$header] = $field;
         }
 
         return $resolved;

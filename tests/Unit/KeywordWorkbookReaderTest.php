@@ -4,11 +4,13 @@ namespace Tests\Unit;
 
 use App\Services\GeoFlow\Keywords\KeywordImportPreview;
 use App\Services\GeoFlow\Keywords\KeywordWorkbookReader;
+use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\DB;
 use InvalidArgumentException;
 use PhpOffice\PhpSpreadsheet\Spreadsheet;
 use PhpOffice\PhpSpreadsheet\Writer\Xlsx;
 use Tests\TestCase;
+use ZipArchive;
 
 class KeywordWorkbookReaderTest extends TestCase
 {
@@ -18,7 +20,8 @@ class KeywordWorkbookReaderTest extends TestCase
 
         $this->assertSame(['query', 'clicks', 'impressions', 'ctr', 'position', 'country', 'language', 'date_range'], $inspection['sheets'][0]['headers']);
         $this->assertSame(5, $inspection['sheets'][0]['row_estimate']);
-        $this->assertSame('mother of the bride dresses', $inspection['sheets'][0]['sample_rows'][0]['query']);
+        $this->assertSame(2, $inspection['sheets'][0]['sample_rows'][0]['row_number']);
+        $this->assertSame('mother of the bride dresses', $inspection['sheets'][0]['sample_rows'][0]['values']['query']);
     }
 
     public function test_it_inspects_xlsx_headers_samples_and_row_estimates_without_calculating_formulas(): void
@@ -34,7 +37,46 @@ class KeywordWorkbookReaderTest extends TestCase
         $this->assertSame(['Keywords'], array_column($inspection['sheets'], 'name'));
         $this->assertSame(['query', 'average_position', 'formula'], $inspection['sheets'][0]['headers']);
         $this->assertSame(2, $inspection['sheets'][0]['row_estimate']);
-        $this->assertSame('=2+2', $inspection['sheets'][0]['sample_rows'][0]['formula']);
+        $this->assertSame(2, $inspection['sheets'][0]['sample_rows'][0]['row_number']);
+        $this->assertSame('=2+2', $inspection['sheets'][0]['sample_rows'][0]['values']['formula']);
+    }
+
+    public function test_it_rejects_zip_bombs_before_invoking_the_spreadsheet_reader(): void
+    {
+        $highCompression = $this->makeZipWorkbook(['xl/worksheets/sheet1.xml' => str_repeat('A', 4_096)]);
+        try {
+            (new KeywordWorkbookReader(maxCompressionRatio: 2))->inspect($highCompression);
+            $this->fail('Expected a high-compression XLSX entry to be rejected.');
+        } catch (InvalidArgumentException $exception) {
+            $this->assertStringContainsString('compression ratio', $exception->getMessage());
+        }
+
+        $oversizedTotal = $this->makeZipWorkbook(['xl/sharedStrings.xml' => str_repeat('uncompressed', 32)]);
+        try {
+            (new KeywordWorkbookReader(maxUncompressedBytes: 128))->inspect($oversizedTotal);
+            $this->fail('Expected an XLSX archive exceeding the total uncompressed limit to be rejected.');
+        } catch (InvalidArgumentException $exception) {
+            $this->assertStringContainsString('total uncompressed', $exception->getMessage());
+        }
+
+        $oversizedEntry = $this->makeZipWorkbook(['xl/sharedStrings.xml' => str_repeat('uncompressed', 32)]);
+        try {
+            (new KeywordWorkbookReader(maxEntryUncompressedBytes: 128))->inspect($oversizedEntry);
+            $this->fail('Expected an XLSX archive entry exceeding its uncompressed limit to be rejected.');
+        } catch (InvalidArgumentException $exception) {
+            $this->assertStringContainsString('entry size', $exception->getMessage());
+        }
+
+        $tooManySheets = $this->makeZipWorkbook([
+            'xl/worksheets/sheet1.xml' => '<worksheet/>',
+            'xl/worksheets/sheet2.xml' => '<worksheet/>',
+        ]);
+        try {
+            (new KeywordWorkbookReader(maxSheets: 1))->inspect($tooManySheets);
+            $this->fail('Expected an XLSX archive with too many worksheets to be rejected.');
+        } catch (InvalidArgumentException $exception) {
+            $this->assertStringContainsString('sheet limit', $exception->getMessage());
+        }
     }
 
     public function test_it_rejects_non_xlsx_non_regular_and_oversized_inputs(): void
@@ -98,6 +140,7 @@ class KeywordWorkbookReaderTest extends TestCase
             ['lightinthebox coupon', 265, 'us', 'en', 'paid campaign'],
             ['   ', 0, 'US', 'en', 'blank query'],
         ]);
+        Bus::fake();
         $writes = [];
         DB::listen(static function ($query) use (&$writes): void {
             if (preg_match('/^\s*(insert|update|delete)\b/i', $query->sql) === 1) {
@@ -118,13 +161,32 @@ class KeywordWorkbookReaderTest extends TestCase
         $this->assertSame('paid campaign', $preview['valid_samples'][0]['source_payload']['unmapped_notes']);
         $this->assertSame('The keyword cannot be blank.', $preview['rejected_samples'][0]['reason']);
         $this->assertSame([], $writes);
+        Bus::assertNothingDispatched();
+    }
+
+    public function test_preview_uses_raw_excel_row_numbers_after_ignoring_an_empty_row(): void
+    {
+        $path = $this->makeWorkbook([
+            ['Query'],
+            ['lightinthebox coupon'],
+            [null],
+            [' '],
+        ]);
+
+        $preview = (new KeywordImportPreview)->build($path, 'google_search_console', ['query' => 'keyword']);
+
+        $this->assertSame(2, $preview['valid_samples'][0]['row_number']);
+        $this->assertSame(4, $preview['rejected_samples'][0]['row_number']);
     }
 
     public function test_php_images_install_and_enable_gd_for_phpspreadsheet(): void
     {
-        foreach (['docker/Dockerfile', 'docker/Dockerfile.prod'] as $path) {
-            $dockerfile = (string) file_get_contents(base_path($path));
+        $dockerfiles = [
+            'docker/Dockerfile' => (string) file_get_contents(base_path('docker/Dockerfile')),
+            'docker/Dockerfile.prod' => (string) file_get_contents(base_path('docker/Dockerfile.prod')),
+        ];
 
+        foreach ($dockerfiles as $path => $dockerfile) {
             foreach (['libfreetype6-dev', 'libjpeg62-turbo-dev', 'libpng-dev'] as $package) {
                 $this->assertStringContainsString($package, $dockerfile, $path);
             }
@@ -133,8 +195,16 @@ class KeywordWorkbookReaderTest extends TestCase
             $this->assertMatchesRegularExpression('/docker-php-ext-install\s+\\\\\s*gd\b/', $dockerfile, $path);
         }
 
-        $productionDockerfile = (string) file_get_contents(base_path('docker/Dockerfile.prod'));
+        $productionDockerfile = $dockerfiles['docker/Dockerfile.prod'];
         $this->assertStringContainsString('--ignore-platform-req=ext-gd', $productionDockerfile);
+
+        $runtimeStageStart = strrpos($productionDockerfile, 'FROM ${PHP_FPM_IMAGE}');
+        $this->assertNotFalse($runtimeStageStart);
+        $runtimeStage = substr($productionDockerfile, $runtimeStageStart);
+        foreach (['libfreetype6-dev', 'libjpeg62-turbo-dev', 'libpng-dev', 'docker-php-ext-configure gd --with-freetype --with-jpeg'] as $requirement) {
+            $this->assertStringContainsString($requirement, $runtimeStage);
+        }
+        $this->assertMatchesRegularExpression('/docker-php-ext-install\s+\\\\\s*gd\b/', $runtimeStage);
     }
 
     /** @param array<int,array<int,string|int|float>> $rows */
@@ -151,6 +221,22 @@ class KeywordWorkbookReaderTest extends TestCase
 
         (new Xlsx($spreadsheet))->save($path);
         $spreadsheet->disconnectWorksheets();
+
+        return $path;
+    }
+
+    /** @param array<string,string> $entries */
+    private function makeZipWorkbook(array $entries): string
+    {
+        $path = tempnam(sys_get_temp_dir(), 'keyword-workbook-').'.xlsx';
+        $archive = new ZipArchive;
+        $this->assertTrue($archive->open($path, ZipArchive::CREATE | ZipArchive::OVERWRITE));
+
+        foreach ($entries as $name => $contents) {
+            $this->assertTrue($archive->addFromString($name, $contents));
+        }
+
+        $this->assertTrue($archive->close());
 
         return $path;
     }
