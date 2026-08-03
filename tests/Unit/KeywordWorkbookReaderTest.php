@@ -6,6 +6,7 @@ use App\Services\GeoFlow\Keywords\KeywordImportPreview;
 use App\Services\GeoFlow\Keywords\KeywordWorkbookReader;
 use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Queue;
 use InvalidArgumentException;
 use PhpOffice\PhpSpreadsheet\Spreadsheet;
 use PhpOffice\PhpSpreadsheet\Writer\Xlsx;
@@ -77,6 +78,17 @@ class KeywordWorkbookReaderTest extends TestCase
         } catch (InvalidArgumentException $exception) {
             $this->assertStringContainsString('sheet limit', $exception->getMessage());
         }
+
+        $tooManyEntries = $this->makeZipWorkbook([
+            'docProps/core.xml' => '<properties/>',
+            'docProps/app.xml' => '<properties/>',
+        ]);
+        try {
+            (new KeywordWorkbookReader(maxZipEntries: 1))->inspect($tooManyEntries);
+            $this->fail('Expected an XLSX archive with too many ZIP entries to be rejected.');
+        } catch (InvalidArgumentException $exception) {
+            $this->assertStringContainsString('ZIP entry limit', $exception->getMessage());
+        }
     }
 
     public function test_it_rejects_non_xlsx_non_regular_and_oversized_inputs(): void
@@ -141,6 +153,7 @@ class KeywordWorkbookReaderTest extends TestCase
             ['   ', 0, 'US', 'en', 'blank query'],
         ]);
         Bus::fake();
+        Queue::fake();
         $writes = [];
         DB::listen(static function ($query) use (&$writes): void {
             if (preg_match('/^\s*(insert|update|delete)\b/i', $query->sql) === 1) {
@@ -162,6 +175,7 @@ class KeywordWorkbookReaderTest extends TestCase
         $this->assertSame('The keyword cannot be blank.', $preview['rejected_samples'][0]['reason']);
         $this->assertSame([], $writes);
         Bus::assertNothingDispatched();
+        Queue::assertNothingPushed();
     }
 
     public function test_preview_uses_raw_excel_row_numbers_after_ignoring_an_empty_row(): void
