@@ -2,7 +2,6 @@
 
 use Illuminate\Database\Migrations\Migration;
 use Illuminate\Database\Schema\Blueprint;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 
 return new class extends Migration
@@ -10,7 +9,7 @@ return new class extends Migration
     public function up(): void
     {
         Schema::table('keywords', function (Blueprint $table) {
-            $table->string('normalized_keyword', 200)->default('');
+            $table->string('normalized_keyword', 200)->nullable();
             $table->string('language_code', 10)->default('en');
             $table->string('market_code', 10)->nullable();
             $table->string('market_scope', 10)->default('GLOBAL');
@@ -21,10 +20,6 @@ return new class extends Migration
             $table->foreignId('canonical_keyword_id')->nullable()->constrained('keywords')->nullOnDelete();
             $table->decimal('latest_opportunity_score', 8, 2)->nullable();
         });
-
-        DB::table('keywords')->where('normalized_keyword', '')->update([
-            'normalized_keyword' => DB::raw('lower(trim(keyword))'),
-        ]);
 
         Schema::table('keywords', function (Blueprint $table) {
             $table->unique(
@@ -132,7 +127,6 @@ return new class extends Migration
             $table->json('source_payload')->nullable();
             $table->timestamps();
             $table->index(['keyword_id', 'period_start', 'period_end', 'source_type'], 'keyword_metrics_period_source_index');
-            $table->unique(['keyword_id', 'source_type', 'period_start', 'period_end'], 'keyword_metrics_period_source_unique');
         });
 
         Schema::create('keyword_relations', function (Blueprint $table) {
