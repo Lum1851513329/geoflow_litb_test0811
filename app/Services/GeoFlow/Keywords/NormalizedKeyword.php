@@ -9,7 +9,7 @@ final readonly class NormalizedKeyword
     public function __construct(
         public string $original,
         public string $normalized,
-        public string $languageCode,
+        public ?string $languageCode,
         public ?string $marketCode,
     ) {
         if ($normalized === '') {

@@ -98,6 +98,6 @@ final class KeywordClassifier
     {
         $phrase = preg_replace('/\s+/u', ' ', trim($phrase));
 
-        return $phrase === null ? '' : mb_strtolower($phrase, 'UTF-8');
+        return $phrase === null ? '' : mb_convert_case($phrase, MB_CASE_FOLD, 'UTF-8');
     }
 }

@@ -14,12 +14,17 @@ final class KeywordNormalizer
             throw new InvalidArgumentException('The keyword cannot be Unicode normalized.');
         }
 
-        $normalized = preg_replace('/\s+/u', ' ', trim($unicodeNormalized));
+        $normalized = preg_replace('/^\s+|\s+$/u', '', $unicodeNormalized);
         if ($normalized === null) {
             throw new InvalidArgumentException('The keyword contains invalid UTF-8.');
         }
 
-        $normalized = mb_strtolower($normalized, 'UTF-8');
+        $normalized = preg_replace('/\s+/u', ' ', $normalized);
+        if ($normalized === null) {
+            throw new InvalidArgumentException('The keyword contains invalid UTF-8.');
+        }
+
+        $normalized = mb_convert_case(trim($normalized), MB_CASE_FOLD, 'UTF-8');
 
         return new NormalizedKeyword(
             original: $value,
@@ -29,10 +34,10 @@ final class KeywordNormalizer
         );
     }
 
-    private function normalizeLanguageCode(?string $language): string
+    private function normalizeLanguageCode(?string $language): ?string
     {
         if ($language === null) {
-            return 'en';
+            return null;
         }
 
         $language = trim($language);

@@ -41,7 +41,7 @@ return [
             'why',
             'when',
             'where',
-            'is ',
+            'is',
         ],
     ],
 ];

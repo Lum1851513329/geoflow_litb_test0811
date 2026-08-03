@@ -25,6 +25,20 @@ class KeywordNormalizerTest extends TestCase
         $this->assertSame('drésses', $normalized->normalized);
     }
 
+    public function test_it_uses_full_unicode_case_folding(): void
+    {
+        $normalized = (new KeywordNormalizer)->normalize('Straße', 'de', null);
+
+        $this->assertSame('strasse', $normalized->normalized);
+    }
+
+    public function test_it_preserves_a_null_language_without_inferring_a_locale(): void
+    {
+        $normalized = (new KeywordNormalizer)->normalize('dresses', null, null);
+
+        $this->assertNull($normalized->languageCode);
+    }
+
     public function test_it_preserves_brand_spelling_words_without_rewriting_them(): void
     {
         $normalized = (new KeywordNormalizer)->normalize('Light in the Box Dresses', 'en', null);
@@ -45,6 +59,13 @@ class KeywordNormalizerTest extends TestCase
         $this->expectException(InvalidArgumentException::class);
 
         (new KeywordNormalizer)->normalize(" \t\n ", 'en', null);
+    }
+
+    public function test_it_rejects_keywords_containing_only_unicode_whitespace(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+
+        (new KeywordNormalizer)->normalize("\u{00A0}", 'en', null);
     }
 
     public function test_it_rejects_language_and_market_codes_in_unsupported_formats(): void

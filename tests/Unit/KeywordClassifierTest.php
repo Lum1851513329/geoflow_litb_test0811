@@ -36,11 +36,11 @@ class KeywordClassifierTest extends TestCase
     public function test_it_uses_configured_brand_variants_and_intent_phrases(): void
     {
         config([
-            'keyword_intelligence.brand_variants' => ['litb shop'],
+            'keyword_intelligence.brand_variants' => ['straße shop'],
             'keyword_intelligence.intent_phrases.transactional' => ['voucher'],
         ]);
 
-        $keyword = (new KeywordNormalizer)->normalize('LITB SHOP voucher', 'en', null);
+        $keyword = (new KeywordNormalizer)->normalize('STRASSE SHOP voucher', 'de', null);
 
         $this->assertSame([
             'keyword_type' => 'brand',
