@@ -31,4 +31,9 @@ class KeywordLibrary extends Model
     {
         return $this->hasMany(TitleLibrary::class, 'keyword_library_id');
     }
+
+    public function importBatches(): HasMany
+    {
+        return $this->hasMany(KeywordImportBatch::class, 'library_id');
+    }
 }
