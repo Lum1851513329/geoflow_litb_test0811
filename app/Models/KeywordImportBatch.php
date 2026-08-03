@@ -8,7 +8,7 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class KeywordImportBatch extends Model
 {
-    protected $fillable = ['library_id', 'original_filename', 'stored_path', 'file_sha256', 'source_type', 'status', 'mapping_json', 'metadata_json', 'period_start', 'period_end', 'total_count', 'processed_count', 'imported_count', 'duplicate_count', 'rejected_count', 'retained_shared_keyword_count', 'error_summary', 'created_by', 'started_at', 'completed_at', 'reverted_at'];
+    protected $fillable = ['library_id', 'original_filename', 'stored_path', 'file_sha256', 'import_config_hash', 'source_type', 'status', 'mapping_json', 'metadata_json', 'period_start', 'period_end', 'total_count', 'processed_count', 'imported_count', 'duplicate_count', 'rejected_count', 'retained_shared_keyword_count', 'error_summary', 'created_by', 'started_at', 'completed_at', 'reverted_at'];
 
     protected function casts(): array
     {
