@@ -65,7 +65,7 @@ class KeywordIntelligenceController extends Controller
     public function preview(PreviewKeywordImportRequest $request, KeywordImportPreviewSession $session): View|RedirectResponse
     {
         try {
-            $result = $session->begin($request->file('workbook'), $request->validated('source_type'), $request->validated('mapping', []));
+            $result = $session->begin($request->file('workbook'), $request->validated('source_type'), $request->validated('mapping', []), (int) $request->user('admin')->id);
         } catch (InvalidArgumentException) {
             return back()->withErrors(['workbook' => __('admin.keyword_intelligence.validation.workbook_invalid')]);
         } catch (Throwable $exception) {
@@ -85,7 +85,7 @@ class KeywordIntelligenceController extends Controller
     {
         $data = $request->validated();
         try {
-            $preview = $session->resolve($data['preview_token'], $data['source_type']);
+            $preview = $session->resolve($data['preview_token'], $data['source_type'], (int) $request->user('admin')->id);
             $batch = $service->createBatch([
                 'source_path' => $preview['absolute_path'],
                 'original_filename' => $preview['original_filename'],
@@ -210,7 +210,7 @@ class KeywordIntelligenceController extends Controller
             'pageTitle' => __('admin.keyword_intelligence.clusters.title'),
             'activeMenu' => 'materials',
             'clusters' => KeywordCluster::query()->with('primaryKeyword')->latest()->paginate(20),
-            'suggestions' => $candidates->map(fn (array $suggestion): array => ['data' => $suggestion, 'token' => $tokens->issue($suggestion)])->values()->all(),
+            'suggestions' => $candidates->map(fn (array $suggestion): array => ['data' => $suggestion, 'token' => $tokens->issue($suggestion, (int) $request->user('admin')->id)])->values()->all(),
         ]);
     }
 
@@ -223,7 +223,8 @@ class KeywordIntelligenceController extends Controller
     {
         $data = $request->validate(['candidate_token' => ['required', 'string', 'max:262144']]);
         try {
-            $cluster = $service->confirm($tokens->resolve($data['candidate_token']), (int) $request->user('admin')->id);
+            $adminId = (int) $request->user('admin')->id;
+            $cluster = $service->confirm($tokens->resolve($data['candidate_token'], $adminId), $adminId);
         } catch (DomainException|InvalidArgumentException) {
             return back()->withErrors(['candidate_token' => __('admin.keyword_intelligence.validation.cluster_invalid')]);
         }

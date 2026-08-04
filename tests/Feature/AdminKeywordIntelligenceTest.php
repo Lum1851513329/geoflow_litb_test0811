@@ -214,6 +214,34 @@ class AdminKeywordIntelligenceTest extends TestCase
         $this->assertSame($batch->id, $log->target_id);
     }
 
+    public function test_admin_activity_log_redacts_keyword_tokens_but_keeps_nonsecret_context(): void
+    {
+        Schema::create('admin_activity_logs', function (Blueprint $table): void {
+            $table->id();
+            $table->unsignedBigInteger('admin_id');
+            $table->string('admin_username');
+            $table->string('admin_role');
+            $table->string('action');
+            $table->string('request_method');
+            $table->string('page')->nullable();
+            $table->string('target_type')->nullable();
+            $table->unsignedBigInteger('target_id')->nullable();
+            $table->string('ip_address')->nullable();
+            $table->text('details')->nullable();
+            $table->timestamps();
+        });
+
+        $this->actingAs($this->admin(), 'admin')->post(route('admin.keyword-intelligence.clusters.confirm'), [
+            'candidate_token' => 'must-not-persist',
+            'action' => 'confirm_candidate',
+        ])->assertSessionHasErrors('candidate_token');
+
+        $details = json_decode((string) AdminActivityLog::query()->latest('id')->firstOrFail()->details, true, flags: JSON_THROW_ON_ERROR);
+        $this->assertSame('[redacted]', $details['candidate_token']);
+        $this->assertSame('confirm_candidate', $details['action']);
+        $this->assertStringNotContainsString('must-not-persist', json_encode($details, JSON_THROW_ON_ERROR));
+    }
+
     public function test_keyword_intelligence_writes_require_csrf_and_accept_the_session_token(): void
     {
         $this->withMiddleware(ValidateCsrfToken::class);
@@ -283,7 +311,7 @@ class AdminKeywordIntelligenceTest extends TestCase
         $session = app(KeywordImportPreviewSession::class);
         $validPath = 'keyword-import-previews/11111111-1111-4111-8111-111111111111.xlsx';
         Storage::disk('local')->put($validPath, 'original');
-        $payload = ['path' => $validPath, 'sha256' => hash('sha256', 'original'), 'original_filename' => 'safe.xlsx', 'source_type' => 'gsc', 'expires_at' => now()->addMinute()->timestamp];
+        $payload = ['path' => $validPath, 'sha256' => hash('sha256', 'original'), 'original_filename' => 'safe.xlsx', 'source_type' => 'gsc', 'admin_id' => 123, 'expires_at' => now()->addMinute()->timestamp];
 
         foreach ([
             [array_merge($payload, ['source_type' => 'other']), 'gsc'],
@@ -291,7 +319,7 @@ class AdminKeywordIntelligenceTest extends TestCase
             [array_merge($payload, ['sha256' => str_repeat('0', 64)]), 'gsc'],
         ] as [$tampered, $sourceType]) {
             try {
-                $session->resolve(Crypt::encryptString(json_encode($tampered, JSON_THROW_ON_ERROR)), $sourceType);
+                $session->resolve(Crypt::encryptString(json_encode($tampered, JSON_THROW_ON_ERROR)), $sourceType, 123);
                 $this->fail('Tampered preview token was accepted.');
             } catch (InvalidArgumentException) {
                 $this->addToAssertionCount(1);
@@ -301,7 +329,7 @@ class AdminKeywordIntelligenceTest extends TestCase
         $expired = $payload;
         $expired['expires_at'] = now()->subSecond()->timestamp;
         try {
-            $session->resolve(Crypt::encryptString(json_encode($expired, JSON_THROW_ON_ERROR)), 'gsc');
+            $session->resolve(Crypt::encryptString(json_encode($expired, JSON_THROW_ON_ERROR)), 'gsc', 123);
             $this->fail('Expired preview token was accepted.');
         } catch (InvalidArgumentException) {
             Storage::disk('local')->assertMissing($validPath);
@@ -321,15 +349,17 @@ class AdminKeywordIntelligenceTest extends TestCase
     public function test_queue_dispatch_failure_marks_the_persisted_batch_failed_and_returns_a_form_error(): void
     {
         Storage::fake('local');
+        $admin = $this->admin();
         $fixture = base_path('tests/Fixtures/keywords/category-search-sample.xlsx');
         $preview = app(KeywordImportPreviewSession::class)->begin(
             new UploadedFile($fixture, 'queue-failure.xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', null, true),
             'gsc',
             [],
+            (int) $admin->id,
         );
         Queue::shouldReceive('connection')->once()->andThrow(new RuntimeException('queue unavailable'));
 
-        $this->actingAs($this->admin(), 'admin')->post(route('admin.keyword-intelligence.import.confirm'), [
+        $this->actingAs($admin, 'admin')->post(route('admin.keyword-intelligence.import.confirm'), [
             'preview_token' => $preview['token'], 'library_id' => $this->library()->id, 'source_type' => 'gsc', 'mapping' => $preview['resolved_mapping'],
         ])->assertSessionHasErrors('preview_token');
 
@@ -371,11 +401,42 @@ class AdminKeywordIntelligenceTest extends TestCase
         $node->keywords()->attach($keyword->id, ['is_primary' => true]);
         $suggestion = app(KeywordClusterSuggestionService::class)->suggest([$keyword])[0];
 
-        $token = app(KeywordClusterCandidateToken::class)->issue($suggestion);
+        $token = app(KeywordClusterCandidateToken::class)->issue($suggestion, (int) $admin->id);
         $this->actingAs($admin, 'admin')->post(route('admin.keyword-intelligence.clusters.confirm'), ['candidate_token' => $token])->assertRedirect();
         $cluster = KeywordCluster::query()->sole();
         $this->actingAs($admin, 'admin')->post(route('admin.keyword-intelligence.clusters.score', $cluster), ['period_start' => '2026-07-01', 'period_end' => '2026-07-31'])->assertRedirect();
         $this->assertDatabaseHas('keyword_opportunity_scores', ['cluster_id' => $cluster->id, 'period_start' => '2026-07-01 00:00:00', 'period_end' => '2026-07-31 00:00:00']);
+    }
+
+    public function test_preview_and_cluster_tokens_are_bound_to_the_issuing_admin(): void
+    {
+        Storage::fake('local');
+        $owner = $this->admin();
+        $other = Admin::query()->create(['username' => 'other_keyword_admin', 'password' => 'secret', 'email' => 'other@example.com', 'display_name' => 'Other Admin', 'role' => 'admin', 'status' => 'active']);
+        $fixture = base_path('tests/Fixtures/keywords/category-search-sample.xlsx');
+        $preview = app(KeywordImportPreviewSession::class)->begin(
+            new UploadedFile($fixture, 'scoped.xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', null, true),
+            'gsc',
+            [],
+            (int) $owner->id,
+        );
+
+        $payload = ['preview_token' => $preview['token'], 'library_id' => $this->library()->id, 'source_type' => 'gsc', 'mapping' => $preview['resolved_mapping']];
+        $this->actingAs($other, 'admin')->post(route('admin.keyword-intelligence.import.confirm'), $payload)->assertSessionHasErrors('preview_token');
+        $this->assertDatabaseCount('keyword_import_batches', 0);
+        $this->actingAs($owner, 'admin')->post(route('admin.keyword-intelligence.import.confirm'), $payload)->assertRedirect(route('admin.keyword-intelligence.index'));
+
+        $taxonomy = KeywordTaxonomy::query()->create(['name' => 'Scoped Products', 'slug' => 'scoped-products', 'status' => 'active']);
+        $node = KeywordNode::query()->create(['taxonomy_id' => $taxonomy->id, 'name' => 'Scoped Dresses', 'slug' => 'scoped-dresses', 'path' => 'scoped-dresses', 'depth' => 0, 'sort_order' => 0]);
+        $keyword = Keyword::query()->create(['library_id' => $this->library()->id, 'keyword' => 'scoped party dress', 'normalized_keyword' => 'scoped party dress', 'language_code' => 'en', 'market_scope' => 'GLOBAL', 'keyword_type' => 'category', 'search_intent' => 'commercial', 'brand_relation' => 'non_brand', 'status' => 'active']);
+        $node->keywords()->attach($keyword->id, ['is_primary' => true]);
+        $suggestion = app(KeywordClusterSuggestionService::class)->suggest([$keyword])[0];
+        $candidateToken = app(KeywordClusterCandidateToken::class)->issue($suggestion, (int) $owner->id);
+
+        $this->actingAs($other, 'admin')->post(route('admin.keyword-intelligence.clusters.confirm'), ['candidate_token' => $candidateToken])->assertSessionHasErrors('candidate_token');
+        $this->assertDatabaseCount('keyword_clusters', 0);
+        $this->actingAs($owner, 'admin')->post(route('admin.keyword-intelligence.clusters.confirm'), ['candidate_token' => $candidateToken])->assertRedirect();
+        $this->assertDatabaseCount('keyword_clusters', 1);
     }
 
     public function test_overview_renders_distinct_copy_for_every_import_state(): void

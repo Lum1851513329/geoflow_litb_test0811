@@ -98,7 +98,8 @@ final class AdminActivityLogger
         $result = [];
         foreach ($payload as $key => $value) {
             $field = (string) $key;
-            if (in_array($field, $sensitiveKeys, true)) {
+            if (in_array($field, $sensitiveKeys, true)
+                || preg_match('/(?:^|_)(?:token|secret|key)$/i', $field) === 1) {
                 $result[$field] = '[redacted]';
 
                 continue;

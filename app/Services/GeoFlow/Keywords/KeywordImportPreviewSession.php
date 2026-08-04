@@ -19,7 +19,7 @@ final class KeywordImportPreviewSession
     ) {}
 
     /** @param array<string,string> $mapping */
-    public function begin(UploadedFile $file, string $sourceType, array $mapping): array
+    public function begin(UploadedFile $file, string $sourceType, array $mapping, int $adminId): array
     {
         $this->pruneExpired();
         $path = 'keyword-import-previews/'.Str::uuid().'.xlsx';
@@ -49,6 +49,7 @@ final class KeywordImportPreviewSession
                     'sha256' => $hash,
                     'original_filename' => $file->getClientOriginalName(),
                     'source_type' => $sourceType,
+                    'admin_id' => $adminId,
                     'expires_at' => now()->addMinutes(30)->timestamp,
                 ], JSON_THROW_ON_ERROR)),
             ];
@@ -58,7 +59,7 @@ final class KeywordImportPreviewSession
         }
     }
 
-    public function resolve(string $token, string $sourceType): array
+    public function resolve(string $token, string $sourceType, int $adminId): array
     {
         try {
             $payload = json_decode(Crypt::decryptString($token), true, flags: JSON_THROW_ON_ERROR);
@@ -66,10 +67,12 @@ final class KeywordImportPreviewSession
             throw new InvalidArgumentException('keyword_import.preview_token_invalid', previous: $exception);
         }
         if (! is_array($payload)
-            || ! isset($payload['path'], $payload['sha256'], $payload['original_filename'], $payload['source_type'], $payload['expires_at'])
+            || ! isset($payload['path'], $payload['sha256'], $payload['original_filename'], $payload['source_type'], $payload['expires_at'], $payload['admin_id'])
             || ! is_string($payload['path'])
             || preg_match('#^keyword-import-previews/[0-9a-f-]{36}\.xlsx$#i', $payload['path']) !== 1
             || ! is_int($payload['expires_at'])
+            || ! is_int($payload['admin_id'])
+            || $payload['admin_id'] !== $adminId
             || ! hash_equals((string) $payload['source_type'], $sourceType)
             || ! Storage::disk('local')->exists($payload['path'])) {
             throw new InvalidArgumentException('keyword_import.preview_token_invalid');
