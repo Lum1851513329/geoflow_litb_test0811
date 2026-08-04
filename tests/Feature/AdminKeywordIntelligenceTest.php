@@ -233,11 +233,21 @@ class AdminKeywordIntelligenceTest extends TestCase
 
         $this->actingAs($this->admin(), 'admin')->post(route('admin.keyword-intelligence.clusters.confirm'), [
             'candidate_token' => 'must-not-persist',
+            'nested' => [
+                'accessToken' => 'camel-must-not-persist',
+                'providerSecret' => 'secret-must-not-persist',
+                'signing-key' => 'key-must-not-persist',
+                'keyword' => 'safe keyword',
+            ],
             'action' => 'confirm_candidate',
         ])->assertSessionHasErrors('candidate_token');
 
         $details = json_decode((string) AdminActivityLog::query()->latest('id')->firstOrFail()->details, true, flags: JSON_THROW_ON_ERROR);
         $this->assertSame('[redacted]', $details['candidate_token']);
+        $this->assertSame('[redacted]', $details['nested']['accessToken']);
+        $this->assertSame('[redacted]', $details['nested']['providerSecret']);
+        $this->assertSame('[redacted]', $details['nested']['signing-key']);
+        $this->assertSame('safe keyword', $details['nested']['keyword']);
         $this->assertSame('confirm_candidate', $details['action']);
         $this->assertStringNotContainsString('must-not-persist', json_encode($details, JSON_THROW_ON_ERROR));
     }
