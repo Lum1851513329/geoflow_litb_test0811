@@ -5,9 +5,11 @@ namespace Tests\Feature;
 use App\Services\GeoFlow\Keywords\KeywordColumnMapper;
 use App\Services\GeoFlow\Keywords\KeywordImportPreview;
 use App\Services\GeoFlow\Keywords\KeywordWorkbookReader;
+use Illuminate\Database\Events\QueryExecuted;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Queue;
 use Tests\TestCase;
 
@@ -35,11 +37,7 @@ class LitbKeywordWorkbookCompatibilityTest extends TestCase
     private const METRIC_FIELDS = ['clicks', 'impressions', 'ctr', 'position', 'cost', 'conversions'];
 
     /** @var array<int,string> */
-    private const ALLOWED_REJECTION_REASONS = [
-        'The keyword cannot be blank.',
-        'The language code must be an ISO language code or BCP 47 tag.',
-        'The market code must be an ISO 3166-1 alpha-2 code.',
-    ];
+    private const ALLOWED_REJECTION_REASON_KEYS = ['blank_keyword', 'invalid_keyword_context'];
 
     public function test_category_workbook_is_compatible_with_read_only_preview(): void
     {
@@ -66,24 +64,24 @@ class LitbKeywordWorkbookCompatibilityTest extends TestCase
 
         $fileBefore = $this->fileFingerprint($path);
         $countsBefore = $this->businessTableCounts();
-        $writes = [];
         Bus::fake();
         Queue::fake();
-        DB::listen(static function ($query) use (&$writes): void {
-            if (preg_match('/^\s*(insert|update|delete)\b/i', $query->sql) === 1) {
-                $writes[] = $query->sql;
-            }
-        });
 
         $reader = new KeywordWorkbookReader;
         $mapper = new KeywordColumnMapper;
         $inspection = $reader->inspect($path);
         $recognizedFields = [];
+        $firstDataRowsBySheet = [];
+        $rowEstimate = 0;
         foreach ($inspection['sheets'] as $sheet) {
             $recognizedFields = array_merge(
                 $recognizedFields,
                 array_values($mapper->suggest($sheet['headers'], 'google_search_console')),
             );
+            $rowEstimate += $sheet['row_estimate'];
+            if ($sheet['rows'] !== []) {
+                $firstDataRowsBySheet[$sheet['name']] = min(array_column($sheet['rows'], 'row_number'));
+            }
         }
         $recognizedFields = array_values(array_unique($recognizedFields));
 
@@ -91,25 +89,54 @@ class LitbKeywordWorkbookCompatibilityTest extends TestCase
         $recognizedMetrics = array_values(array_intersect(self::METRIC_FIELDS, $recognizedFields));
         $this->assertNotEmpty($recognizedMetrics, 'At least one supported metric column must be recognized.');
 
-        $preview = (new KeywordImportPreview(reader: $reader, mapper: $mapper))->build(
-            $path,
-            'google_search_console',
-            [],
-        );
+        $queriesDuringPreview = [];
+        $captureQueries = false;
+        Event::listen(QueryExecuted::class, static function (QueryExecuted $event) use (&$captureQueries, &$queriesDuringPreview): void {
+            if ($captureQueries) {
+                $queriesDuringPreview[] = $event->sql;
+            }
+        });
+
+        try {
+            $captureQueries = true;
+            $preview = (new KeywordImportPreview(
+                reader: $reader,
+                mapper: $mapper,
+                maxSamples: (int) ceil($rowEstimate * 0.25) + 1,
+            ))->build($path, 'google_search_console', []);
+        } finally {
+            $captureQueries = false;
+            Event::forget(QueryExecuted::class);
+        }
 
         $this->assertGreaterThan(0, $preview['counts']['total_rows']);
         $this->assertGreaterThan(0, $preview['counts']['valid_rows']);
         $this->assertNotEmpty($preview['valid_samples']);
+        foreach (['total_rows', 'valid_rows', 'rejected_rows'] as $countKey) {
+            $this->assertIsInt($preview['counts'][$countKey]);
+            $this->assertGreaterThanOrEqual(0, $preview['counts'][$countKey]);
+            $this->assertLessThanOrEqual($preview['counts']['total_rows'], $preview['counts'][$countKey]);
+        }
+        $this->assertSame(
+            $preview['counts']['total_rows'],
+            $preview['counts']['valid_rows'] + $preview['counts']['rejected_rows'],
+            'Every non-empty data row must be either valid or rejected.',
+        );
         $this->assertLessThanOrEqual(
             (int) ceil($preview['counts']['total_rows'] * 0.25),
             $preview['counts']['rejected_rows'],
             'Rejected rows must not exceed 25% of non-empty data rows.',
         );
-        $this->assertRejectionsAreExpectedAndKeepPhysicalRowOrder($preview);
+        $this->assertSame(
+            $preview['counts']['rejected_rows'],
+            count($preview['rejected_samples']),
+            'All rejected rows must be available for reason and physical-row validation.',
+        );
+        $this->assertRejectionsAreExpectedAndKeepPhysicalRowOrder($preview, $firstDataRowsBySheet);
 
         $this->assertSame($fileBefore, $this->fileFingerprint($path));
         $this->assertSame($countsBefore, $this->businessTableCounts());
-        $this->assertSame([], $writes, 'Workbook compatibility preview must not write to the database.');
+        $this->assertSame([], $queriesDuringPreview, 'Workbook compatibility preview must execute no SQL on any connection.');
         Bus::assertNothingDispatched();
         Queue::assertNothingPushed();
 
@@ -124,31 +151,41 @@ class LitbKeywordWorkbookCompatibilityTest extends TestCase
         ));
     }
 
-    /** @param array{valid_samples:array<int,array<string,mixed>>,rejected_samples:array<int,array<string,mixed>>,counts:array{total_rows:int,valid_rows:int,rejected_rows:int}} $preview */
-    private function assertRejectionsAreExpectedAndKeepPhysicalRowOrder(array $preview): void
+    /**
+     * @param  array{valid_samples:array<int,array<string,mixed>>,rejected_samples:array<int,array<string,mixed>>,counts:array{total_rows:int,valid_rows:int,rejected_rows:int}}  $preview
+     * @param  array<string,int>  $firstDataRowsBySheet
+     */
+    private function assertRejectionsAreExpectedAndKeepPhysicalRowOrder(array $preview, array $firstDataRowsBySheet): void
     {
-        $firstDataRow = (int) $preview['valid_samples'][0]['row_number'];
-        $rejectedRows = [];
+        $rejectedRowsBySheet = [];
 
         foreach ($preview['rejected_samples'] as $rejection) {
             $this->assertContains(
-                $rejection['reason'] ?? null,
-                self::ALLOWED_REJECTION_REASONS,
-                'Every rejected row must have an explicitly allowed validation reason.',
+                $rejection['reason_key'] ?? null,
+                self::ALLOWED_REJECTION_REASON_KEYS,
+                'Every rejected row must have an explicitly allowed stable reason key.',
             );
+            $this->assertIsString($rejection['sheet'] ?? null);
             $this->assertIsInt($rejection['row_number'] ?? null);
+            $sheet = $rejection['sheet'];
+            $this->assertArrayHasKey($sheet, $firstDataRowsBySheet);
             $this->assertGreaterThanOrEqual(
-                $firstDataRow,
+                $firstDataRowsBySheet[$sheet],
                 $rejection['row_number'],
                 'Rejected rows must retain physical row numbers after the detected header.',
             );
-            $rejectedRows[] = $rejection['row_number'];
+            $rejectedRowsBySheet[$sheet][] = $rejection['row_number'];
         }
 
-        $sortedRows = $rejectedRows;
-        sort($sortedRows, SORT_NUMERIC);
-        $this->assertSame($sortedRows, $rejectedRows, 'Rejected physical rows must remain ordered.');
-        $this->assertSame(array_values(array_unique($rejectedRows)), $rejectedRows, 'Rejected physical rows must be unique.');
+        foreach ($rejectedRowsBySheet as $rejectedRows) {
+            foreach (array_slice($rejectedRows, 1) as $index => $rowNumber) {
+                $this->assertGreaterThan(
+                    $rejectedRows[$index],
+                    $rowNumber,
+                    'Rejected physical rows must be strictly ordered and unique within each sheet.',
+                );
+            }
+        }
     }
 
     /** @return array{sha256:string,size:int,mtime:int} */
