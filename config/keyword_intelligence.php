@@ -56,4 +56,43 @@ return [
             'is',
         ],
     ],
+
+    'topic_clustering' => [
+        'compatible_intents' => [
+            'commercial' => ['commercial', 'transactional'],
+            'transactional' => ['commercial', 'transactional'],
+            'informational' => ['informational'],
+            'navigational' => ['navigational'],
+            'support' => ['support'],
+        ],
+    ],
+
+    'opportunity_scoring' => [
+        'version' => 'v1',
+        'fresh_days' => 7,
+        'stale_after_days' => 30,
+        'missing_data_penalty' => 12.0,
+        'stale_data_penalty' => 8.0,
+        'demand_impressions_ceiling' => 10_000,
+        'target_ctr' => 0.05,
+        'target_conversion_rate' => 0.10,
+        'weights' => [
+            'non_brand' => [
+                'demand' => 0.25,
+                'click_performance' => 0.15,
+                'ranking_opportunity' => 0.20,
+                'commercial_relevance' => 0.15,
+                'content_gap' => 0.15,
+                'freshness' => 0.10,
+            ],
+            'branded' => [
+                'demand' => 0.15,
+                'click_performance' => 0.25,
+                'ranking_opportunity' => 0.10,
+                'commercial_relevance' => 0.25,
+                'content_gap' => 0.10,
+                'freshness' => 0.15,
+            ],
+        ],
+    ],
 ];
