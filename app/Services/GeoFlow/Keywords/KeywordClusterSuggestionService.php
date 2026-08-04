@@ -4,6 +4,7 @@ namespace App\Services\GeoFlow\Keywords;
 
 use App\Models\Keyword;
 use App\Models\KeywordNode;
+use App\Models\KeywordRelation;
 use Illuminate\Support\Str;
 use InvalidArgumentException;
 
@@ -16,7 +17,8 @@ final class KeywordClusterSuggestionService
      */
     public function suggest(iterable $keywords): array
     {
-        $groups = [];
+        $candidates = [];
+        $knownValuesByBoundary = [];
 
         foreach ($keywords as $keyword) {
             if (! $keyword instanceof Keyword) {
@@ -33,11 +35,6 @@ final class KeywordClusterSuggestionService
                 continue;
             }
 
-            $stem = $this->conservativeStem((string) ($keyword->normalized_keyword ?: $keyword->keyword));
-            if ($stem === '') {
-                continue;
-            }
-
             $boundary = [
                 'taxonomy_node_id' => (int) $node->id,
                 'language_code' => (string) $keyword->language_code,
@@ -45,11 +42,35 @@ final class KeywordClusterSuggestionService
                 'market_scope' => (string) $keyword->market_scope,
                 'brand_relation' => (string) $keyword->brand_relation,
                 'intent_group' => $this->intentGroup((string) $keyword->search_intent),
-                'stem' => $stem,
             ];
-            $groups[json_encode($boundary, JSON_THROW_ON_ERROR)][] = [
+            $boundaryKey = json_encode($boundary, JSON_THROW_ON_ERROR);
+            $value = $this->normalizeValue((string) ($keyword->normalized_keyword ?: $keyword->keyword));
+            if ($value === '') {
+                continue;
+            }
+            $candidates[] = [
                 'keyword' => $keyword,
                 'node' => $node,
+                'boundary' => $boundary,
+                'boundary_key' => $boundaryKey,
+                'value' => $value,
+            ];
+            $knownValuesByBoundary[$boundaryKey][$value] = true;
+        }
+
+        $groups = [];
+        foreach ($candidates as $candidate) {
+            $stem = $this->conservativeStem(
+                $candidate['value'],
+                $knownValuesByBoundary[$candidate['boundary_key']],
+            );
+            $groupKey = json_encode([
+                ...$candidate['boundary'],
+                'stem' => $stem,
+            ], JSON_THROW_ON_ERROR);
+            $groups[$groupKey][] = [
+                'keyword' => $candidate['keyword'],
+                'node' => $candidate['node'],
             ];
         }
 
@@ -89,7 +110,7 @@ final class KeywordClusterSuggestionService
             $keyword = $item['keyword'];
             $memberships[] = [
                 'keyword_id' => (int) $keyword->id,
-                'role' => $this->role($keyword, $primary),
+                'role' => $this->roleFor($keyword, $primary),
                 'weight' => $keyword->is($primary) ? 1.0 : null,
                 'sort_order' => $index,
             ];
@@ -112,12 +133,12 @@ final class KeywordClusterSuggestionService
         ];
     }
 
-    private function role(Keyword $keyword, Keyword $primary): string
+    public function roleFor(Keyword $keyword, Keyword $primary): string
     {
         if ($keyword->is($primary)) {
             return 'primary';
         }
-        if ($keyword->canonical_keyword_id !== null) {
+        if ((int) $keyword->canonical_keyword_id === (int) $primary->id || $this->hasVariantRelation($keyword, $primary)) {
             return 'variant';
         }
         if ($keyword->keyword_type === 'question') {
@@ -125,6 +146,22 @@ final class KeywordClusterSuggestionService
         }
 
         return 'secondary';
+    }
+
+    private function hasVariantRelation(Keyword $keyword, Keyword $primary): bool
+    {
+        return KeywordRelation::query()
+            ->whereIn('relation_type', ['spelling_variant', 'synonym'])
+            ->where(function ($query) use ($keyword, $primary): void {
+                $query->where(function ($forward) use ($keyword, $primary): void {
+                    $forward->where('source_keyword_id', $keyword->id)
+                        ->where('target_keyword_id', $primary->id);
+                })->orWhere(function ($reverse) use ($keyword, $primary): void {
+                    $reverse->where('source_keyword_id', $primary->id)
+                        ->where('target_keyword_id', $keyword->id);
+                });
+            })
+            ->exists();
     }
 
     private function intentGroup(string $intent): string
@@ -136,14 +173,9 @@ final class KeywordClusterSuggestionService
         return implode('|', $compatible);
     }
 
-    private function conservativeStem(string $value): string
+    /** @param array<string,bool> $knownValues */
+    private function conservativeStem(string $value, array $knownValues): string
     {
-        $value = mb_convert_case(trim($value), MB_CASE_FOLD, 'UTF-8');
-        $value = preg_replace('/[^\p{L}\p{N}]+/u', ' ', $value);
-        if ($value === null) {
-            return '';
-        }
-
         $tokens = preg_split('/\s+/u', trim($value), -1, PREG_SPLIT_NO_EMPTY);
         if ($tokens === false || $tokens === []) {
             return '';
@@ -152,7 +184,11 @@ final class KeywordClusterSuggestionService
         $last = array_pop($tokens);
         if (preg_match('/^[a-z]+$/', $last) === 1 && strlen($last) > 3) {
             if (str_ends_with($last, 'ies') && strlen($last) > 4) {
-                $last = substr($last, 0, -3).'y';
+                $ieCandidate = implode(' ', [...$tokens, substr($last, 0, -1)]);
+                $yCandidate = implode(' ', [...$tokens, substr($last, 0, -3).'y']);
+                $last = isset($knownValues[$ieCandidate]) && ! isset($knownValues[$yCandidate])
+                    ? substr($last, 0, -1)
+                    : substr($last, 0, -3).'y';
             } elseif (preg_match('/(?:sses|xes|zes|ches|shes)$/', $last) === 1) {
                 $last = substr($last, 0, -2);
             } elseif (str_ends_with($last, 's') && ! str_ends_with($last, 'ss')) {
@@ -162,5 +198,13 @@ final class KeywordClusterSuggestionService
         $tokens[] = $last;
 
         return implode(' ', $tokens);
+    }
+
+    private function normalizeValue(string $value): string
+    {
+        $value = mb_convert_case(trim($value), MB_CASE_FOLD, 'UTF-8');
+        $value = preg_replace('/[^\p{L}\p{N}]+/u', ' ', $value);
+
+        return $value === null ? '' : trim($value);
     }
 }

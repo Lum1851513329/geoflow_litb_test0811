@@ -9,7 +9,7 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class KeywordCluster extends Model
 {
-    protected $fillable = ['name', 'slug', 'taxonomy_node_id', 'primary_keyword_id', 'language_code', 'market_code', 'market_scope', 'search_intent', 'content_type', 'status', 'coverage_status', 'knowledge_base_id', 'category_id', 'target_url', 'confirmed_by', 'confirmed_at', 'latest_opportunity_score'];
+    protected $fillable = ['name', 'slug', 'taxonomy_node_id', 'primary_keyword_id', 'primary_scope_key', 'language_code', 'market_code', 'market_scope', 'search_intent', 'content_type', 'status', 'coverage_status', 'knowledge_base_id', 'category_id', 'target_url', 'confirmed_by', 'confirmed_at', 'latest_opportunity_score'];
 
     protected function casts(): array
     {

@@ -4,14 +4,20 @@ namespace Tests\Feature;
 
 use App\Models\Admin;
 use App\Models\Keyword;
+use App\Models\KeywordCluster;
 use App\Models\KeywordLibrary;
 use App\Models\KeywordNode;
 use App\Models\KeywordTaxonomy;
 use App\Services\GeoFlow\Keywords\KeywordClusterService;
 use App\Services\GeoFlow\Keywords\KeywordClusterSuggestionService;
 use DomainException;
+use Illuminate\Database\QueryException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
+use RuntimeException;
 use Tests\TestCase;
+use Throwable;
 
 class KeywordClusterServiceTest extends TestCase
 {
@@ -63,6 +69,38 @@ class KeywordClusterServiceTest extends TestCase
         $this->assertDatabaseCount('keyword_cluster_keywords', 0);
     }
 
+    public function test_conservative_ies_stemming_preserves_cookie_and_movie_but_singularizes_party(): void
+    {
+        [$node] = $this->nodes();
+        $cookie = $this->keyword('cookie', $node);
+        $cookies = $this->keyword('cookies', $node);
+        $movie = $this->keyword('movie', $node);
+        $movies = $this->keyword('movies', $node);
+        $party = $this->keyword('party', $node);
+        $parties = $this->keyword('parties', $node);
+
+        $suggestions = app(KeywordClusterSuggestionService::class)->suggest([
+            $cookie,
+            $cookies,
+            $movie,
+            $movies,
+            $party,
+            $parties,
+        ]);
+
+        $this->assertCount(3, $suggestions);
+        foreach ([[$cookie, $cookies], [$movie, $movies], [$party, $parties]] as [$singular, $plural]) {
+            $suggestion = collect($suggestions)->first(
+                static fn (array $candidate): bool => collect($candidate['keywords'])->contains('keyword_id', $singular->id),
+            );
+            $this->assertNotNull($suggestion);
+            $this->assertEqualsCanonicalizing(
+                [$singular->id, $plural->id],
+                array_column($suggestion['keywords'], 'keyword_id'),
+            );
+        }
+    }
+
     public function test_confirm_creates_an_active_audited_cluster_and_memberships_atomically(): void
     {
         [$node] = $this->nodes();
@@ -84,6 +122,7 @@ class KeywordClusterServiceTest extends TestCase
         $this->assertSame($admin->id, $cluster->confirmed_by);
         $this->assertNotNull($cluster->confirmed_at);
         $this->assertSame($primary->id, $cluster->primary_keyword_id);
+        $this->assertSame(hash('sha256', "{$primary->id}|en|US"), $cluster->primary_scope_key);
         $this->assertSame([
             $primary->id => 'primary',
             $secondary->id => 'secondary',
@@ -119,6 +158,87 @@ class KeywordClusterServiceTest extends TestCase
         $this->assertDatabaseCount('keyword_clusters', 1);
     }
 
+    public function test_confirm_translates_a_database_scope_claim_race_to_a_stable_domain_error(): void
+    {
+        [$node] = $this->nodes();
+        $primary = $this->keyword('summer dresses', $node, isTaxonomyPrimary: true);
+        $suggestion = app(KeywordClusterSuggestionService::class)->suggest([$primary])[0];
+        $admin = $this->admin();
+        DB::statement(<<<'SQL'
+            CREATE TRIGGER simulate_primary_scope_race
+            BEFORE INSERT ON keyword_clusters
+            WHEN NEW.slug <> 'racing-claim'
+            BEGIN
+                INSERT INTO keyword_clusters (
+                    name, slug, primary_keyword_id, primary_scope_key, language_code,
+                    market_code, market_scope, search_intent, status, created_at, updated_at
+                ) VALUES (
+                    'Racing claim', 'racing-claim', NEW.primary_keyword_id, NEW.primary_scope_key,
+                    NEW.language_code, NEW.market_code, NEW.market_scope, NEW.search_intent,
+                    'active', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                );
+            END
+            SQL);
+
+        $message = null;
+        try {
+            app(KeywordClusterService::class)->confirm($suggestion, $admin->id);
+        } catch (DomainException $exception) {
+            $message = $exception->getMessage();
+        } finally {
+            DB::statement('DROP TRIGGER IF EXISTS simulate_primary_scope_race');
+        }
+
+        $this->assertSame('keyword_cluster.primary_active_conflict', $message);
+        $this->assertDatabaseCount('keyword_clusters', 0);
+    }
+
+    public function test_database_uniquely_claims_active_primary_scope_but_allows_null_drafts(): void
+    {
+        $this->assertTrue(Schema::hasColumn('keyword_clusters', 'primary_scope_key'));
+        [$node] = $this->nodes();
+        $primary = $this->keyword('summer dresses', $node, isTaxonomyPrimary: true);
+        $scopeKey = hash('sha256', "{$primary->id}|en|US");
+
+        $first = KeywordCluster::query()->create($this->clusterAttributes($primary, 'first-active', [
+            'primary_scope_key' => $scopeKey,
+            'status' => 'active',
+        ]));
+        $this->assertSame($scopeKey, $first->primary_scope_key);
+        $this->assertUniqueConstraint(fn () => KeywordCluster::query()->create(
+            $this->clusterAttributes($primary, 'second-active', [
+                'primary_scope_key' => $scopeKey,
+                'status' => 'active',
+            ]),
+        ));
+
+        $firstDraft = KeywordCluster::query()->create($this->clusterAttributes($primary, 'first-draft'));
+        $secondDraft = KeywordCluster::query()->create($this->clusterAttributes($primary, 'second-draft'));
+        $archived = KeywordCluster::query()->create($this->clusterAttributes($primary, 'archived', ['status' => 'archived']));
+        $this->assertNull($firstDraft->primary_scope_key);
+        $this->assertNull($secondDraft->primary_scope_key);
+        $this->assertNull($archived->primary_scope_key);
+    }
+
+    public function test_scope_key_migration_fails_before_schema_changes_when_legacy_active_claims_conflict(): void
+    {
+        $migration = require database_path('migrations/2026_08_04_000004_add_keyword_cluster_primary_scope_key.php');
+        $migration->down();
+        [$node] = $this->nodes();
+        $primary = $this->keyword('summer dresses', $node, isTaxonomyPrimary: true);
+        KeywordCluster::query()->create($this->clusterAttributes($primary, 'legacy-first', ['status' => 'active']));
+        KeywordCluster::query()->create($this->clusterAttributes($primary, 'legacy-second', ['status' => 'active']));
+
+        try {
+            $migration->up();
+            $this->fail('Expected conflicting legacy active claims to stop the migration.');
+        } catch (Throwable $exception) {
+            $this->assertInstanceOf(RuntimeException::class, $exception);
+            $this->assertSame('keyword_clusters.primary_scope_backfill_conflict', $exception->getMessage());
+            $this->assertFalse(Schema::hasColumn('keyword_clusters', 'primary_scope_key'));
+        }
+    }
+
     public function test_confirm_rejects_taxonomy_and_incompatible_intent_boundary_violations(): void
     {
         [$node, $otherNode] = $this->nodes();
@@ -141,6 +261,52 @@ class KeywordClusterServiceTest extends TestCase
         $this->assertDomainError(
             'keyword_cluster.intent_boundary',
             fn () => $service->confirm($incompatibleSuggestion, $admin->id),
+        );
+        $this->assertDatabaseCount('keyword_clusters', 0);
+    }
+
+    public function test_confirm_rejects_a_member_with_a_different_conservative_stem(): void
+    {
+        [$node] = $this->nodes();
+        $primary = $this->keyword('summer dresses', $node, isTaxonomyPrimary: true);
+        $secondary = $this->keyword('summer dress', $node);
+        $differentStem = $this->keyword('winter boots', $node);
+        $suggestion = app(KeywordClusterSuggestionService::class)->suggest([$primary, $secondary])[0];
+        $suggestion['keywords'][] = ['keyword_id' => $differentStem->id, 'role' => 'secondary'];
+
+        $this->assertDomainError(
+            'keyword_cluster.stem_boundary',
+            fn () => app(KeywordClusterService::class)->confirm($suggestion, $this->admin()->id),
+        );
+        $this->assertDatabaseCount('keyword_clusters', 0);
+    }
+
+    public function test_confirm_rejects_a_forged_question_role(): void
+    {
+        [$node] = $this->nodes();
+        $primary = $this->keyword('summer dresses', $node, isTaxonomyPrimary: true);
+        $secondary = $this->keyword('summer dress', $node);
+        $suggestion = app(KeywordClusterSuggestionService::class)->suggest([$primary, $secondary])[0];
+        $suggestion['keywords'][1]['role'] = 'question';
+
+        $this->assertDomainError(
+            'keyword_cluster.question_role_invalid',
+            fn () => app(KeywordClusterService::class)->confirm($suggestion, $this->admin()->id),
+        );
+        $this->assertDatabaseCount('keyword_clusters', 0);
+    }
+
+    public function test_confirm_rejects_a_forged_variant_role(): void
+    {
+        [$node] = $this->nodes();
+        $primary = $this->keyword('summer dresses', $node, isTaxonomyPrimary: true);
+        $secondary = $this->keyword('summer dress', $node);
+        $suggestion = app(KeywordClusterSuggestionService::class)->suggest([$primary, $secondary])[0];
+        $suggestion['keywords'][1]['role'] = 'variant';
+
+        $this->assertDomainError(
+            'keyword_cluster.variant_role_invalid',
+            fn () => app(KeywordClusterService::class)->confirm($suggestion, $this->admin()->id),
         );
         $this->assertDatabaseCount('keyword_clusters', 0);
     }
@@ -221,6 +387,34 @@ class KeywordClusterServiceTest extends TestCase
             'role' => 'super_admin',
             'status' => 'active',
         ]);
+    }
+
+    /** @param array<string,mixed> $overrides
+     * @return array<string,mixed>
+     */
+    private function clusterAttributes(Keyword $primary, string $slug, array $overrides = []): array
+    {
+        return [
+            'name' => str()->headline($slug),
+            'slug' => $slug,
+            'primary_keyword_id' => $primary->id,
+            'language_code' => 'en',
+            'market_code' => 'US',
+            'market_scope' => 'US',
+            'search_intent' => 'informational',
+            'status' => 'draft',
+            ...$overrides,
+        ];
+    }
+
+    private function assertUniqueConstraint(callable $operation): void
+    {
+        try {
+            $operation();
+            $this->fail('Expected a unique constraint violation.');
+        } catch (QueryException $exception) {
+            $this->assertStringContainsString('unique', strtolower($exception->getMessage()));
+        }
     }
 
     private function assertDomainError(string $message, callable $operation): void

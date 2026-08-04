@@ -223,22 +223,69 @@ final class KeywordOpportunityScoringService
      */
     private function reconcile(array $components, array $penalties): array
     {
-        $componentTotal = round(array_sum($components), 2);
-        $penaltyTotal = round(array_sum($penalties), 2);
-        if ($penaltyTotal > $componentTotal && $penaltyTotal > 0) {
-            $scale = $componentTotal / $penaltyTotal;
-            foreach ($penalties as $name => $value) {
-                $penalties[$name] = round($value * $scale, 2);
+        $componentCents = array_map(static fn (float $value): int => (int) round($value * 100), $components);
+        $componentCents = $this->capCents($componentCents, 10_000);
+        $componentTotalCents = array_sum($componentCents);
+
+        $penaltyCents = array_map(static fn (float $value): int => (int) round($value * 100), $penalties);
+        $penaltyCents = $this->allocateCents($penaltyCents, min(array_sum($penaltyCents), $componentTotalCents));
+        $totalCents = $componentTotalCents - array_sum($penaltyCents);
+
+        return [
+            array_map(static fn (int $value): float => $value / 100, $componentCents),
+            array_map(static fn (int $value): float => $value / 100, $penaltyCents),
+            $totalCents / 100,
+        ];
+    }
+
+    /**
+     * @param  array<string,int>  $values
+     * @return array<string,int>
+     */
+    private function capCents(array $values, int $cap): array
+    {
+        $excess = max(0, array_sum($values) - $cap);
+        foreach (array_reverse(array_keys($values)) as $name) {
+            if ($excess === 0) {
+                break;
             }
+            $reduction = min($values[$name], $excess);
+            $values[$name] -= $reduction;
+            $excess -= $reduction;
         }
 
-        $total = round(array_sum($components) - array_sum($penalties), 2);
-        if ($total > 100) {
-            $components['freshness'] = round($components['freshness'] - ($total - 100), 2);
-            $total = 100.0;
+        return $values;
+    }
+
+    /**
+     * Allocate a capped total proportionally using integer cents and stable largest remainders.
+     *
+     * @param  array<string,int>  $values
+     * @return array<string,int>
+     */
+    private function allocateCents(array $values, int $target): array
+    {
+        $sourceTotal = array_sum($values);
+        if ($sourceTotal <= $target || $sourceTotal === 0) {
+            return $values;
         }
 
-        return [$components, $penalties, max(0.0, $total)];
+        $allocated = [];
+        $remainders = [];
+        foreach ($values as $name => $value) {
+            $numerator = $value * $target;
+            $allocated[$name] = intdiv($numerator, $sourceTotal);
+            $remainders[$name] = $numerator % $sourceTotal;
+        }
+
+        $order = array_keys($values);
+        usort($order, static fn (string $left, string $right): int => ($remainders[$right] <=> $remainders[$left]) ?: strcmp($left, $right));
+        $remaining = $target - array_sum($allocated);
+        for ($index = 0; $index < $remaining; $index++) {
+            $allocated[$order[$index]]++;
+        }
+
+        return $allocated;
     }
 
     private function sumNullable(Collection $metrics, string $field): int|float|null

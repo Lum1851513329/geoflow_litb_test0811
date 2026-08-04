@@ -104,6 +104,46 @@ class KeywordOpportunityScoringServiceTest extends TestCase
         $this->assertGreaterThan(0, $penalized->penalties['stale_data']);
         $this->assertGreaterThan(0, $penalized->penalties['missing_data']);
         $this->assertLessThan($fresh->total, $penalized->total);
+        $this->assertSame(
+            $penalized->total,
+            round(array_sum($penalized->components) - array_sum($penalized->penalties), 2),
+        );
+    }
+
+    public function test_low_score_penalty_allocation_conserves_every_cent_at_the_zero_floor(): void
+    {
+        $cluster = $this->cluster('non_brand', 'zero-floor');
+        $cluster->update([
+            'search_intent' => 'informational',
+            'coverage_status' => 'covered',
+        ]);
+        $cluster->primaryKeyword->update(['search_intent' => 'informational']);
+        $this->metric($cluster->primaryKeyword, [
+            'period_start' => '2026-01-01',
+            'period_end' => '2026-01-31',
+            'clicks' => 0,
+            'impressions' => 0,
+            'ctr' => 0,
+            'average_position' => null,
+            'cost' => null,
+            'conversions' => null,
+        ]);
+
+        $result = app(KeywordOpportunityScoringService::class)->score(
+            $cluster,
+            $this->period('2026-01-01', '2026-07-31'),
+        );
+
+        $this->assertSame(3.0, round(array_sum($result->components), 2));
+        $this->assertSame(0.0, $result->total);
+        $this->assertSame(
+            $result->total,
+            round(array_sum($result->components) - array_sum($result->penalties), 2),
+        );
+        $this->assertSame(
+            $result->total,
+            (float) KeywordOpportunityScore::query()->where('cluster_id', $cluster->id)->sole()->total_score,
+        );
     }
 
     public function test_branded_and_non_branded_clusters_use_distinct_configured_weights(): void
