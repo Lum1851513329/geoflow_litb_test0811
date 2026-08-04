@@ -11,9 +11,12 @@ use App\Models\KeywordMetric;
 use App\Models\KeywordNode;
 use App\Models\KeywordOpportunityScore;
 use App\Models\KeywordTaxonomy;
+use App\Services\GeoFlow\Keywords\KeywordImportService;
 use Illuminate\Database\QueryException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Storage;
+use InvalidArgumentException;
 use Tests\TestCase;
 
 class KeywordIntelligenceSchemaTest extends TestCase
@@ -273,6 +276,53 @@ class KeywordIntelligenceSchemaTest extends TestCase
         }
 
         $this->assertCount(3, $keyword->metrics()->get());
+    }
+
+    public function test_idempotency_migration_backfills_legacy_batches_and_blocks_replay(): void
+    {
+        Storage::fake('local');
+        $migration = require database_path('migrations/2026_08_03_000002_add_keyword_import_idempotency.php');
+        $migration->down();
+        $library = KeywordLibrary::query()->create(['name' => 'Legacy imports', 'description' => '', 'keyword_count' => 0]);
+        $source = base_path('tests/Fixtures/keywords/category-search-sample.xlsx');
+        $mapping = ['query' => 'keyword', 'clicks' => 'clicks'];
+        $metadata = ['device' => 'desktop'];
+        $legacyBatchId = DB::table('keyword_import_batches')->insertGetId([
+            'library_id' => $library->id,
+            'original_filename' => 'legacy.xlsx',
+            'stored_path' => 'keyword-imports/legacy.xlsx',
+            'file_sha256' => hash_file('sha256', $source),
+            'source_type' => 'search_console',
+            'status' => 'completed',
+            'mapping_json' => json_encode($mapping, JSON_THROW_ON_ERROR),
+            'metadata_json' => json_encode($metadata, JSON_THROW_ON_ERROR),
+            'period_start' => '2026-07-01',
+            'period_end' => '2026-07-31',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $migration->up();
+
+        $legacy = DB::table('keyword_import_batches')->where('id', $legacyBatchId)->first();
+        $this->assertNotNull($legacy->import_config_hash);
+        $this->assertSame(64, strlen($legacy->import_config_hash));
+        $this->assertSame('legacy-'.$legacyBatchId, $legacy->config_scope);
+        try {
+            (new KeywordImportService)->createBatch([
+                'library_id' => $library->id,
+                'source_path' => $source,
+                'original_filename' => 'replay.xlsx',
+                'source_type' => 'search_console',
+                'mapping_json' => $mapping,
+                'metadata_json' => $metadata,
+                'period_start' => '2026-07-01',
+                'period_end' => '2026-07-31',
+            ]);
+            $this->fail('The legacy file and configuration must block replay.');
+        } catch (InvalidArgumentException $exception) {
+            $this->assertStringContainsString('already have a batch', $exception->getMessage());
+        }
     }
 
     private function assertUniqueConstraint(string $table, callable $write): void

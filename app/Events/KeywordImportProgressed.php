@@ -4,10 +4,11 @@ namespace App\Events;
 
 use Illuminate\Broadcasting\PrivateChannel;
 use Illuminate\Contracts\Broadcasting\ShouldBroadcastNow;
+use Illuminate\Contracts\Events\ShouldDispatchAfterCommit;
 use Illuminate\Foundation\Events\Dispatchable;
 use Illuminate\Queue\SerializesModels;
 
-class KeywordImportProgressed implements ShouldBroadcastNow
+class KeywordImportProgressed implements ShouldBroadcastNow, ShouldDispatchAfterCommit
 {
     use Dispatchable;
     use SerializesModels;

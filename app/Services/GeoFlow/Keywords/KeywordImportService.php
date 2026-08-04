@@ -7,8 +7,10 @@ use App\Models\Keyword;
 use App\Models\KeywordImportBatch;
 use App\Models\KeywordImportRow;
 use App\Models\KeywordMetric;
+use DateTimeImmutable;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use InvalidArgumentException;
@@ -47,8 +49,17 @@ class KeywordImportService
         }
 
         $sourceType = $this->requiredString($metadata, 'source_type');
+        $this->assertMaxLength($sourceType, 50, 'The source type');
+        if (preg_match('/^[A-Za-z0-9][A-Za-z0-9._-]*$/', $sourceType) !== 1) {
+            throw new InvalidArgumentException('The source type contains unsupported characters.');
+        }
         $mapping = $this->stringMap($metadata['mapping_json'] ?? []);
         $batchMetadata = is_array($metadata['metadata_json'] ?? null) ? $metadata['metadata_json'] : [];
+        $originalFilename = $this->nullableString($metadata['original_filename'] ?? null) ?? basename($sourcePath);
+        $this->assertMaxLength($originalFilename, 255, 'The original filename');
+        $periodStart = $this->nullableString($metadata['period_start'] ?? null);
+        $periodEnd = $this->nullableString($metadata['period_end'] ?? null);
+        $this->validatePeriod($periodStart, $periodEnd);
         $fileHash = hash_file('sha256', $sourcePath);
         if ($fileHash === false) {
             throw new InvalidArgumentException('The source workbook could not be hashed.');
@@ -59,8 +70,8 @@ class KeywordImportService
             'source_type' => $sourceType,
             'mapping_json' => $mapping,
             'metadata_json' => $batchMetadata,
-            'period_start' => $this->nullableString($metadata['period_start'] ?? null),
-            'period_end' => $this->nullableString($metadata['period_end'] ?? null),
+            'period_start' => $periodStart,
+            'period_end' => $periodEnd,
         ];
         $configHash = hash('sha256', json_encode($this->canonicalize($config), JSON_THROW_ON_ERROR));
 
@@ -77,12 +88,13 @@ class KeywordImportService
         try {
             return KeywordImportBatch::query()->create([
                 'library_id' => (int) $libraryId,
-                'original_filename' => $this->nullableString($metadata['original_filename'] ?? null) ?? basename($sourcePath),
+                'original_filename' => $originalFilename,
                 'stored_path' => $storedPath,
                 'file_sha256' => $fileHash,
                 'import_config_hash' => $configHash,
+                'config_scope' => $configHash,
                 'source_type' => $sourceType,
-                'status' => 'pending',
+                'status' => 'uploaded',
                 'mapping_json' => $mapping,
                 'metadata_json' => $batchMetadata,
                 'period_start' => $config['period_start'],
@@ -105,21 +117,11 @@ class KeywordImportService
 
     public function import(KeywordImportBatch $batch): KeywordImportBatch
     {
-        $batch = KeywordImportBatch::query()->findOrFail($batch->getKey());
-        if ($batch->status === 'completed') {
+        [$batch, $claimed] = $this->claimImport((int) $batch->getKey());
+        if (! $claimed) {
             return $batch;
         }
-        if ($batch->status === 'reverted') {
-            throw new InvalidArgumentException('A reverted keyword import cannot be replayed.');
-        }
-
-        $batch->forceFill([
-            'status' => 'processing',
-            'started_at' => $batch->started_at ?? now(),
-            'completed_at' => null,
-            'error_summary' => null,
-        ])->save();
-        $this->progress($batch);
+        $this->safeProgress($batch);
 
         try {
             $disk = Storage::disk('local');
@@ -127,7 +129,13 @@ class KeywordImportService
                 throw new RuntimeException('The stored workbook is missing.');
             }
 
-            $inspection = ($this->reader ?? new KeywordWorkbookReader)->inspect($disk->path($batch->stored_path));
+            $absolutePath = $disk->path($batch->stored_path);
+            $actualHash = hash_file('sha256', $absolutePath);
+            if ($actualHash === false || ! hash_equals((string) $batch->file_sha256, $actualHash)) {
+                throw new RuntimeException('The stored workbook SHA-256 does not match the import batch.');
+            }
+
+            $inspection = ($this->reader ?? new KeywordWorkbookReader)->inspect($absolutePath);
             $work = [];
             foreach ($inspection['sheets'] as $sheet) {
                 $resolvedMapping = $this->resolveMapping($sheet['headers'], $batch->source_type, $batch->mapping_json ?? []);
@@ -136,34 +144,47 @@ class KeywordImportService
                 }
             }
 
-            $batch->forceFill(['total_count' => count($work)])->save();
+            DB::transaction(function () use ($batch, $work): void {
+                $lockedBatch = KeywordImportBatch::query()->lockForUpdate()->findOrFail($batch->id);
+                if ($lockedBatch->status !== 'processing') {
+                    throw new RuntimeException('The keyword import is no longer processing.');
+                }
+                $lockedBatch->forceFill(['total_count' => count($work)])->save();
+            });
             foreach (array_chunk($work, $this->chunkSize) as $chunk) {
                 DB::transaction(function () use ($batch, $chunk): void {
+                    $lockedBatch = KeywordImportBatch::query()->lockForUpdate()->findOrFail($batch->id);
+                    if ($lockedBatch->status !== 'processing') {
+                        throw new RuntimeException('The keyword import is no longer processing.');
+                    }
                     foreach ($chunk as $item) {
-                        $this->importRow($batch, $item['sheet_name'], $item['row'], $item['mapping']);
+                        $this->importRow($lockedBatch, $item['sheet_name'], $item['row'], $item['mapping']);
                     }
 
-                    $this->refreshCounts($batch);
+                    $this->refreshCounts($lockedBatch);
                 });
-                $this->progress($batch->fresh());
+                $this->safeProgress($batch->fresh());
             }
 
             DB::transaction(function () use ($batch): void {
-                $this->refreshCounts($batch);
-                $batch->library?->forceFill([
-                    'keyword_count' => Keyword::query()->where('library_id', $batch->library_id)->count(),
+                $lockedBatch = KeywordImportBatch::query()->lockForUpdate()->findOrFail($batch->id);
+                if ($lockedBatch->status !== 'processing') {
+                    throw new RuntimeException('The keyword import is no longer processing.');
+                }
+                $this->refreshCounts($lockedBatch);
+                $lockedBatch->library?->forceFill([
+                    'keyword_count' => Keyword::query()->where('library_id', $lockedBatch->library_id)->count(),
                 ])->save();
-                $batch->forceFill(['status' => 'completed', 'completed_at' => now(), 'error_summary' => null])->save();
+                $lockedBatch->forceFill(['status' => 'completed', 'completed_at' => now(), 'error_summary' => null])->save();
             });
-            $this->progress($batch->fresh());
+            $this->safeProgress($batch->fresh());
 
             return $batch->fresh();
         } catch (Throwable $exception) {
-            $batch->fresh()?->forceFill([
-                'status' => 'failed',
-                'error_summary' => mb_substr($exception->getMessage(), 0, 2000),
-            ])->save();
-            $this->progress($batch->fresh());
+            $failedBatch = $this->markFailed((int) $batch->id, $exception);
+            if ($failedBatch) {
+                $this->safeProgress($failedBatch);
+            }
 
             throw $exception;
         }
@@ -197,6 +218,7 @@ class KeywordImportService
 
         try {
             $metadata = $batch->metadata_json ?? [];
+            $this->assertMaxLength((string) $keywordValue, 200, 'The keyword');
             $normalizer = $this->normalizer ?? new KeywordNormalizer;
             $normalized = $normalizer->normalize(
                 (string) $keywordValue,
@@ -209,6 +231,15 @@ class KeywordImportService
             $marketScope = $this->nullableString($metadata['market_scope'] ?? null)
                 ?? $normalized->marketCode
                 ?? 'GLOBAL';
+            $marketScope = strtoupper($marketScope);
+            $device = $this->nullableString($metadata['device'] ?? null);
+            $this->assertMaxLength($normalized->normalized, 200, 'The normalized keyword');
+            $this->assertMaxLength($normalized->languageCode ?? 'en', 10, 'The language code');
+            $this->assertMaxLength($marketScope, 10, 'The market scope');
+            $this->assertMaxLength($device, 30, 'The device');
+            if ($marketScope !== 'GLOBAL' && preg_match('/^[A-Z]{2}$/', $marketScope) !== 1) {
+                throw new InvalidArgumentException('The market scope must be GLOBAL or an ISO country code.');
+            }
             [$periodStart, $periodEnd] = $this->period($this->mappedValue($values, $mapping, 'date_range'), $batch);
             $metricValues = [
                 'clicks' => $this->nullableInteger($this->mappedValue($values, $mapping, 'clicks')),
@@ -280,7 +311,7 @@ class KeywordImportService
                     'period_end' => $periodEnd,
                     'market_code' => $normalized->marketCode,
                     'language_code' => $normalized->languageCode ?? 'en',
-                    'device' => $this->nullableString($metadata['device'] ?? null),
+                    'device' => $device,
                     ...$metricValues,
                     'source_payload' => $values,
                 ]
@@ -350,13 +381,40 @@ class KeywordImportService
     {
         $value = $this->nullableString($value);
         if ($value === null) {
-            return [$batch->period_start?->toDateString(), $batch->period_end?->toDateString()];
+            $periodStart = $batch->period_start?->toDateString();
+            $periodEnd = $batch->period_end?->toDateString();
+            $this->validatePeriod($periodStart, $periodEnd);
+
+            return [$periodStart, $periodEnd];
         }
         if (preg_match('/^(\d{4}-\d{2}-\d{2})\s+(?:-|to)\s+(\d{4}-\d{2}-\d{2})$/i', $value, $matches) !== 1) {
             throw new InvalidArgumentException('The date range must contain ISO start and end dates.');
         }
+        $this->validatePeriod($matches[1], $matches[2]);
 
         return [$matches[1], $matches[2]];
+    }
+
+    private function validatePeriod(?string $periodStart, ?string $periodEnd): void
+    {
+        $start = $periodStart === null ? null : $this->strictDate($periodStart, 'start');
+        $end = $periodEnd === null ? null : $this->strictDate($periodEnd, 'end');
+        if ($start && $end && $start > $end) {
+            throw new InvalidArgumentException('The period start date must not be after the end date.');
+        }
+    }
+
+    private function strictDate(string $value, string $label): DateTimeImmutable
+    {
+        $date = DateTimeImmutable::createFromFormat('!Y-m-d', $value);
+        $errors = DateTimeImmutable::getLastErrors();
+        if (! $date
+            || $date->format('Y-m-d') !== $value
+            || is_array($errors) && ($errors['warning_count'] > 0 || $errors['error_count'] > 0)) {
+            throw new InvalidArgumentException("The period {$label} date must be a real ISO calendar date.");
+        }
+
+        return $date;
     }
 
     private function nullableInteger(mixed $value): ?int
@@ -407,6 +465,13 @@ class KeywordImportService
         return $value === '' ? null : $value;
     }
 
+    private function assertMaxLength(?string $value, int $maximum, string $label): void
+    {
+        if ($value !== null && mb_strlen($value, 'UTF-8') > $maximum) {
+            throw new InvalidArgumentException("{$label} cannot exceed {$maximum} characters.");
+        }
+    }
+
     /** @return array<string,string> */
     private function stringMap(mixed $mapping): array
     {
@@ -436,14 +501,71 @@ class KeywordImportService
         return array_map(fn (mixed $item) => $this->canonicalize($item), $value);
     }
 
-    private function progress(KeywordImportBatch $batch): void
+    /** @return array{0:KeywordImportBatch,1:bool} */
+    private function claimImport(int $batchId): array
     {
-        KeywordImportProgressed::dispatch(
-            (int) $batch->id,
-            (string) $batch->status,
-            (int) $batch->processed_count,
-            (int) $batch->total_count,
-            $batch->error_summary,
-        );
+        return DB::transaction(function () use ($batchId): array {
+            $batch = KeywordImportBatch::query()->lockForUpdate()->findOrFail($batchId);
+            if (in_array($batch->status, ['completed', 'processing'], true)) {
+                return [$batch, false];
+            }
+            if (! in_array($batch->status, ['uploaded', 'pending', 'failed'], true)) {
+                throw new InvalidArgumentException("A keyword import in {$batch->status} status cannot be started.");
+            }
+
+            $batch->forceFill([
+                'status' => 'processing',
+                'started_at' => $batch->started_at ?? now(),
+                'completed_at' => null,
+                'error_summary' => null,
+            ])->save();
+
+            return [$batch, true];
+        });
+    }
+
+    private function markFailed(int $batchId, Throwable $exception): ?KeywordImportBatch
+    {
+        return DB::transaction(function () use ($batchId, $exception): ?KeywordImportBatch {
+            $batch = KeywordImportBatch::query()->lockForUpdate()->find($batchId);
+            if (! $batch || $batch->status !== 'processing') {
+                return $batch;
+            }
+            $batch->forceFill([
+                'status' => 'failed',
+                'error_summary' => mb_substr($exception->getMessage(), 0, 2000),
+            ])->save();
+
+            return $batch;
+        });
+    }
+
+    private function safeProgress(KeywordImportBatch $batch): void
+    {
+        $dispatch = static function () use ($batch): void {
+            try {
+                KeywordImportProgressed::dispatch(
+                    (int) $batch->id,
+                    (string) $batch->status,
+                    (int) $batch->processed_count,
+                    (int) $batch->total_count,
+                    $batch->error_summary,
+                );
+            } catch (Throwable $exception) {
+                Log::warning('Keyword import progress event failed.', [
+                    'batch_id' => $batch->id,
+                    'status' => $batch->status,
+                    'exception' => $exception,
+                ]);
+            }
+        };
+
+        if (DB::transactionLevel() > 0) {
+            DB::afterCommit($dispatch);
+
+            return;
+        }
+
+        $dispatch();
     }
 }

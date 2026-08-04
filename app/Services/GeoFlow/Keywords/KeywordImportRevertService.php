@@ -6,16 +6,23 @@ use App\Events\KeywordImportProgressed;
 use App\Models\Keyword;
 use App\Models\KeywordImportBatch;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+use InvalidArgumentException;
+use Throwable;
 
 class KeywordImportRevertService
 {
     public function revert(KeywordImportBatch $batch): KeywordImportBatch
     {
-        return DB::transaction(function () use ($batch): KeywordImportBatch {
+        $reverted = DB::transaction(function () use ($batch): KeywordImportBatch {
             $batch = KeywordImportBatch::query()->lockForUpdate()->findOrFail($batch->getKey());
             if ($batch->status === 'reverted') {
                 return $batch;
             }
+            if (! in_array($batch->status, ['completed', 'failed'], true)) {
+                throw new InvalidArgumentException("A keyword import in {$batch->status} status cannot be reverted.");
+            }
+            $batch->forceFill(['status' => 'reverting'])->save();
 
             $ownedKeywordIds = $batch->rows()->where('status', 'imported')->whereNotNull('keyword_id')->pluck('keyword_id')->unique();
             $batch->metrics()->delete();
@@ -57,15 +64,31 @@ class KeywordImportRevertService
                 'reverted_at' => now(),
             ])->save();
 
-            KeywordImportProgressed::dispatch(
-                (int) $batch->id,
-                'reverted',
-                (int) $batch->processed_count,
-                (int) $batch->total_count,
-            );
-
             return $batch->fresh();
         });
+
+        $dispatch = static function () use ($reverted): void {
+            try {
+                KeywordImportProgressed::dispatch(
+                    (int) $reverted->id,
+                    'reverted',
+                    (int) $reverted->processed_count,
+                    (int) $reverted->total_count,
+                );
+            } catch (Throwable $exception) {
+                Log::warning('Keyword import revert progress event failed.', [
+                    'batch_id' => $reverted->id,
+                    'exception' => $exception,
+                ]);
+            }
+        };
+        if (DB::transactionLevel() > 0) {
+            DB::afterCommit($dispatch);
+        } else {
+            $dispatch();
+        }
+
+        return $reverted;
     }
 
     /** @return array<int,string> */

@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Events\KeywordImportProgressed;
 use App\Models\Keyword;
 use App\Models\KeywordCluster;
 use App\Models\KeywordLibrary;
@@ -51,7 +52,7 @@ class KeywordImportServiceTest extends TestCase
         $this->assertStringStartsWith('keyword-imports/', $batch->stored_path);
         Storage::disk('local')->assertExists($batch->stored_path);
         $this->assertSame(hash_file('sha256', $source), $batch->file_sha256);
-        $this->assertSame('pending', $batch->status);
+        $this->assertSame('uploaded', $batch->status);
         $this->assertSame(['keyword' => 'keyword', 'clicks' => 'clicks'], $batch->mapping_json);
         $this->assertSame('2026-07-01', $batch->period_start?->toDateString());
 
@@ -135,7 +136,7 @@ class KeywordImportServiceTest extends TestCase
         });
 
         try {
-            (new KeywordImportService(chunkSize: 2))->import($batch);
+            (new KeywordImportService(chunkSize: 1))->import($batch);
             $this->fail('The synthetic chunk failure should escape the import.');
         } catch (RuntimeException $exception) {
             $this->assertSame('synthetic chunk failure', $exception->getMessage());
@@ -143,17 +144,161 @@ class KeywordImportServiceTest extends TestCase
             Event::forget(QueryExecuted::class);
         }
 
-        $this->assertDatabaseCount('keywords', 0);
-        $this->assertDatabaseCount('keyword_import_rows', 0);
-        $this->assertDatabaseCount('keyword_metrics', 0);
+        $this->assertDatabaseCount('keywords', 1);
+        $this->assertDatabaseCount('keyword_import_rows', 1);
+        $this->assertDatabaseCount('keyword_metrics', 1);
+        $firstMetricId = KeywordMetric::query()->sole()->id;
         $this->assertSame('failed', $batch->fresh()->status);
 
-        (new KeywordImportService(chunkSize: 2))->import($batch->fresh());
+        (new KeywordImportService(chunkSize: 1))->import($batch->fresh());
 
         $this->assertDatabaseCount('keywords', 2);
         $this->assertDatabaseCount('keyword_import_rows', 2);
         $this->assertDatabaseCount('keyword_metrics', 2);
+        $this->assertDatabaseHas('keyword_metrics', ['id' => $firstMetricId]);
         $this->assertSame('completed', $batch->fresh()->status);
+    }
+
+    public function test_processing_import_is_not_reentered_and_processing_revert_is_rejected(): void
+    {
+        Storage::fake('local');
+        $library = $this->library();
+        $source = $this->workbook([['Keyword'], ['state guarded dresses']]);
+        $batch = (new KeywordImportService)->createBatch($this->metadata($library, $source));
+        $batch->forceFill(['status' => 'processing'])->save();
+
+        $returned = (new KeywordImportService)->import($batch->fresh());
+
+        $this->assertSame('processing', $returned->status);
+        $this->assertDatabaseCount('keyword_import_rows', 0);
+        $this->assertDatabaseCount('keyword_metrics', 0);
+
+        try {
+            (new KeywordImportRevertService)->revert($batch->fresh());
+            $this->fail('A processing batch cannot be reverted.');
+        } catch (InvalidArgumentException $exception) {
+            $this->assertStringContainsString('processing', $exception->getMessage());
+        }
+        $this->assertSame('processing', $batch->fresh()->status);
+    }
+
+    public function test_invalid_lengths_and_calendar_periods_are_rejected_before_keyword_writes(): void
+    {
+        Storage::fake('local');
+        $library = $this->library();
+        $source = $this->workbook([
+            ['Keyword', 'Language', 'Date Range'],
+            [str_repeat('k', 201), 'en', '2026-07-01 - 2026-07-31'],
+            ['invalid language dresses', 'zh-Hans-CN-extra', '2026-07-01 - 2026-07-31'],
+            ['invalid calendar dresses', 'en', '2026-02-30 - 2026-03-01'],
+            ['reverse period dresses', 'en', '2026-08-31 - 2026-08-01'],
+        ]);
+        $batch = (new KeywordImportService)->createBatch($this->metadata($library, $source, [
+            'language' => 'language',
+            'date_range' => 'date_range',
+        ]));
+
+        (new KeywordImportService)->import($batch);
+
+        $this->assertDatabaseCount('keywords', 0);
+        $this->assertDatabaseCount('keyword_metrics', 0);
+        $this->assertSame(4, $batch->fresh()->rejected_count);
+        $errors = $batch->rows()->pluck('error_message')->implode(' ');
+        $this->assertStringContainsString('200', $errors);
+        $this->assertStringContainsString('10', $errors);
+        $this->assertStringContainsString('calendar', $errors);
+        $this->assertStringContainsString('start', $errors);
+    }
+
+    public function test_overlong_batch_and_metric_dimensions_fail_before_invalid_database_writes(): void
+    {
+        Storage::fake('local');
+        $library = $this->library();
+        $source = $this->workbook([['Keyword'], ['scope guarded dresses']]);
+        try {
+            (new KeywordImportService)->createBatch($this->metadata($library, $source, [], [
+                'source_type' => str_repeat('s', 51),
+            ]));
+            $this->fail('An overlong source type must be rejected before creating a batch.');
+        } catch (InvalidArgumentException $exception) {
+            $this->assertStringContainsString('50', $exception->getMessage());
+        }
+        $this->assertDatabaseCount('keyword_import_batches', 0);
+
+        $batch = (new KeywordImportService)->createBatch($this->metadata($library, $source, [], [
+            'metadata_json' => ['market_scope' => str_repeat('M', 11), 'device' => str_repeat('d', 31)],
+        ]));
+        (new KeywordImportService)->import($batch);
+
+        $this->assertDatabaseCount('keywords', 0);
+        $this->assertSame(1, $batch->fresh()->rejected_count);
+    }
+
+    public function test_progress_listener_failures_do_not_change_completed_or_reverted_states(): void
+    {
+        Storage::fake('local');
+        $library = $this->library();
+        $source = $this->workbook([['Keyword'], ['event safe dresses']]);
+        $batch = (new KeywordImportService)->createBatch($this->metadata($library, $source));
+        Event::listen(KeywordImportProgressed::class, static function (): never {
+            throw new RuntimeException('synthetic broadcast failure');
+        });
+
+        (new KeywordImportService)->import($batch);
+        $this->assertSame('completed', $batch->fresh()->status);
+
+        (new KeywordImportRevertService)->revert($batch->fresh());
+        $this->assertSame('reverted', $batch->fresh()->status);
+        Event::forget(KeywordImportProgressed::class);
+    }
+
+    public function test_after_commit_listener_failure_is_contained_when_import_runs_in_an_outer_transaction(): void
+    {
+        Storage::fake('local');
+        $library = $this->library();
+        $source = $this->workbook([['Keyword'], ['outer transaction dresses']]);
+        $batch = (new KeywordImportService)->createBatch($this->metadata($library, $source));
+        Event::listen(KeywordImportProgressed::class, static function (): never {
+            throw new RuntimeException('outer transaction broadcast failure');
+        });
+
+        DB::beginTransaction();
+        try {
+            (new KeywordImportService)->import($batch);
+            DB::commit();
+        } catch (RuntimeException $exception) {
+            DB::rollBack();
+            $this->fail('The after-commit event escaped: '.$exception->getMessage());
+        } finally {
+            Event::forget(KeywordImportProgressed::class);
+        }
+
+        $this->assertSame('completed', $batch->fresh()->status);
+    }
+
+    public function test_import_rejects_a_replaced_stored_workbook_before_processing_rows(): void
+    {
+        Storage::fake('local');
+        $library = $this->library();
+        $source = $this->workbook([['Keyword'], ['tamper guarded dresses']]);
+        $batch = (new KeywordImportService)->createBatch($this->metadata($library, $source));
+        Storage::disk('local')->put($batch->stored_path, 'replaced workbook bytes');
+        Event::listen(KeywordImportProgressed::class, static function (): never {
+            throw new RuntimeException('failed-state broadcast failure');
+        });
+
+        try {
+            (new KeywordImportService)->import($batch);
+            $this->fail('A workbook whose hash changed must not be imported.');
+        } catch (RuntimeException $exception) {
+            $this->assertStringContainsString('SHA-256', $exception->getMessage());
+        } finally {
+            Event::forget(KeywordImportProgressed::class);
+        }
+
+        $this->assertSame('failed', $batch->fresh()->status);
+        $this->assertDatabaseCount('keyword_import_rows', 0);
+        $this->assertDatabaseCount('keyword_metrics', 0);
     }
 
     public function test_a_rejected_metric_row_does_not_leave_an_orphan_keyword(): void
@@ -268,6 +413,8 @@ class KeywordImportServiceTest extends TestCase
             $this->assertStringContainsString($reference, $reasons);
         }
         $this->assertSame(4, $library->fresh()->keyword_count);
+        $this->assertDatabaseCount('keyword_import_rows', 5);
+        $this->assertSame(5, $batch->rows()->whereIn('status', ['reverted', 'retained_shared'])->count());
     }
 
     private function library(): KeywordLibrary
