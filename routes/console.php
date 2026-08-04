@@ -4,6 +4,7 @@
  * Artisan 自定义命令注册（闭包命令或后续类命令）。
  */
 
+use App\Services\GeoFlow\Keywords\KeywordImportPreviewSession;
 use App\Services\GeoFlow\KnowledgeChunkSyncCoordinator;
 use Illuminate\Foundation\Inspiring;
 use Illuminate\Support\Facades\Artisan;
@@ -52,6 +53,12 @@ Artisan::command('geoflow:prune-expired-cache {--limit=5000}', function (): int 
     return 0;
 })->purpose('Delete expired database cache rows used by rate limiters');
 
+Artisan::command('geoflow:prune-keyword-import-previews', function (KeywordImportPreviewSession $sessions): int {
+    $this->info(sprintf('Pruned keyword import previews: %d', $sessions->pruneExpired()));
+
+    return 0;
+})->purpose('Delete expired private keyword workbook previews');
+
 /**
  * Horizon 监控快照：用于沉淀队列吞吐、等待等时序指标。
  */
@@ -74,6 +81,11 @@ Schedule::command('geoflow:recover-knowledge-syncs')
     ->withoutOverlapping(10);
 
 Schedule::command('geoflow:prune-expired-cache')
+    ->hourly()
+    ->onOneServer()
+    ->withoutOverlapping(10);
+
+Schedule::command('geoflow:prune-keyword-import-previews')
     ->hourly()
     ->onOneServer()
     ->withoutOverlapping(10);

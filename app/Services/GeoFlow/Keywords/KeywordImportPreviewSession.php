@@ -7,6 +7,7 @@ use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use InvalidArgumentException;
+use RuntimeException;
 use Throwable;
 
 final class KeywordImportPreviewSession
@@ -24,7 +25,7 @@ final class KeywordImportPreviewSession
         $path = 'keyword-import-previews/'.Str::uuid().'.xlsx';
         $contents = file_get_contents($file->getRealPath());
         if ($contents === false || ! Storage::disk('local')->put($path, $contents)) {
-            throw new InvalidArgumentException('keyword_import.preview_store_failed');
+            throw new RuntimeException('keyword_import.preview_store_failed');
         }
 
         try {
@@ -35,7 +36,7 @@ final class KeywordImportPreviewSession
             $preview = $this->preview->build($absolutePath, $sourceType, $resolvedMapping);
             $hash = hash_file('sha256', $absolutePath);
             if ($hash === false) {
-                throw new InvalidArgumentException('keyword_import.preview_hash_failed');
+                throw new RuntimeException('keyword_import.preview_hash_failed');
             }
 
             return [
@@ -92,15 +93,18 @@ final class KeywordImportPreviewSession
         }
     }
 
-    private function pruneExpired(): void
+    public function pruneExpired(): int
     {
         $disk = Storage::disk('local');
         $cutoff = now()->subMinutes(30)->timestamp;
+        $deleted = 0;
         foreach ($disk->files('keyword-import-previews') as $path) {
             if (preg_match('#^keyword-import-previews/[0-9a-f-]{36}\.xlsx$#i', $path) === 1 && $disk->lastModified($path) < $cutoff) {
-                $disk->delete($path);
+                $deleted += $disk->delete($path) ? 1 : 0;
             }
         }
+
+        return $deleted;
     }
 
     /** @param array<string,string> $suggested @param array<string,string> $explicit @param list<string> $headers */
@@ -108,7 +112,7 @@ final class KeywordImportPreviewSession
     {
         $resolved = $suggested;
         foreach ($explicit as $header => $field) {
-            if (! in_array($header, $headers, true)) {
+            if (! is_string($field) || $field === '' || ! in_array($header, $headers, true)) {
                 continue;
             }
             foreach ($resolved as $existingHeader => $existingField) {

@@ -20,7 +20,7 @@ class PreviewKeywordImportRequest extends FormRequest
             'workbook' => ['required', 'file', 'mimes:xlsx', 'max:'.(int) config('keyword_intelligence.import.max_file_size_kb', 20480)],
             'source_type' => ['required', 'string', 'max:50', 'regex:/^[A-Za-z0-9][A-Za-z0-9._-]*$/'],
             'mapping' => ['nullable', 'array'],
-            'mapping.*' => ['string', 'in:keyword,clicks,impressions,ctr,position,country,language,date_range,cost,conversions'],
+            'mapping.*' => ['nullable', 'string', 'in:keyword,clicks,impressions,ctr,position,country,language,date_range,cost,conversions'],
         ];
     }
 
@@ -36,7 +36,7 @@ class PreviewKeywordImportRequest extends FormRequest
             if (! is_array($mapping)) {
                 return;
             }
-            $targets = array_values(array_filter($mapping, 'is_string'));
+            $targets = array_values(array_filter($mapping, static fn (mixed $value): bool => is_string($value) && $value !== ''));
             if (count($targets) !== count(array_unique($targets))) {
                 $validator->errors()->add('mapping', __('admin.keyword_intelligence.validation.duplicate_mapping'));
             }

@@ -29,8 +29,10 @@ use DomainException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
 use Illuminate\View\View;
 use InvalidArgumentException;
+use Throwable;
 
 class KeywordIntelligenceController extends Controller
 {
@@ -66,6 +68,10 @@ class KeywordIntelligenceController extends Controller
             $result = $session->begin($request->file('workbook'), $request->validated('source_type'), $request->validated('mapping', []));
         } catch (InvalidArgumentException) {
             return back()->withErrors(['workbook' => __('admin.keyword_intelligence.validation.workbook_invalid')]);
+        } catch (Throwable $exception) {
+            report($exception);
+
+            return back()->withErrors(['workbook' => __('admin.keyword_intelligence.validation.preview_failed')]);
         }
 
         return view('admin.keyword-intelligence.import', $this->importViewData($result['preview']) + [
@@ -93,9 +99,20 @@ class KeywordIntelligenceController extends Controller
             ]);
         } catch (InvalidArgumentException) {
             return back()->withErrors(['preview_token' => __('admin.keyword_intelligence.validation.preview_token_invalid')]);
+        } catch (Throwable $exception) {
+            report($exception);
+
+            return back()->withErrors(['preview_token' => __('admin.keyword_intelligence.validation.import_failed')]);
         }
         $session->forget($preview['path']);
-        ImportKeywordWorkbookJob::dispatch($batch->id);
+        try {
+            ImportKeywordWorkbookJob::dispatch($batch->id);
+        } catch (Throwable $exception) {
+            $batch->forceFill(['status' => 'failed', 'error_summary' => __('admin.keyword_intelligence.validation.dispatch_failed')])->save();
+            Log::error('Keyword import dispatch failed.', ['batch_id' => $batch->id, 'exception' => $exception]);
+
+            return back()->withErrors(['preview_token' => __('admin.keyword_intelligence.validation.dispatch_failed')]);
+        }
 
         return redirect()->route('admin.keyword-intelligence.index')->with('message', __('admin.keyword_intelligence.messages.import_queued'));
     }
@@ -174,18 +191,21 @@ class KeywordIntelligenceController extends Controller
 
     public function clusters(Request $request, KeywordClusterSuggestionService $suggestions, KeywordClusterCandidateToken $tokens): View
     {
-        $candidateKeywords = Keyword::query()->where('status', 'active')->whereDoesntHave('clusters')->with('taxonomyNodes')->orderBy('id')->limit(500);
+        $candidateKeywords = Keyword::query()->where('status', 'active')->with('taxonomyNodes')->orderBy('id')->limit(500);
         foreach (['language' => 'language_code', 'market' => 'market_scope'] as $input => $column) {
             if ($request->filled($input)) {
                 $candidateKeywords->where($column, $request->string($input)->toString());
             }
         }
 
+        $candidates = collect($suggestions->suggest($candidateKeywords->get()))
+            ->reject(fn (array $suggestion): bool => $this->hasActivePrimaryConflict($suggestion));
+
         return view('admin.keyword-intelligence.clusters', [
             'pageTitle' => __('admin.keyword_intelligence.clusters.title'),
             'activeMenu' => 'materials',
             'clusters' => KeywordCluster::query()->with('primaryKeyword')->latest()->paginate(20),
-            'suggestions' => collect($suggestions->suggest($candidateKeywords->get()))->map(fn (array $suggestion): array => ['data' => $suggestion, 'token' => $tokens->issue($suggestion)])->all(),
+            'suggestions' => $candidates->map(fn (array $suggestion): array => ['data' => $suggestion, 'token' => $tokens->issue($suggestion)])->values()->all(),
         ]);
     }
 
@@ -221,5 +241,17 @@ class KeywordIntelligenceController extends Controller
     private function importViewData(?array $preview = null): array
     {
         return ['pageTitle' => __('admin.keyword_intelligence.import.title'), 'activeMenu' => 'materials', 'libraries' => KeywordLibrary::query()->orderBy('name')->get(), 'preview' => $preview];
+    }
+
+    /** @param array<string,mixed> $suggestion */
+    private function hasActivePrimaryConflict(array $suggestion): bool
+    {
+        return KeywordCluster::query()
+            ->where('primary_keyword_id', $suggestion['primary_keyword_id'])
+            ->where('status', 'active')
+            ->where('language_code', $suggestion['language_code'])
+            ->where('market_scope', $suggestion['market_scope'])
+            ->where('market_code', $suggestion['market_code'])
+            ->exists();
     }
 }

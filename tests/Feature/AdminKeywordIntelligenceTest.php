@@ -13,13 +13,17 @@ use App\Models\KeywordNode;
 use App\Models\KeywordTaxonomy;
 use App\Services\GeoFlow\Keywords\KeywordClusterCandidateToken;
 use App\Services\GeoFlow\Keywords\KeywordClusterSuggestionService;
+use App\Services\GeoFlow\Keywords\KeywordImportPreviewSession;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Foundation\Http\Middleware\ValidateCsrfToken;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
+use InvalidArgumentException;
+use RuntimeException;
 use Tests\TestCase;
 
 class AdminKeywordIntelligenceTest extends TestCase
@@ -86,6 +90,7 @@ class AdminKeywordIntelligenceTest extends TestCase
         ])->assertRedirect();
 
         $batch = KeywordImportBatch::query()->sole();
+        $this->assertSame($previewResponse->viewData('resolvedMapping'), $batch->mapping_json);
         $this->assertStringStartsWith('keyword-imports/', $batch->stored_path);
         $this->assertStringNotContainsString('client-name', $batch->stored_path);
         Storage::disk('local')->assertExists($batch->stored_path);
@@ -216,7 +221,10 @@ class AdminKeywordIntelligenceTest extends TestCase
         $admin = $this->admin();
         $routes = [
             route('admin.keyword-intelligence.import.preview'),
+            route('admin.keyword-intelligence.import.confirm'),
             route('admin.keyword-intelligence.taxonomy.nodes.store'),
+            route('admin.keyword-intelligence.taxonomy.nodes.move'),
+            route('admin.keyword-intelligence.taxonomy.nodes.assign', 999999),
             route('admin.keyword-intelligence.clusters.confirm'),
             route('admin.keyword-intelligence.clusters.score', 999999),
             route('admin.keyword-intelligence.import.revert', 999999),
@@ -230,6 +238,85 @@ class AdminKeywordIntelligenceTest extends TestCase
             $response = $this->actingAs($admin, 'admin')->post($route, ['_token' => session()->token()]);
             $this->assertNotSame(419, $response->getStatusCode());
         }
+    }
+
+    public function test_secondary_keyword_already_in_a_cluster_remains_eligible_but_active_primary_conflicts_are_hidden(): void
+    {
+        $taxonomy = KeywordTaxonomy::query()->create(['name' => 'Products', 'slug' => 'products', 'status' => 'active']);
+        $node = KeywordNode::query()->create(['taxonomy_id' => $taxonomy->id, 'name' => 'Shoes', 'slug' => 'shoes', 'path' => 'shoes', 'depth' => 0, 'sort_order' => 0]);
+        $library = $this->library();
+        $existingPrimary = Keyword::query()->create(['library_id' => $library->id, 'keyword' => 'running shoes', 'normalized_keyword' => 'running shoes', 'language_code' => 'en', 'market_scope' => 'GLOBAL', 'keyword_type' => 'category', 'search_intent' => 'commercial', 'brand_relation' => 'non_brand', 'status' => 'active']);
+        $reusableSecondary = Keyword::query()->create(['library_id' => $library->id, 'keyword' => 'walking shoes', 'normalized_keyword' => 'walking shoes', 'language_code' => 'en', 'market_scope' => 'GLOBAL', 'keyword_type' => 'category', 'search_intent' => 'commercial', 'brand_relation' => 'non_brand', 'status' => 'active']);
+        $node->keywords()->attach($existingPrimary->id, ['is_primary' => true]);
+        $node->keywords()->attach($reusableSecondary->id, ['is_primary' => true]);
+        $cluster = KeywordCluster::query()->create(['name' => 'Existing Running Shoes', 'slug' => 'existing-running-shoes', 'taxonomy_node_id' => $node->id, 'primary_keyword_id' => $existingPrimary->id, 'primary_scope_key' => hash('sha256', "{$existingPrimary->id}|en|GLOBAL"), 'language_code' => 'en', 'market_scope' => 'GLOBAL', 'search_intent' => 'commercial', 'status' => 'active', 'confirmed_at' => now()]);
+        $cluster->memberships()->create(['keyword_id' => $reusableSecondary->id, 'role' => 'secondary', 'sort_order' => 1]);
+
+        $response = $this->actingAs($this->admin(), 'admin')->get(route('admin.keyword-intelligence.clusters'))->assertOk();
+        $response->assertSee('Walking Shoes')->assertDontSee('Running Shoes</h3>', false);
+    }
+
+    public function test_preview_session_rejects_expired_scope_hash_and_path_tampering_and_deletes_expired_file(): void
+    {
+        Storage::fake('local');
+        $session = app(KeywordImportPreviewSession::class);
+        $validPath = 'keyword-import-previews/11111111-1111-4111-8111-111111111111.xlsx';
+        Storage::disk('local')->put($validPath, 'original');
+        $payload = ['path' => $validPath, 'sha256' => hash('sha256', 'original'), 'original_filename' => 'safe.xlsx', 'source_type' => 'gsc', 'expires_at' => now()->addMinute()->timestamp];
+
+        foreach ([
+            [array_merge($payload, ['source_type' => 'other']), 'gsc'],
+            [array_merge($payload, ['path' => 'keyword-import-previews/../../secret.xlsx']), 'gsc'],
+            [array_merge($payload, ['sha256' => str_repeat('0', 64)]), 'gsc'],
+        ] as [$tampered, $sourceType]) {
+            try {
+                $session->resolve(Crypt::encryptString(json_encode($tampered, JSON_THROW_ON_ERROR)), $sourceType);
+                $this->fail('Tampered preview token was accepted.');
+            } catch (InvalidArgumentException) {
+                $this->addToAssertionCount(1);
+            }
+        }
+
+        $expired = $payload;
+        $expired['expires_at'] = now()->subSecond()->timestamp;
+        try {
+            $session->resolve(Crypt::encryptString(json_encode($expired, JSON_THROW_ON_ERROR)), 'gsc');
+            $this->fail('Expired preview token was accepted.');
+        } catch (InvalidArgumentException) {
+            Storage::disk('local')->assertMissing($validPath);
+        }
+    }
+
+    public function test_scheduled_command_prunes_abandoned_preview_files(): void
+    {
+        Storage::fake('local');
+        Storage::disk('local')->put('keyword-import-previews/22222222-2222-4222-8222-222222222222.xlsx', 'old');
+        $this->travel(31)->minutes();
+
+        $this->artisan('geoflow:prune-keyword-import-previews')->assertSuccessful()->expectsOutputToContain('Pruned keyword import previews: 1');
+        Storage::disk('local')->assertMissing('keyword-import-previews/22222222-2222-4222-8222-222222222222.xlsx');
+    }
+
+    public function test_queue_dispatch_failure_marks_the_persisted_batch_failed_and_returns_a_form_error(): void
+    {
+        Storage::fake('local');
+        $fixture = base_path('tests/Fixtures/keywords/category-search-sample.xlsx');
+        $preview = app(KeywordImportPreviewSession::class)->begin(
+            new UploadedFile($fixture, 'queue-failure.xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', null, true),
+            'gsc',
+            [],
+        );
+        Queue::shouldReceive('connection')->once()->andThrow(new RuntimeException('queue unavailable'));
+
+        $this->actingAs($this->admin(), 'admin')->post(route('admin.keyword-intelligence.import.confirm'), [
+            'preview_token' => $preview['token'], 'library_id' => $this->library()->id, 'source_type' => 'gsc', 'mapping' => $preview['resolved_mapping'],
+        ])->assertSessionHasErrors('preview_token');
+
+        $batch = KeywordImportBatch::query()->sole();
+        $this->assertSame('failed', $batch->status);
+        $this->assertSame(__('admin.keyword_intelligence.validation.dispatch_failed'), $batch->error_summary);
+        Storage::disk('local')->assertExists($batch->stored_path);
+        Storage::disk('local')->assertMissing(json_decode(Crypt::decryptString($preview['token']), true)['path']);
     }
 
     public function test_taxonomy_and_scoring_domain_failures_return_localized_form_errors(): void
