@@ -54,7 +54,8 @@ class MoveKeywordNodeRequest extends FormRequest
             $subtreeDepth = (int) KeywordNode::query()
                 ->where('taxonomy_id', $node->taxonomy_id)
                 ->where(function ($query) use ($node): void {
-                    $query->where('path', $node->path)->orWhere('path', 'like', $node->path.'/%');
+                    $path = (string) $node->path;
+                    $query->where('path', $path)->orWhereRaw("path LIKE ? ESCAPE '\\'", [$this->descendantPathPattern($path)]);
                 })
                 ->max('depth');
             $height = $subtreeDepth - (int) $node->depth;
@@ -67,5 +68,10 @@ class MoveKeywordNodeRequest extends FormRequest
     private function maximumDepth(): int
     {
         return max(0, (int) config('geoflow.keyword_taxonomy_max_depth', 5));
+    }
+
+    private function descendantPathPattern(string $path): string
+    {
+        return str_replace(['\\', '%', '_'], ['\\\\', '\\%', '\\_'], $path).'/%';
     }
 }

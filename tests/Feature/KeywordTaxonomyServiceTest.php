@@ -5,6 +5,7 @@ namespace Tests\Feature;
 use App\Models\Keyword;
 use App\Models\KeywordCluster;
 use App\Models\KeywordLibrary;
+use App\Models\KeywordNode;
 use App\Models\KeywordTaxonomy;
 use App\Services\GeoFlow\Keywords\KeywordTaxonomyService;
 use DomainException;
@@ -126,6 +127,63 @@ class KeywordTaxonomyServiceTest extends TestCase
         ]);
 
         $this->assertDomainError('keyword_taxonomy.delete_has_clusters', fn () => $service->deleteNode($referenced));
+    }
+
+    public function test_reports_stable_domain_errors_for_missing_taxonomies_nodes_and_parents(): void
+    {
+        $service = app(KeywordTaxonomyService::class);
+        $missingTaxonomy = new KeywordTaxonomy;
+        $missingTaxonomy->setAttribute('id', 999999);
+        $this->assertDomainError('keyword_taxonomy.taxonomy_not_found', fn () => $service->createNode($missingTaxonomy, ['name' => 'Missing']));
+
+        $missingNode = new KeywordNode;
+        $missingNode->setAttribute('id', 999999);
+        $this->assertDomainError('keyword_taxonomy.node_not_found', fn () => $service->assignKeywords($missingNode, []));
+
+        $taxonomy = $this->taxonomy();
+        $node = $service->createNode($taxonomy, ['name' => 'Node']);
+        $this->assertDomainError('keyword_taxonomy.parent_not_found', fn () => $service->createNode($taxonomy, [
+            'name' => 'Missing Parent',
+            'parent_id' => 999999,
+        ]));
+
+        $vanishedParent = $service->createNode($taxonomy, ['name' => 'Vanished Parent']);
+        $vanishedParent->delete();
+        $this->assertDomainError('keyword_taxonomy.parent_not_found', fn () => $service->moveNode($node, $vanishedParent, 0));
+    }
+
+    public function test_move_escapes_like_metacharacters_when_selecting_a_legacy_subtree(): void
+    {
+        $taxonomy = $this->taxonomy();
+        $service = app(KeywordTaxonomyService::class);
+        $branch = KeywordNode::query()->create([
+            'taxonomy_id' => $taxonomy->id,
+            'name' => 'Legacy branch',
+            'slug' => 'legacy-branch',
+            'path' => 'legacy%_\\root',
+            'depth' => 0,
+        ]);
+        $child = KeywordNode::query()->create([
+            'taxonomy_id' => $taxonomy->id,
+            'parent_id' => $branch->id,
+            'name' => 'Child',
+            'slug' => 'child',
+            'path' => 'legacy%_\\root/child',
+            'depth' => 1,
+        ]);
+        $unrelated = KeywordNode::query()->create([
+            'taxonomy_id' => $taxonomy->id,
+            'name' => 'Unrelated legacy record',
+            'slug' => 'unrelated-legacy-record',
+            'path' => 'legacyZA\\root/unrelated',
+            'depth' => 1,
+        ]);
+        $destination = $service->createNode($taxonomy, ['name' => 'Destination']);
+
+        $service->moveNode($branch, $destination, 0);
+
+        $this->assertSame('destination/legacy-branch/child', $child->fresh()->path);
+        $this->assertSame('legacyZA\\root/unrelated', $unrelated->fresh()->path);
     }
 
     private function taxonomy(string $name = 'Apparel'): KeywordTaxonomy

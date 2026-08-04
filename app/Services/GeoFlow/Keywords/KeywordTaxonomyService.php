@@ -16,7 +16,7 @@ class KeywordTaxonomyService
     public function createNode(KeywordTaxonomy $taxonomy, array $data): KeywordNode
     {
         return DB::transaction(function () use ($taxonomy, $data): KeywordNode {
-            $taxonomy = KeywordTaxonomy::query()->lockForUpdate()->findOrFail($taxonomy->getKey());
+            $taxonomy = $this->lockedTaxonomy($taxonomy);
             $parent = $this->lockedParent($data['parent_id'] ?? null);
             if ($parent && (int) $parent->taxonomy_id !== (int) $taxonomy->id) {
                 $this->reject('parent_cross_taxonomy');
@@ -47,9 +47,9 @@ class KeywordTaxonomyService
     public function moveNode(KeywordNode $node, ?KeywordNode $parent, int $sortOrder): KeywordNode
     {
         return DB::transaction(function () use ($node, $parent, $sortOrder): KeywordNode {
-            $node = KeywordNode::query()->lockForUpdate()->findOrFail($node->getKey());
+            $node = $this->lockedNode($node);
             $parent = $parent
-                ? KeywordNode::query()->lockForUpdate()->findOrFail($parent->getKey())
+                ? $this->lockedExistingParent($parent)
                 : null;
             if ($parent && (int) $parent->taxonomy_id !== (int) $node->taxonomy_id) {
                 $this->reject('parent_cross_taxonomy');
@@ -62,11 +62,7 @@ class KeywordTaxonomyService
             }
 
             /** @var Collection<int,KeywordNode> $subtree */
-            $subtree = KeywordNode::query()
-                ->where('taxonomy_id', $node->taxonomy_id)
-                ->where(function ($query) use ($node): void {
-                    $query->where('path', $node->path)->orWhere('path', 'like', $node->path.'/%');
-                })
+            $subtree = $this->subtreeQuery($node)
                 ->orderBy('depth')
                 ->lockForUpdate()
                 ->get();
@@ -101,7 +97,7 @@ class KeywordTaxonomyService
     public function assignKeywords(KeywordNode $node, array $keywordIds, ?int $primaryKeywordId = null): void
     {
         DB::transaction(function () use ($node, $keywordIds, $primaryKeywordId): void {
-            $node = KeywordNode::query()->lockForUpdate()->findOrFail($node->getKey());
+            $node = $this->lockedNode($node);
             $keywordIds = $this->keywordIds($keywordIds);
             if ($primaryKeywordId !== null && ! in_array($primaryKeywordId, $keywordIds, true)) {
                 $this->reject('primary_keyword_not_assigned');
@@ -125,7 +121,7 @@ class KeywordTaxonomyService
     public function deleteNode(KeywordNode $node): void
     {
         DB::transaction(function () use ($node): void {
-            $node = KeywordNode::query()->lockForUpdate()->findOrFail($node->getKey());
+            $node = $this->lockedNode($node);
             if ($node->children()->lockForUpdate()->exists()) {
                 $this->reject('delete_has_children');
             }
@@ -145,7 +141,42 @@ class KeywordTaxonomyService
             $this->reject('parent_not_found');
         }
 
-        return KeywordNode::query()->lockForUpdate()->findOrFail((int) $parentId);
+        return KeywordNode::query()->lockForUpdate()->whereKey((int) $parentId)->first()
+            ?? $this->reject('parent_not_found');
+    }
+
+    private function lockedTaxonomy(KeywordTaxonomy $taxonomy): KeywordTaxonomy
+    {
+        return KeywordTaxonomy::query()->lockForUpdate()->whereKey($taxonomy->getKey())->first()
+            ?? $this->reject('taxonomy_not_found');
+    }
+
+    private function lockedNode(KeywordNode $node): KeywordNode
+    {
+        return KeywordNode::query()->lockForUpdate()->whereKey($node->getKey())->first()
+            ?? $this->reject('node_not_found');
+    }
+
+    private function lockedExistingParent(KeywordNode $parent): KeywordNode
+    {
+        return KeywordNode::query()->lockForUpdate()->whereKey($parent->getKey())->first()
+            ?? $this->reject('parent_not_found');
+    }
+
+    private function subtreeQuery(KeywordNode $node)
+    {
+        $path = (string) $node->path;
+
+        return KeywordNode::query()
+            ->where('taxonomy_id', $node->taxonomy_id)
+            ->where(function ($query) use ($path): void {
+                $query->where('path', $path)->orWhereRaw("path LIKE ? ESCAPE '\\'", [$this->descendantPathPattern($path)]);
+            });
+    }
+
+    private function descendantPathPattern(string $path): string
+    {
+        return str_replace(['\\', '%', '_'], ['\\\\', '\\%', '\\_'], $path).'/%';
     }
 
     private function assertSlugAvailable(KeywordTaxonomy $taxonomy, string $slug): void
