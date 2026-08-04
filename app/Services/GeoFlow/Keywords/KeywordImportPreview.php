@@ -46,7 +46,10 @@ final class KeywordImportPreview
                 if (! is_string($keyword) || trim($keyword) === '') {
                     $counts['rejected_rows']++;
                     if (count($rejectedSamples) < $this->maxSamples) {
-                        $rejectedSamples[] = $payload + ['reason' => 'The keyword cannot be blank.'];
+                        $rejectedSamples[] = $payload + [
+                            'reason_key' => 'blank_keyword',
+                            'reason' => 'The keyword cannot be blank.',
+                        ];
                     }
 
                     continue;
@@ -61,7 +64,10 @@ final class KeywordImportPreview
                 } catch (InvalidArgumentException $exception) {
                     $counts['rejected_rows']++;
                     if (count($rejectedSamples) < $this->maxSamples) {
-                        $rejectedSamples[] = $payload + ['reason' => $exception->getMessage()];
+                        $rejectedSamples[] = $payload + [
+                            'reason_key' => 'invalid_keyword_context',
+                            'reason' => $exception->getMessage(),
+                        ];
                     }
 
                     continue;

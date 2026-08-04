@@ -59,6 +59,70 @@ class KeywordWorkbookReaderTest extends TestCase
         $this->assertSame('formal dresses', $inspection['sheets'][0]['rows'][0]['values']['keyword']);
     }
 
+    public function test_chunked_reads_preserve_physical_rows_across_chunk_boundaries(): void
+    {
+        $path = $this->makeWorkbook([
+            ['Report metadata'],
+            ['More metadata'],
+            ['Keyword', 'Clicks'],
+            ['formal dresses', 42],
+            ['prom dresses', 21],
+        ]);
+
+        $inspection = (new KeywordWorkbookReader(chunkRows: 1))->inspect($path);
+
+        $this->assertSame([4, 5], array_column($inspection['sheets'][0]['rows'], 'row_number'));
+    }
+
+    public function test_it_rejects_a_low_confidence_keyword_candidate_after_the_first_row(): void
+    {
+        $path = $this->makeWorkbook([
+            ['Report metadata'],
+            ['Keyword'],
+            ['formal dresses'],
+        ]);
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('recognizable header');
+        (new KeywordWorkbookReader)->inspect($path);
+    }
+
+    public function test_it_keeps_first_row_keyword_only_workbooks_compatible(): void
+    {
+        $path = $this->makeWorkbook([
+            ['Keyword'],
+            ['formal dresses'],
+        ]);
+
+        $inspection = (new KeywordWorkbookReader)->inspect($path);
+
+        $this->assertSame(['keyword'], $inspection['sheets'][0]['headers']);
+        $this->assertSame(2, $inspection['sheets'][0]['rows'][0]['row_number']);
+    }
+
+    public function test_it_enforces_a_cumulative_workbook_data_cell_budget(): void
+    {
+        $path = $this->makeWorkbook([
+            ['Keyword', 'Clicks'],
+            ['formal dresses', 42],
+            ['prom dresses', 21],
+        ], sheetCount: 2);
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('data cell budget');
+        (new KeywordWorkbookReader(maxDataCells: 7))->inspect($path);
+    }
+
+    public function test_it_rejects_a_near_fifty_thousand_by_ten_dimension_before_data_chunks_are_loaded(): void
+    {
+        $path = $this->makeWorkbook([['Keyword', 'Clicks']]);
+        $this->replaceWorksheetDimension($path, 'A1:J50001');
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('data cell budget');
+        (new KeywordWorkbookReader(maxDataCells: 499_999))->inspect($path);
+    }
+
     public function test_it_rejects_ambiguous_or_missing_headers_with_clear_errors(): void
     {
         $ambiguous = $this->makeWorkbook([
@@ -90,6 +154,8 @@ class KeywordWorkbookReaderTest extends TestCase
         $this->assertGreaterThanOrEqual(35_000, config('keyword_intelligence.workbook.max_rows_per_sheet'));
         $this->assertLessThanOrEqual(100_000, config('keyword_intelligence.workbook.max_rows_per_sheet'));
         $this->assertLessThanOrEqual(20, config('keyword_intelligence.workbook.header_scan_rows'));
+        $this->assertSame(500_000, config('keyword_intelligence.workbook.max_data_cells'));
+        $this->assertGreaterThan(0, config('keyword_intelligence.workbook.chunk_rows'));
         $this->assertLessThan(
             config('keyword_intelligence.workbook.max_rows_per_sheet'),
             config('keyword_intelligence.workbook.max_sample_rows'),
@@ -307,5 +373,23 @@ class KeywordWorkbookReaderTest extends TestCase
         $this->assertTrue($archive->close());
 
         return $path;
+    }
+
+    private function replaceWorksheetDimension(string $path, string $dimension): void
+    {
+        $archive = new ZipArchive;
+        $this->assertTrue($archive->open($path));
+        $xml = $archive->getFromName('xl/worksheets/sheet1.xml');
+        $this->assertIsString($xml);
+        $updated = preg_replace('/<dimension ref="[^"]+"\/>/', '<dimension ref="'.$dimension.'"/>', $xml, 1, $count);
+        $this->assertSame(1, $count);
+        $this->assertIsString($updated);
+        $updated = str_replace(
+            '</sheetData>',
+            '<row r="50001"><c r="J50001" t="inlineStr"><is><t>boundary</t></is></c></row></sheetData>',
+            $updated,
+        );
+        $this->assertTrue($archive->addFromString('xl/worksheets/sheet1.xml', $updated));
+        $this->assertTrue($archive->close());
     }
 }

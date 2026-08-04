@@ -98,6 +98,25 @@ class KeywordColumnMapperTest extends TestCase
         ]);
     }
 
+    public function test_preview_rejections_include_stable_reason_keys_and_physical_rows(): void
+    {
+        $path = $this->makeWorkbook([
+            ['Keyword', 'Language'],
+            ['formal dresses', 'not-a-valid-language-code'],
+            [' ', 'en'],
+        ]);
+
+        $preview = (new KeywordImportPreview)->build($path, 'google_search_console', []);
+
+        $this->assertSame([
+            ['row_number' => 2, 'reason_key' => 'invalid_keyword_context'],
+            ['row_number' => 3, 'reason_key' => 'blank_keyword'],
+        ], array_map(static fn (array $sample): array => [
+            'row_number' => $sample['row_number'],
+            'reason_key' => $sample['reason_key'],
+        ], $preview['rejected_samples']));
+    }
+
     /** @param array<int,array<int,string>> $rows */
     private function makeWorkbook(array $rows): string
     {

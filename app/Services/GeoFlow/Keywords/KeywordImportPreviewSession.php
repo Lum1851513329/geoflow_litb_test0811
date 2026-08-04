@@ -32,6 +32,7 @@ final class KeywordImportPreviewSession
             $absolutePath = Storage::disk('local')->path($path);
             $inspection = $this->reader->inspect($absolutePath);
             $headers = $inspection['sheets'][0]['headers'] ?? [];
+            unset($inspection);
             $resolvedMapping = $this->resolveMapping($this->mapper->suggest($headers, $sourceType), $mapping, $headers);
             $preview = $this->preview->build($absolutePath, $sourceType, $resolvedMapping);
             $hash = hash_file('sha256', $absolutePath);

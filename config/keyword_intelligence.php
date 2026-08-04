@@ -9,6 +9,8 @@ return [
         'max_columns_per_sheet' => 50,
         'max_sample_rows' => 10,
         'header_scan_rows' => 10,
+        'chunk_rows' => 5_000,
+        'max_data_cells' => 500_000,
         'max_zip_entries' => 2_048,
         'max_uncompressed_bytes' => 104_857_600,
         'max_entry_uncompressed_bytes' => 26_214_400,

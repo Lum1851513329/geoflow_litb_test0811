@@ -143,6 +143,7 @@ class KeywordImportService
                     $work[] = ['sheet_name' => $sheet['name'], 'row' => $row, 'mapping' => $resolvedMapping];
                 }
             }
+            unset($inspection);
 
             DB::transaction(function () use ($batch, $work): void {
                 $lockedBatch = KeywordImportBatch::query()->lockForUpdate()->findOrFail($batch->id);
