@@ -9,11 +9,12 @@ use Tests\TestCase;
 
 class AdminPtBrLocaleCoverageTest extends TestCase
 {
+    private const KEYWORD_INTELLIGENCE_NATURAL_COGNATES = ['columns.cluster', 'columns.status'];
+
     public function test_pt_br_covers_all_current_admin_translation_keys(): void
     {
         $english = require lang_path('en/admin.php');
         $overlay = $this->loadLocaleOverlay('pt_BR');
-        $naturalCognates = ['columns.cluster', 'columns.status'];
 
         $missingKeys = array_values(array_diff(
             $this->flattenLeafKeys($english),
@@ -79,7 +80,7 @@ class AdminPtBrLocaleCoverageTest extends TestCase
         foreach (Arr::dot($english['keyword_intelligence']) as $key => $englishValue) {
             $portugueseValue = data_get($overlay, 'keyword_intelligence.'.$key);
             $this->assertIsString($portugueseValue, "pt_BR keyword intelligence key [{$key}] must be a string.");
-            if (! in_array($key, $naturalCognates, true)) {
+            if (! in_array($key, self::KEYWORD_INTELLIGENCE_NATURAL_COGNATES, true)) {
                 $this->assertNotSame($englishValue, $portugueseValue, "pt_BR keyword intelligence key [{$key}] must be translated.");
             }
 
