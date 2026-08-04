@@ -40,6 +40,9 @@ class PreviewKeywordImportRequest extends FormRequest
             if (count($targets) !== count(array_unique($targets))) {
                 $validator->errors()->add('mapping', __('admin.keyword_intelligence.validation.duplicate_mapping'));
             }
+            if ($this instanceof ConfirmKeywordImportRequest && ! in_array('keyword', $targets, true)) {
+                $validator->errors()->add('mapping', __('admin.keyword_intelligence.validation.keyword_mapping_required'));
+            }
         }];
     }
 }

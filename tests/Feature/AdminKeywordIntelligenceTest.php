@@ -4,17 +4,21 @@ namespace Tests\Feature;
 
 use App\Jobs\ImportKeywordWorkbookJob;
 use App\Models\Admin;
+use App\Models\AdminActivityLog;
 use App\Models\Keyword;
 use App\Models\KeywordCluster;
 use App\Models\KeywordImportBatch;
 use App\Models\KeywordLibrary;
 use App\Models\KeywordNode;
 use App\Models\KeywordTaxonomy;
+use App\Services\GeoFlow\Keywords\KeywordClusterCandidateToken;
 use App\Services\GeoFlow\Keywords\KeywordClusterSuggestionService;
+use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Foundation\Http\Middleware\ValidateCsrfToken;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Queue;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
 use Tests\TestCase;
 
@@ -63,19 +67,21 @@ class AdminKeywordIntelligenceTest extends TestCase
         $library = $this->library();
         $fixture = base_path('tests/Fixtures/keywords/category-search-sample.xlsx');
 
-        $this->actingAs($admin, 'admin')->post(route('admin.keyword-intelligence.import.preview'), [
+        $previewResponse = $this->actingAs($admin, 'admin')->post(route('admin.keyword-intelligence.import.preview'), [
             'workbook' => new UploadedFile($fixture, 'client-name.xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', null, true),
             'source_type' => 'google_search_console',
             'mapping' => [],
-        ])->assertOk()->assertSee(__('admin.keyword_intelligence.import.preview_title'));
+        ])->assertOk()->assertSee(__('admin.keyword_intelligence.import.preview_title'))->assertSee('mapping[', false);
         $this->assertDatabaseCount('keyword_import_batches', 0);
         Queue::assertNothingPushed();
+        $previewToken = $previewResponse->viewData('previewToken');
+        $this->assertNotEmpty($previewToken);
 
         $this->actingAs($admin, 'admin')->post(route('admin.keyword-intelligence.import.confirm'), [
-            'workbook' => new UploadedFile($fixture, 'client-name.xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', null, true),
+            'preview_token' => $previewToken,
             'library_id' => $library->id,
             'source_type' => 'google_search_console',
-            'mapping' => [],
+            'mapping' => array_merge(array_fill_keys($previewResponse->viewData('mappingHeaders'), ''), $previewResponse->viewData('resolvedMapping')),
             'language_code' => 'en',
         ])->assertRedirect();
 
@@ -90,7 +96,7 @@ class AdminKeywordIntelligenceTest extends TestCase
     {
         $admin = $this->admin();
         $this->actingAs($admin, 'admin')->post(route('admin.keyword-intelligence.import.confirm'), [])
-            ->assertSessionHasErrors(['workbook', 'library_id', 'source_type']);
+            ->assertSessionHasErrors(['preview_token', 'mapping', 'library_id', 'source_type']);
 
         $library = $this->library();
         $batch = KeywordImportBatch::query()->create(['library_id' => $library->id, 'original_filename' => 'x.xlsx', 'stored_path' => 'keyword-imports/x.xlsx', 'file_sha256' => str_repeat('a', 64), 'source_type' => 'gsc', 'status' => 'completed', 'mapping_json' => [], 'metadata_json' => []]);
@@ -112,6 +118,17 @@ class AdminKeywordIntelligenceTest extends TestCase
         $batch = KeywordImportBatch::query()->create(['library_id' => $this->library()->id, 'original_filename' => 'x.xlsx', 'stored_path' => 'keyword-imports/x.xlsx', 'file_sha256' => str_repeat('b', 64), 'source_type' => 'gsc', 'status' => 'processing', 'mapping_json' => [], 'metadata_json' => []]);
         $this->actingAs($admin, 'admin')->from(route('admin.keyword-intelligence.index'))->post(route('admin.keyword-intelligence.import.revert', $batch))
             ->assertRedirect(route('admin.keyword-intelligence.index'))->assertSessionHasErrors('batch');
+    }
+
+    public function test_confirm_rejects_an_invalid_or_expired_preview_token_without_storing_a_batch(): void
+    {
+        Storage::fake('local');
+        Queue::fake();
+        $this->actingAs($this->admin(), 'admin')->post(route('admin.keyword-intelligence.import.confirm'), [
+            'preview_token' => 'client-controlled-path.xlsx', 'library_id' => $this->library()->id, 'source_type' => 'gsc', 'mapping' => ['Query' => 'keyword'],
+        ])->assertSessionHasErrors('preview_token');
+        $this->assertDatabaseCount('keyword_import_batches', 0);
+        Queue::assertNothingPushed();
     }
 
     public function test_taxonomy_node_create_move_and_keyword_assignment(): void
@@ -142,11 +159,99 @@ class AdminKeywordIntelligenceTest extends TestCase
         $this->assertNotNull(route('admin.keyword-intelligence.clusters.score', $cluster));
     }
 
+    public function test_cluster_page_shows_server_generated_candidates_with_confirm_forms(): void
+    {
+        $taxonomy = KeywordTaxonomy::query()->create(['name' => 'Products', 'slug' => 'products', 'status' => 'active']);
+        $node = KeywordNode::query()->create(['taxonomy_id' => $taxonomy->id, 'name' => 'Dresses', 'slug' => 'dresses', 'path' => 'dresses', 'depth' => 0, 'sort_order' => 0]);
+        $keyword = Keyword::query()->create(['library_id' => $this->library()->id, 'keyword' => 'evening dresses', 'normalized_keyword' => 'evening dresses', 'language_code' => 'en', 'market_scope' => 'GLOBAL', 'keyword_type' => 'category', 'search_intent' => 'commercial', 'brand_relation' => 'non_brand', 'status' => 'active']);
+        $node->keywords()->attach($keyword->id, ['is_primary' => true]);
+
+        $this->actingAs($this->admin(), 'admin')->get(route('admin.keyword-intelligence.clusters'))
+            ->assertOk()->assertSee('Evening Dresses')->assertSee(route('admin.keyword-intelligence.clusters.confirm'), false)->assertSee('candidate_token', false)->assertDontSee('suggestion[primary_keyword_id]', false);
+    }
+
+    public function test_taxonomy_keyword_picker_is_filtered_and_paginated_without_a_200_item_cap(): void
+    {
+        $library = $this->library();
+        foreach (range(1, 205) as $index) {
+            Keyword::query()->create(['library_id' => $library->id, 'keyword' => "picker {$index}", 'normalized_keyword' => "picker {$index}", 'language_code' => $index === 205 ? 'fr' : 'en', 'market_scope' => 'GLOBAL', 'status' => 'active']);
+        }
+        $response = $this->actingAs($this->admin(), 'admin')->get(route('admin.keyword-intelligence.taxonomy', ['keyword_language' => 'fr', 'keyword_q' => '205']))->assertOk()->assertSee('picker 205')->assertDontSee('picker 204');
+        $this->assertTrue($response->viewData('keywordOptions')->hasPages() === false);
+    }
+
+    public function test_import_progress_error_and_recovery_copy_are_visible(): void
+    {
+        $batch = KeywordImportBatch::query()->create(['library_id' => $this->library()->id, 'original_filename' => 'failed.xlsx', 'stored_path' => 'keyword-imports/failed.xlsx', 'file_sha256' => str_repeat('c', 64), 'source_type' => 'gsc', 'status' => 'failed', 'mapping_json' => [], 'metadata_json' => [], 'processed_count' => 4, 'total_count' => 10, 'error_summary' => 'Malformed row']);
+        $this->actingAs($this->admin(), 'admin')->get(route('admin.keyword-intelligence.index'))->assertOk()->assertSee('4 / 10')->assertSee('Malformed row')->assertSee(__('admin.keyword_intelligence.import.failed_recovery'))->assertSee(route('admin.keyword-intelligence.import.status', $batch), false);
+    }
+
+    public function test_bound_model_write_records_complete_activity_target(): void
+    {
+        Schema::create('admin_activity_logs', function (Blueprint $table): void {
+            $table->id();
+            $table->unsignedBigInteger('admin_id');
+            $table->string('admin_username');
+            $table->string('admin_role');
+            $table->string('action');
+            $table->string('request_method');
+            $table->string('page')->nullable();
+            $table->string('target_type')->nullable();
+            $table->unsignedBigInteger('target_id')->nullable();
+            $table->string('ip_address')->nullable();
+            $table->text('details')->nullable();
+            $table->timestamps();
+        });
+        $batch = KeywordImportBatch::query()->create(['library_id' => $this->library()->id, 'original_filename' => 'done.xlsx', 'stored_path' => 'keyword-imports/done.xlsx', 'file_sha256' => str_repeat('d', 64), 'source_type' => 'gsc', 'status' => 'completed', 'mapping_json' => [], 'metadata_json' => []]);
+        $this->actingAs($this->admin(), 'admin')->post(route('admin.keyword-intelligence.import.revert', $batch))->assertRedirect();
+        $log = AdminActivityLog::query()->latest('id')->firstOrFail();
+        $this->assertSame('batch', $log->target_type);
+        $this->assertSame($batch->id, $log->target_id);
+    }
+
+    public function test_keyword_intelligence_writes_require_csrf_and_accept_the_session_token(): void
+    {
+        $this->withMiddleware(ValidateCsrfToken::class);
+        $this->app->detectEnvironment(fn (): string => 'production');
+        $admin = $this->admin();
+        $routes = [
+            route('admin.keyword-intelligence.import.preview'),
+            route('admin.keyword-intelligence.taxonomy.nodes.store'),
+            route('admin.keyword-intelligence.clusters.confirm'),
+            route('admin.keyword-intelligence.clusters.score', 999999),
+            route('admin.keyword-intelligence.import.revert', 999999),
+        ];
+        foreach ($routes as $route) {
+            $this->actingAs($admin, 'admin')->post($route)->assertStatus(419);
+        }
+
+        $this->startSession();
+        foreach ($routes as $route) {
+            $response = $this->actingAs($admin, 'admin')->post($route, ['_token' => session()->token()]);
+            $this->assertNotSame(419, $response->getStatusCode());
+        }
+    }
+
+    public function test_taxonomy_and_scoring_domain_failures_return_localized_form_errors(): void
+    {
+        $admin = $this->admin();
+        $taxonomy = KeywordTaxonomy::query()->create(['name' => 'Products', 'slug' => 'products', 'status' => 'active']);
+        KeywordNode::query()->create(['taxonomy_id' => $taxonomy->id, 'name' => 'Dresses', 'slug' => 'dresses', 'path' => 'dresses', 'depth' => 0, 'sort_order' => 0]);
+        $this->actingAs($admin, 'admin')->from(route('admin.keyword-intelligence.taxonomy'))->post(route('admin.keyword-intelligence.taxonomy.nodes.store'), ['taxonomy_id' => $taxonomy->id, 'name' => 'Duplicate', 'slug' => 'dresses'])
+            ->assertRedirect(route('admin.keyword-intelligence.taxonomy'))->assertSessionHasErrors('name');
+
+        $keyword = Keyword::query()->create(['library_id' => $this->library()->id, 'keyword' => 'score dress', 'normalized_keyword' => 'score dress', 'language_code' => 'en', 'market_scope' => 'GLOBAL', 'keyword_type' => 'category', 'search_intent' => 'commercial', 'brand_relation' => 'non_brand', 'status' => 'active']);
+        $cluster = KeywordCluster::query()->create(['name' => 'Score Dress', 'slug' => 'score-dress', 'taxonomy_node_id' => KeywordNode::query()->value('id'), 'primary_keyword_id' => $keyword->id, 'language_code' => 'en', 'market_scope' => 'GLOBAL', 'search_intent' => 'commercial', 'status' => 'active']);
+        config()->set('keyword_intelligence.opportunity_scoring.weights.non_brand', []);
+        $this->actingAs($admin, 'admin')->from(route('admin.keyword-intelligence.clusters.show', $cluster))->post(route('admin.keyword-intelligence.clusters.score', $cluster), ['period_start' => '2026-07-01', 'period_end' => '2026-07-31'])
+            ->assertRedirect(route('admin.keyword-intelligence.clusters.show', $cluster))->assertSessionHasErrors('period_start');
+    }
+
     public function test_invalid_cluster_confirmation_returns_a_localized_form_error(): void
     {
         $this->actingAs($this->admin(), 'admin')->from(route('admin.keyword-intelligence.clusters'))->post(route('admin.keyword-intelligence.clusters.confirm'), [
-            'suggestion' => ['name' => 'Incomplete'],
-        ])->assertRedirect(route('admin.keyword-intelligence.clusters'))->assertSessionHasErrors('suggestion');
+            'candidate_token' => 'client-crafted-candidate',
+        ])->assertRedirect(route('admin.keyword-intelligence.clusters'))->assertSessionHasErrors('candidate_token');
     }
 
     public function test_admin_can_confirm_a_server_validated_cluster_and_recompute_its_score(): void
@@ -158,7 +263,8 @@ class AdminKeywordIntelligenceTest extends TestCase
         $node->keywords()->attach($keyword->id, ['is_primary' => true]);
         $suggestion = app(KeywordClusterSuggestionService::class)->suggest([$keyword])[0];
 
-        $this->actingAs($admin, 'admin')->post(route('admin.keyword-intelligence.clusters.confirm'), ['suggestion' => $suggestion])->assertRedirect();
+        $token = app(KeywordClusterCandidateToken::class)->issue($suggestion);
+        $this->actingAs($admin, 'admin')->post(route('admin.keyword-intelligence.clusters.confirm'), ['candidate_token' => $token])->assertRedirect();
         $cluster = KeywordCluster::query()->sole();
         $this->actingAs($admin, 'admin')->post(route('admin.keyword-intelligence.clusters.score', $cluster), ['period_start' => '2026-07-01', 'period_end' => '2026-07-31'])->assertRedirect();
         $this->assertDatabaseHas('keyword_opportunity_scores', ['cluster_id' => $cluster->id, 'period_start' => '2026-07-01 00:00:00', 'period_end' => '2026-07-31 00:00:00']);

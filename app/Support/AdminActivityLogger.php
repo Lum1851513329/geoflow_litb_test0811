@@ -4,6 +4,7 @@ namespace App\Support;
 
 use App\Models\Admin;
 use App\Models\AdminActivityLog;
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Http\Request;
 use Throwable;
 
@@ -150,6 +151,9 @@ final class AdminActivityLogger
         }
 
         foreach ((array) $route->parameters() as $name => $value) {
+            if ($value instanceof Model) {
+                return [(string) $name, is_numeric($value->getKey()) ? (int) $value->getKey() : null];
+            }
             if (! str_ends_with((string) $name, 'Id')) {
                 continue;
             }
