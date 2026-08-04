@@ -58,6 +58,12 @@ return [
     ],
 
     'topic_clustering' => [
+        'ie_singular_lexicon' => [
+            'cookie',
+            'movie',
+            'hoodie',
+            'selfie',
+        ],
         'compatible_intents' => [
             'commercial' => ['commercial', 'transactional'],
             'transactional' => ['commercial', 'transactional'],

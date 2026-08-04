@@ -184,12 +184,13 @@ final class KeywordClusterSuggestionService
         $last = array_pop($tokens);
         if (preg_match('/^[a-z]+$/', $last) === 1 && strlen($last) > 3) {
             if (str_ends_with($last, 'ies') && strlen($last) > 4) {
-                $ieCandidate = implode(' ', [...$tokens, substr($last, 0, -1)]);
+                $ieSingular = substr($last, 0, -1);
+                $ieCandidate = implode(' ', [...$tokens, $ieSingular]);
                 $yCandidate = implode(' ', [...$tokens, substr($last, 0, -3).'y']);
                 $hasIeCandidate = isset($knownValues[$ieCandidate]);
                 $hasYCandidate = isset($knownValues[$yCandidate]);
-                if ($hasIeCandidate && ! $hasYCandidate) {
-                    $last = substr($last, 0, -1);
+                if ($this->isKnownIeSingular($ieSingular) || ($hasIeCandidate && ! $hasYCandidate)) {
+                    $last = $ieSingular;
                 } elseif ($hasYCandidate && ! $hasIeCandidate) {
                     $last = substr($last, 0, -3).'y';
                 }
@@ -202,6 +203,17 @@ final class KeywordClusterSuggestionService
         $tokens[] = $last;
 
         return implode(' ', $tokens);
+    }
+
+    private function isKnownIeSingular(string $value): bool
+    {
+        foreach (config('keyword_intelligence.topic_clustering.ie_singular_lexicon', []) as $singular) {
+            if (is_string($singular) && mb_convert_case(trim($singular), MB_CASE_FOLD, 'UTF-8') === $value) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function normalizeValue(string $value): string

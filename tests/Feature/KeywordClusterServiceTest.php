@@ -114,7 +114,7 @@ class KeywordClusterServiceTest extends TestCase
         $this->assertSame([1, 1], array_map(static fn (array $suggestion): int => count($suggestion['keywords']), $suggestions));
     }
 
-    public function test_ambiguous_cookie_and_movie_plurals_do_not_merge_with_real_cooky_or_movy_terms(): void
+    public function test_known_ie_lexicon_prefers_cookie_and_movie_singulars_when_y_words_also_exist(): void
     {
         [$node] = $this->nodes();
         $cookie = $this->keyword('cookie', $node);
@@ -133,14 +133,54 @@ class KeywordClusterServiceTest extends TestCase
             $movy,
         ]);
 
-        $this->assertCount(6, $suggestions);
+        $this->assertCount(4, $suggestions);
         $this->assertEqualsCanonicalizing(
-            ['cookie', 'cookies', 'cooky', 'movie', 'movies', 'movy'],
+            ['cookie', 'cooky', 'movie', 'movy'],
+            array_column($suggestions, 'slug'),
+        );
+        $cookieSuggestion = collect($suggestions)->firstWhere('slug', 'cookie');
+        $movieSuggestion = collect($suggestions)->firstWhere('slug', 'movie');
+        $this->assertEqualsCanonicalizing([$cookie->id, $cookies->id], array_column($cookieSuggestion['keywords'], 'keyword_id'));
+        $this->assertEqualsCanonicalizing([$movie->id, $movies->id], array_column($movieSuggestion['keywords'], 'keyword_id'));
+    }
+
+    public function test_known_ie_plurals_do_not_merge_with_y_words_when_ie_singulars_are_absent(): void
+    {
+        [$node] = $this->nodes();
+        $keywords = [
+            $this->keyword('cookies', $node),
+            $this->keyword('cooky', $node),
+            $this->keyword('movies', $node),
+            $this->keyword('movy', $node),
+            $this->keyword('hoodies', $node),
+            $this->keyword('hoody', $node),
+            $this->keyword('selfies', $node),
+            $this->keyword('selfy', $node),
+        ];
+
+        $suggestions = app(KeywordClusterSuggestionService::class)->suggest($keywords);
+
+        $this->assertCount(8, $suggestions);
+        $this->assertEqualsCanonicalizing(
+            ['cookies', 'cooky', 'movies', 'movy', 'hoodies', 'hoody', 'selfies', 'selfy'],
             array_column($suggestions, 'slug'),
         );
         foreach ($suggestions as $suggestion) {
             $this->assertCount(1, $suggestion['keywords']);
         }
+    }
+
+    public function test_ie_singular_lexicon_can_be_extended_without_guessing_from_y_candidates(): void
+    {
+        config()->set('keyword_intelligence.topic_clustering.ie_singular_lexicon', ['auntie']);
+        [$node] = $this->nodes();
+        $aunties = $this->keyword('aunties', $node);
+        $aunty = $this->keyword('aunty', $node);
+
+        $suggestions = app(KeywordClusterSuggestionService::class)->suggest([$aunties, $aunty]);
+
+        $this->assertCount(2, $suggestions);
+        $this->assertEqualsCanonicalizing(['aunties', 'aunty'], array_column($suggestions, 'slug'));
     }
 
     public function test_confirm_creates_an_active_audited_cluster_and_memberships_atomically(): void
