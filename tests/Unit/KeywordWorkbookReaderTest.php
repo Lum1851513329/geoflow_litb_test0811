@@ -42,6 +42,60 @@ class KeywordWorkbookReaderTest extends TestCase
         $this->assertSame('=2+2', $inspection['sheets'][0]['sample_rows'][0]['values']['formula']);
     }
 
+    public function test_it_detects_a_header_after_metadata_and_preserves_physical_row_numbers(): void
+    {
+        $path = $this->makeWorkbook([
+            ['Google Ads keyword report'],
+            ['Generated for an authorized account'],
+            ['Keyword status', 'Keyword', 'Impr.', 'Clicks'],
+            ['Enabled', 'formal dresses', 1200, 42],
+        ]);
+
+        $inspection = (new KeywordWorkbookReader)->inspect($path);
+
+        $this->assertSame(['keyword_status', 'keyword', 'impr', 'clicks'], $inspection['sheets'][0]['headers']);
+        $this->assertSame(1, $inspection['sheets'][0]['row_estimate']);
+        $this->assertSame(4, $inspection['sheets'][0]['rows'][0]['row_number']);
+        $this->assertSame('formal dresses', $inspection['sheets'][0]['rows'][0]['values']['keyword']);
+    }
+
+    public function test_it_rejects_ambiguous_or_missing_headers_with_clear_errors(): void
+    {
+        $ambiguous = $this->makeWorkbook([
+            ['Keyword', 'Clicks'],
+            ['Keyword', 'Clicks'],
+            ['formal dresses', 42],
+        ]);
+
+        try {
+            (new KeywordWorkbookReader)->inspect($ambiguous);
+            $this->fail('Expected ambiguous headers to be rejected.');
+        } catch (InvalidArgumentException $exception) {
+            $this->assertStringContainsString('ambiguous header', $exception->getMessage());
+        }
+
+        $missing = $this->makeWorkbook([
+            ['Google Ads report'],
+            ['Generated yesterday'],
+            ['formal dresses'],
+        ]);
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('recognizable header');
+        (new KeywordWorkbookReader)->inspect($missing);
+    }
+
+    public function test_default_limits_are_bounded_but_cover_the_observed_litb_export_size(): void
+    {
+        $this->assertGreaterThanOrEqual(35_000, config('keyword_intelligence.workbook.max_rows_per_sheet'));
+        $this->assertLessThanOrEqual(100_000, config('keyword_intelligence.workbook.max_rows_per_sheet'));
+        $this->assertLessThanOrEqual(20, config('keyword_intelligence.workbook.header_scan_rows'));
+        $this->assertLessThan(
+            config('keyword_intelligence.workbook.max_rows_per_sheet'),
+            config('keyword_intelligence.workbook.max_sample_rows'),
+        );
+    }
+
     public function test_it_rejects_zip_bombs_before_invoking_the_spreadsheet_reader(): void
     {
         $highCompression = $this->makeZipWorkbook(['xl/worksheets/sheet1.xml' => str_repeat('A', 4_096)]);

@@ -4,9 +4,11 @@ return [
     'workbook' => [
         'max_file_size_bytes' => 10_485_760,
         'max_sheets' => 5,
-        'max_rows_per_sheet' => 10_000,
+        // Full data-row ceiling. Preview output remains independently sample-bounded.
+        'max_rows_per_sheet' => 50_000,
         'max_columns_per_sheet' => 50,
         'max_sample_rows' => 10,
+        'header_scan_rows' => 10,
         'max_zip_entries' => 2_048,
         'max_uncompressed_bytes' => 104_857_600,
         'max_entry_uncompressed_bytes' => 26_214_400,

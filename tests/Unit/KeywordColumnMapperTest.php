@@ -50,6 +50,24 @@ class KeywordColumnMapperTest extends TestCase
         $this->assertArrayNotHasKey('search_term', $mapping);
     }
 
+    public function test_it_recognizes_google_export_keyword_and_abbreviated_impression_headers(): void
+    {
+        $mapping = (new KeywordColumnMapper)->suggest([
+            'search_keyword',
+            'impr',
+            '语言',
+            '国家',
+            'max_cpc',
+        ], 'google_ads');
+
+        $this->assertSame([
+            'search_keyword' => 'keyword',
+            'impr' => 'impressions',
+            '国家' => 'country',
+            '语言' => 'language',
+        ], $mapping);
+    }
+
     public function test_explicit_mapping_replaces_an_automatic_field_assignment(): void
     {
         $path = $this->makeWorkbook([

@@ -22,6 +22,8 @@ final class KeywordWorkbookReader
 
     private readonly int $maxSampleRows;
 
+    private readonly int $headerScanRows;
+
     private readonly int $maxZipEntries;
 
     private readonly int $maxUncompressedBytes;
@@ -40,6 +42,7 @@ final class KeywordWorkbookReader
         ?int $maxUncompressedBytes = null,
         ?int $maxEntryUncompressedBytes = null,
         ?int $maxCompressionRatio = null,
+        ?int $headerScanRows = null,
     ) {
         $limits = config('keyword_intelligence.workbook');
         $this->maxFileSizeBytes = $maxFileSizeBytes ?? (int) ($limits['max_file_size_bytes'] ?? 10_485_760);
@@ -47,12 +50,13 @@ final class KeywordWorkbookReader
         $this->maxRowsPerSheet = $maxRowsPerSheet ?? (int) ($limits['max_rows_per_sheet'] ?? 10_000);
         $this->maxColumnsPerSheet = $maxColumnsPerSheet ?? (int) ($limits['max_columns_per_sheet'] ?? 50);
         $this->maxSampleRows = $maxSampleRows ?? (int) ($limits['max_sample_rows'] ?? 10);
+        $this->headerScanRows = $headerScanRows ?? (int) ($limits['header_scan_rows'] ?? 10);
         $this->maxZipEntries = $maxZipEntries ?? (int) ($limits['max_zip_entries'] ?? 2_048);
         $this->maxUncompressedBytes = $maxUncompressedBytes ?? (int) ($limits['max_uncompressed_bytes'] ?? 104_857_600);
         $this->maxEntryUncompressedBytes = $maxEntryUncompressedBytes ?? (int) ($limits['max_entry_uncompressed_bytes'] ?? 26_214_400);
         $this->maxCompressionRatio = $maxCompressionRatio ?? (int) ($limits['max_compression_ratio'] ?? 100);
 
-        foreach ([$this->maxFileSizeBytes, $this->maxSheets, $this->maxRowsPerSheet, $this->maxColumnsPerSheet, $this->maxSampleRows, $this->maxZipEntries, $this->maxUncompressedBytes, $this->maxEntryUncompressedBytes, $this->maxCompressionRatio] as $limit) {
+        foreach ([$this->maxFileSizeBytes, $this->maxSheets, $this->maxRowsPerSheet, $this->maxColumnsPerSheet, $this->maxSampleRows, $this->headerScanRows, $this->maxZipEntries, $this->maxUncompressedBytes, $this->maxEntryUncompressedBytes, $this->maxCompressionRatio] as $limit) {
             if ($limit < 1) {
                 throw new InvalidArgumentException('Workbook limits must be positive integers.');
             }
@@ -81,10 +85,11 @@ final class KeywordWorkbookReader
 
         $sheets = [];
         foreach ($worksheetInfo as $info) {
-            $rowEstimate = max(0, ((int) $info['totalRows']) - 1);
+            $totalRows = (int) $info['totalRows'];
             $columnCount = (int) $info['totalColumns'];
 
-            if ($rowEstimate > $this->maxRowsPerSheet) {
+            // The precise data count is known only after bounded header detection.
+            if ($totalRows > $this->maxRowsPerSheet + $this->headerScanRows) {
                 throw new InvalidArgumentException('The workbook exceeds the configured row limit.');
             }
 
@@ -92,7 +97,7 @@ final class KeywordWorkbookReader
                 throw new InvalidArgumentException('The workbook exceeds the configured column limit.');
             }
 
-            $reader->setReadFilter(new KeywordWorkbookReadFilter($this->maxRowsPerSheet + 1, $this->maxColumnsPerSheet));
+            $reader->setReadFilter(new KeywordWorkbookReadFilter($this->maxRowsPerSheet + $this->headerScanRows, $this->maxColumnsPerSheet));
             $reader->setLoadSheetsOnly([(string) $info['worksheetName']]);
 
             try {
@@ -108,8 +113,16 @@ final class KeywordWorkbookReader
                 throw new InvalidArgumentException('The XLSX workbook could not be read.');
             }
 
-            $headers = $this->headers($sheet, $columnCount);
-            $rows = $this->rows($sheet, $headers, $rowEstimate);
+            $headerRow = $this->detectHeaderRow($sheet, $columnCount, $totalRows);
+            $rowEstimate = max(0, $totalRows - $headerRow);
+            if ($rowEstimate > $this->maxRowsPerSheet) {
+                $spreadsheet->disconnectWorksheets();
+
+                throw new InvalidArgumentException('The workbook exceeds the configured row limit.');
+            }
+
+            $headers = $this->headers($sheet, $columnCount, $headerRow);
+            $rows = $this->rows($sheet, $headers, $headerRow, $totalRows);
             $spreadsheet->disconnectWorksheets();
 
             $sheets[] = [
@@ -194,12 +207,42 @@ final class KeywordWorkbookReader
     }
 
     /** @return array<int,string> */
-    private function headers(object $sheet, int $columnCount): array
+    private function detectHeaderRow(object $sheet, int $columnCount, int $totalRows): int
+    {
+        $mapper = new KeywordColumnMapper;
+        $candidates = [];
+        $scanThrough = min($totalRows, $this->headerScanRows);
+
+        for ($row = 1; $row <= $scanThrough; $row++) {
+            $headers = $this->headers($sheet, $columnCount, $row);
+            $mapping = $mapper->suggest($headers, 'header_detection');
+            if (! in_array('keyword', $mapping, true)) {
+                continue;
+            }
+
+            $candidates[$row] = count(array_unique($mapping));
+        }
+
+        if ($candidates === []) {
+            throw new InvalidArgumentException('The worksheet has no recognizable header row within the configured scan limit.');
+        }
+
+        $bestScore = max($candidates);
+        $bestRows = array_keys(array_filter($candidates, static fn (int $score): bool => $score === $bestScore));
+        if (count($bestRows) !== 1) {
+            throw new InvalidArgumentException('The worksheet has an ambiguous header row within the configured scan limit.');
+        }
+
+        return $bestRows[0];
+    }
+
+    /** @return array<int,string> */
+    private function headers(object $sheet, int $columnCount, int $headerRow): array
     {
         $headers = [];
         $occurrences = [];
         for ($column = 1; $column <= $columnCount; $column++) {
-            $value = $sheet->getCell(Coordinate::stringFromColumnIndex($column).'1')->getValue();
+            $value = $sheet->getCell(Coordinate::stringFromColumnIndex($column).$headerRow)->getValue();
             $base = $this->normalizeHeader($this->stringValue($value));
             $base = $base === '' ? 'column_'.$column : $base;
             $occurrences[$base] = ($occurrences[$base] ?? 0) + 1;
@@ -212,10 +255,10 @@ final class KeywordWorkbookReader
     /** @param array<int,string> $headers
      * @return array<int,array{row_number:int,values:array<string,mixed>}>
      */
-    private function rows(object $sheet, array $headers, int $rowEstimate): array
+    private function rows(object $sheet, array $headers, int $headerRow, int $totalRows): array
     {
         $rows = [];
-        for ($row = 2; $row <= $rowEstimate + 1; $row++) {
+        for ($row = $headerRow + 1; $row <= $totalRows; $row++) {
             $values = [];
             $hasValue = false;
             foreach ($headers as $index => $header) {

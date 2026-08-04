@@ -8,13 +8,13 @@ final class KeywordColumnMapper
      * @var array<string,array<int,string>>
      */
     private const ALIASES = [
-        'keyword' => ['keyword', 'query', 'search_query', 'search_term', 'term'],
+        'keyword' => ['keyword', 'query', 'search_query', 'search_keyword', 'search_term', 'term'],
         'clicks' => ['clicks', 'click'],
-        'impressions' => ['impressions', 'impression'],
+        'impressions' => ['impressions', 'impression', 'impr'],
         'ctr' => ['ctr', 'click_through_rate'],
         'position' => ['position', 'average_position', 'avg_position', 'ranking', 'rank'],
-        'country' => ['country', 'market', 'region'],
-        'language' => ['language', 'language_code', 'locale'],
+        'country' => ['country', 'market', 'region', '国家'],
+        'language' => ['language', 'language_code', 'locale', '语言'],
         'date_range' => ['date_range', 'date', 'period'],
         'cost' => ['cost', 'spend', 'amount'],
         'conversions' => ['conversions', 'conversion'],
