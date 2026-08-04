@@ -15,8 +15,9 @@ final class KeywordClusterSuggestionService
      *
      * @return list<array<string,mixed>>
      */
-    public function suggest(iterable $keywords): array
+    public function suggest(iterable $keywords, array $blockedPrimaryIds = []): array
     {
+        $blockedPrimaryIds = array_fill_keys(array_map('intval', $blockedPrimaryIds), true);
         $candidates = [];
         $knownValuesByBoundary = [];
 
@@ -74,7 +75,10 @@ final class KeywordClusterSuggestionService
             ];
         }
 
-        return array_values(array_map(fn (array $group): array => $this->toSuggestion($group), $groups));
+        return array_values(array_filter(array_map(
+            fn (array $group): ?array => $this->toSuggestion($group, $blockedPrimaryIds),
+            $groups,
+        )));
     }
 
     private function taxonomyNode(Keyword $keyword): ?KeywordNode
@@ -91,9 +95,10 @@ final class KeywordClusterSuggestionService
 
     /**
      * @param  list<array{keyword:Keyword,node:KeywordNode}>  $group
-     * @return array<string,mixed>
+     * @param  array<int,bool>  $blockedPrimaryIds
+     * @return array<string,mixed>|null
      */
-    private function toSuggestion(array $group): array
+    private function toSuggestion(array $group, array $blockedPrimaryIds): ?array
     {
         usort($group, static function (array $left, array $right): int {
             $leftPrimary = (bool) $left['node']->pivot->is_primary;
@@ -104,6 +109,20 @@ final class KeywordClusterSuggestionService
                 : ($leftPrimary ? -1 : 1);
         });
 
+        $primaryIndex = null;
+        foreach ($group as $index => $item) {
+            if (! isset($blockedPrimaryIds[(int) $item['keyword']->id])) {
+                $primaryIndex = $index;
+                break;
+            }
+        }
+        if ($primaryIndex === null) {
+            return null;
+        }
+        $primaryItem = $group[$primaryIndex];
+        unset($group[$primaryIndex]);
+        array_unshift($group, $primaryItem);
+        $group = array_values($group);
         $primary = $group[0]['keyword'];
         $memberships = [];
         foreach ($group as $index => $item) {

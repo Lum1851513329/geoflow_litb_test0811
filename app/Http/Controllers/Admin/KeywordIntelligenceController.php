@@ -191,15 +191,20 @@ class KeywordIntelligenceController extends Controller
 
     public function clusters(Request $request, KeywordClusterSuggestionService $suggestions, KeywordClusterCandidateToken $tokens): View
     {
-        $candidateKeywords = Keyword::query()->where('status', 'active')->with('taxonomyNodes')->orderBy('id')->limit(500);
+        $baseQuery = Keyword::query()->where('status', 'active')->with('taxonomyNodes')->orderBy('id');
         foreach (['language' => 'language_code', 'market' => 'market_scope'] as $input => $column) {
             if ($request->filled($input)) {
-                $candidateKeywords->where($column, $request->string($input)->toString());
+                $baseQuery->where($column, $request->string($input)->toString());
             }
         }
-
-        $candidates = collect($suggestions->suggest($candidateKeywords->get()))
-            ->reject(fn (array $suggestion): bool => $this->hasActivePrimaryConflict($suggestion));
+        $activePrimary = fn ($query) => $query->selectRaw('1')->from('keyword_clusters')
+            ->whereColumn('keyword_clusters.primary_keyword_id', 'keywords.id')
+            ->where('keyword_clusters.status', 'active');
+        $eligible = (clone $baseQuery)->whereNotExists($activePrimary)->limit(500)->get();
+        $blockedMembers = (clone $baseQuery)->whereExists($activePrimary)->limit(500)->get();
+        $candidateKeywords = $eligible->concat($blockedMembers)->unique('id')->values();
+        $blockedPrimaryIds = $blockedMembers->pluck('id')->map(static fn ($id): int => (int) $id)->all();
+        $candidates = collect($suggestions->suggest($candidateKeywords, $blockedPrimaryIds));
 
         return view('admin.keyword-intelligence.clusters', [
             'pageTitle' => __('admin.keyword_intelligence.clusters.title'),
@@ -241,17 +246,5 @@ class KeywordIntelligenceController extends Controller
     private function importViewData(?array $preview = null): array
     {
         return ['pageTitle' => __('admin.keyword_intelligence.import.title'), 'activeMenu' => 'materials', 'libraries' => KeywordLibrary::query()->orderBy('name')->get(), 'preview' => $preview];
-    }
-
-    /** @param array<string,mixed> $suggestion */
-    private function hasActivePrimaryConflict(array $suggestion): bool
-    {
-        return KeywordCluster::query()
-            ->where('primary_keyword_id', $suggestion['primary_keyword_id'])
-            ->where('status', 'active')
-            ->where('language_code', $suggestion['language_code'])
-            ->where('market_scope', $suggestion['market_scope'])
-            ->where('market_code', $suggestion['market_code'])
-            ->exists();
     }
 }

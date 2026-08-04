@@ -239,7 +239,14 @@ final class KeywordClusterService
      */
     private function assertSuggestionIntegrity(array $data, array $keywords): void
     {
-        $rebuilt = collect($this->suggestionService->suggest($keywords))->first(
+        $blockedPrimaryIds = KeywordCluster::query()
+            ->where('status', 'active')
+            ->whereIn('primary_keyword_id', array_keys($keywords))
+            ->where('primary_keyword_id', '!=', $data['primary_keyword_id'])
+            ->pluck('primary_keyword_id')
+            ->map(static fn ($id): int => (int) $id)
+            ->all();
+        $rebuilt = collect($this->suggestionService->suggest($keywords, $blockedPrimaryIds))->first(
             static fn (array $candidate): bool => $candidate['primary_keyword_id'] === $data['primary_keyword_id'],
         );
         if ($rebuilt === null) {

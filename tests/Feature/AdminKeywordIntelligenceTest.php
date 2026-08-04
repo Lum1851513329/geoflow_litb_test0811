@@ -245,15 +245,36 @@ class AdminKeywordIntelligenceTest extends TestCase
         $taxonomy = KeywordTaxonomy::query()->create(['name' => 'Products', 'slug' => 'products', 'status' => 'active']);
         $node = KeywordNode::query()->create(['taxonomy_id' => $taxonomy->id, 'name' => 'Shoes', 'slug' => 'shoes', 'path' => 'shoes', 'depth' => 0, 'sort_order' => 0]);
         $library = $this->library();
-        $existingPrimary = Keyword::query()->create(['library_id' => $library->id, 'keyword' => 'running shoes', 'normalized_keyword' => 'running shoes', 'language_code' => 'en', 'market_scope' => 'GLOBAL', 'keyword_type' => 'category', 'search_intent' => 'commercial', 'brand_relation' => 'non_brand', 'status' => 'active']);
-        $reusableSecondary = Keyword::query()->create(['library_id' => $library->id, 'keyword' => 'walking shoes', 'normalized_keyword' => 'walking shoes', 'language_code' => 'en', 'market_scope' => 'GLOBAL', 'keyword_type' => 'category', 'search_intent' => 'commercial', 'brand_relation' => 'non_brand', 'status' => 'active']);
+        $existingPrimary = Keyword::query()->create(['library_id' => $library->id, 'keyword' => 'party dresses', 'normalized_keyword' => 'party dresses', 'language_code' => 'en', 'market_scope' => 'GLOBAL', 'keyword_type' => 'category', 'search_intent' => 'commercial', 'brand_relation' => 'non_brand', 'status' => 'active']);
+        $reusableSecondary = Keyword::query()->create(['library_id' => $library->id, 'keyword' => 'party dress', 'normalized_keyword' => 'party dress', 'language_code' => 'en', 'market_scope' => 'GLOBAL', 'keyword_type' => 'category', 'search_intent' => 'commercial', 'brand_relation' => 'non_brand', 'status' => 'active']);
         $node->keywords()->attach($existingPrimary->id, ['is_primary' => true]);
         $node->keywords()->attach($reusableSecondary->id, ['is_primary' => true]);
-        $cluster = KeywordCluster::query()->create(['name' => 'Existing Running Shoes', 'slug' => 'existing-running-shoes', 'taxonomy_node_id' => $node->id, 'primary_keyword_id' => $existingPrimary->id, 'primary_scope_key' => hash('sha256', "{$existingPrimary->id}|en|GLOBAL"), 'language_code' => 'en', 'market_scope' => 'GLOBAL', 'search_intent' => 'commercial', 'status' => 'active', 'confirmed_at' => now()]);
+        $cluster = KeywordCluster::query()->create(['name' => 'Existing Party Dresses', 'slug' => 'existing-party-dresses', 'taxonomy_node_id' => $node->id, 'primary_keyword_id' => $existingPrimary->id, 'primary_scope_key' => hash('sha256', "{$existingPrimary->id}|en|GLOBAL"), 'language_code' => 'en', 'market_scope' => 'GLOBAL', 'search_intent' => 'commercial', 'status' => 'active', 'confirmed_at' => now()]);
         $cluster->memberships()->create(['keyword_id' => $reusableSecondary->id, 'role' => 'secondary', 'sort_order' => 1]);
 
         $response = $this->actingAs($this->admin(), 'admin')->get(route('admin.keyword-intelligence.clusters'))->assertOk();
-        $response->assertSee('Walking Shoes')->assertDontSee('Running Shoes</h3>', false);
+        $candidate = collect($response->viewData('suggestions'))->first(fn (array $item): bool => $item['data']['primary_keyword_id'] === $reusableSecondary->id);
+        $this->assertNotNull($candidate);
+        $this->assertSame([$existingPrimary->id, $reusableSecondary->id], collect($candidate['data']['keywords'])->pluck('keyword_id')->sort()->values()->all());
+        $this->actingAs($this->admin(), 'admin')->post(route('admin.keyword-intelligence.clusters.confirm'), ['candidate_token' => $candidate['token']])->assertRedirect();
+        $this->assertDatabaseHas('keyword_clusters', ['primary_keyword_id' => $reusableSecondary->id, 'status' => 'active']);
+    }
+
+    public function test_more_than_500_conflicting_primaries_do_not_starve_a_later_eligible_candidate(): void
+    {
+        $taxonomy = KeywordTaxonomy::query()->create(['name' => 'Products', 'slug' => 'products', 'status' => 'active']);
+        $node = KeywordNode::query()->create(['taxonomy_id' => $taxonomy->id, 'name' => 'Catalog', 'slug' => 'catalog', 'path' => 'catalog', 'depth' => 0, 'sort_order' => 0]);
+        $library = $this->library();
+        foreach (range(1, 501) as $index) {
+            $keyword = Keyword::query()->create(['library_id' => $library->id, 'keyword' => "blocked term {$index}", 'normalized_keyword' => "blocked term {$index}", 'language_code' => 'en', 'market_scope' => 'GLOBAL', 'keyword_type' => 'category', 'search_intent' => 'commercial', 'brand_relation' => 'non_brand', 'status' => 'active']);
+            $node->keywords()->attach($keyword->id, ['is_primary' => true]);
+            KeywordCluster::query()->create(['name' => "Existing {$index}", 'slug' => "existing-{$index}", 'taxonomy_node_id' => $node->id, 'primary_keyword_id' => $keyword->id, 'primary_scope_key' => hash('sha256', "{$keyword->id}|en|GLOBAL"), 'language_code' => 'en', 'market_scope' => 'GLOBAL', 'search_intent' => 'commercial', 'status' => 'active', 'confirmed_at' => now()]);
+        }
+        $eligible = Keyword::query()->create(['library_id' => $library->id, 'keyword' => 'later eligible candidate', 'normalized_keyword' => 'later eligible candidate', 'language_code' => 'en', 'market_scope' => 'GLOBAL', 'keyword_type' => 'category', 'search_intent' => 'commercial', 'brand_relation' => 'non_brand', 'status' => 'active']);
+        $node->keywords()->attach($eligible->id, ['is_primary' => true]);
+
+        $response = $this->actingAs($this->admin(), 'admin')->get(route('admin.keyword-intelligence.clusters'))->assertOk();
+        $this->assertTrue(collect($response->viewData('suggestions'))->contains(fn (array $item): bool => $item['data']['primary_keyword_id'] === $eligible->id));
     }
 
     public function test_preview_session_rejects_expired_scope_hash_and_path_tampering_and_deletes_expired_file(): void
