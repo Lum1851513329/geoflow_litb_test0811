@@ -8,6 +8,7 @@ use App\Models\KeywordCluster;
 use App\Models\KeywordLibrary;
 use App\Models\KeywordNode;
 use App\Models\KeywordTaxonomy;
+use App\Services\GeoFlow\Keywords\KeywordClusterCandidateToken;
 use App\Services\GeoFlow\Keywords\KeywordClusterService;
 use App\Services\GeoFlow\Keywords\KeywordClusterSuggestionService;
 use DomainException;
@@ -67,6 +68,78 @@ class KeywordClusterServiceTest extends TestCase
         $this->assertSame('non_brand', $suggestion['brand_relation']);
         $this->assertDatabaseCount('keyword_clusters', 0);
         $this->assertDatabaseCount('keyword_cluster_keywords', 0);
+    }
+
+    public function test_brand_category_keyword_supports_a_non_brand_category_primary_end_to_end(): void
+    {
+        [$node] = $this->nodes();
+        // Create the branded keyword first and mark it taxonomy-primary to prove selection is semantic, not ID/pivot based.
+        $brandSupporting = $this->keyword(
+            'LightInTheBox summer dresses',
+            $node,
+            brandRelation: 'brand_category',
+            searchIntent: 'commercial',
+            keywordType: 'category',
+            isTaxonomyPrimary: true,
+        );
+        $primary = $this->keyword(
+            'summer dresses',
+            $node,
+            brandRelation: 'non_brand',
+            searchIntent: 'commercial',
+            keywordType: 'category',
+        );
+
+        $suggestion = app(KeywordClusterSuggestionService::class)->suggest([$brandSupporting, $primary])[0];
+
+        $this->assertSame($primary->id, $suggestion['primary_keyword_id']);
+        $this->assertSame('non_brand', $suggestion['brand_relation']);
+        $this->assertSame([
+            $primary->id => 'primary',
+            $brandSupporting->id => 'brand_supporting',
+        ], collect($suggestion['keywords'])->pluck('role', 'keyword_id')->all());
+
+        $token = app(KeywordClusterCandidateToken::class)->issue($suggestion, 123);
+        $cluster = app(KeywordClusterService::class)->confirm(
+            app(KeywordClusterCandidateToken::class)->resolve($token, 123),
+            $this->admin()->id,
+        );
+
+        $this->assertSame([
+            $primary->id => 'primary',
+            $brandSupporting->id => 'brand_supporting',
+        ], $cluster->memberships()->orderBy('sort_order')->pluck('role', 'keyword_id')->all());
+    }
+
+    public function test_unrelated_brand_boundaries_are_not_folded_into_brand_supporting(): void
+    {
+        [$node] = $this->nodes();
+        $primary = $this->keyword('summer dresses', $node, brandRelation: 'non_brand', searchIntent: 'commercial');
+        $plainBranded = $this->keyword('LightInTheBox summer dresses', $node, brandRelation: 'branded', searchIntent: 'commercial', keywordType: 'brand');
+        $competitor = $this->keyword('LightInTheBox summer dresses', $node, brandRelation: 'competitor_comparison', searchIntent: 'commercial', keywordType: 'comparison');
+
+        $suggestions = app(KeywordClusterSuggestionService::class)->suggest([$primary, $plainBranded, $competitor]);
+
+        $this->assertCount(3, $suggestions);
+        foreach ($suggestions as $suggestion) {
+            $this->assertCount(1, $suggestion['keywords']);
+            $this->assertNotSame('brand_supporting', $suggestion['keywords'][0]['role']);
+        }
+    }
+
+    public function test_confirm_rejects_a_forged_brand_supporting_role(): void
+    {
+        [$node] = $this->nodes();
+        $primary = $this->keyword('summer dresses', $node, brandRelation: 'non_brand', searchIntent: 'commercial');
+        $secondary = $this->keyword('summer dress', $node, brandRelation: 'non_brand', searchIntent: 'commercial');
+        $suggestion = app(KeywordClusterSuggestionService::class)->suggest([$primary, $secondary])[0];
+        $suggestion['keywords'][1]['role'] = 'brand_supporting';
+
+        $this->assertDomainError(
+            'keyword_cluster.brand_supporting_role_invalid',
+            fn () => app(KeywordClusterService::class)->confirm($suggestion, $this->admin()->id),
+        );
+        $this->assertDatabaseCount('keyword_clusters', 0);
     }
 
     public function test_conservative_ies_stemming_preserves_cookie_and_movie_but_singularizes_party(): void

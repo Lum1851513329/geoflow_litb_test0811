@@ -41,11 +41,11 @@ final class KeywordClusterSuggestionService
                 'language_code' => (string) $keyword->language_code,
                 'market_code' => $keyword->market_code,
                 'market_scope' => (string) $keyword->market_scope,
-                'brand_relation' => (string) $keyword->brand_relation,
+                'brand_scope' => $this->brandScope($keyword),
                 'intent_group' => $this->intentGroup((string) $keyword->search_intent),
             ];
             $boundaryKey = json_encode($boundary, JSON_THROW_ON_ERROR);
-            $value = $this->normalizeValue((string) ($keyword->normalized_keyword ?: $keyword->keyword));
+            $value = $this->clusterValue($keyword);
             if ($value === '') {
                 continue;
             }
@@ -101,6 +101,13 @@ final class KeywordClusterSuggestionService
     private function toSuggestion(array $group, array $blockedPrimaryIds): ?array
     {
         usort($group, static function (array $left, array $right): int {
+            $leftPreferred = $left['keyword']->brand_relation === 'non_brand'
+                && $left['keyword']->keyword_type === 'category';
+            $rightPreferred = $right['keyword']->brand_relation === 'non_brand'
+                && $right['keyword']->keyword_type === 'category';
+            if ($leftPreferred !== $rightPreferred) {
+                return $leftPreferred ? -1 : 1;
+            }
             $leftPrimary = (bool) $left['node']->pivot->is_primary;
             $rightPrimary = (bool) $right['node']->pivot->is_primary;
 
@@ -163,8 +170,49 @@ final class KeywordClusterSuggestionService
         if ($keyword->keyword_type === 'question') {
             return 'question';
         }
+        if ($this->isBrandSupporting($keyword, $primary)) {
+            return 'brand_supporting';
+        }
 
         return 'secondary';
+    }
+
+    public function isBrandSupporting(Keyword $keyword, Keyword $primary): bool
+    {
+        return $primary->brand_relation === 'non_brand'
+            && $primary->keyword_type === 'category'
+            && $keyword->brand_relation === 'brand_category'
+            && $keyword->keyword_type === 'category';
+    }
+
+    private function brandScope(Keyword $keyword): string
+    {
+        return in_array($keyword->brand_relation, ['non_brand', 'brand_category'], true)
+            && $keyword->keyword_type === 'category'
+                ? 'category_demand'
+                : (string) $keyword->brand_relation;
+    }
+
+    private function clusterValue(Keyword $keyword): string
+    {
+        $value = $this->normalizeValue((string) ($keyword->normalized_keyword ?: $keyword->keyword));
+        if ($keyword->brand_relation !== 'brand_category' || $keyword->keyword_type !== 'category') {
+            return $value;
+        }
+
+        foreach (config('keyword_intelligence.brand_variants', []) as $variant) {
+            $variant = $this->normalizeValue((string) $variant);
+            if ($variant === '') {
+                continue;
+            }
+            $value = preg_replace(
+                '/(?<![\p{L}\p{N}])'.preg_quote($variant, '/').'(?![\p{L}\p{N}])/u',
+                ' ',
+                $value,
+            ) ?? $value;
+        }
+
+        return trim((string) preg_replace('/\s+/u', ' ', $value));
     }
 
     private function hasVariantRelation(Keyword $keyword, Keyword $primary): bool

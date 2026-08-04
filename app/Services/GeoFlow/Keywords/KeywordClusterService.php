@@ -14,7 +14,7 @@ use Illuminate\Support\Str;
 
 final class KeywordClusterService
 {
-    private const ROLES = ['primary', 'secondary', 'question', 'variant'];
+    private const ROLES = ['primary', 'secondary', 'question', 'variant', 'brand_supporting'];
 
     public function __construct(private readonly KeywordClusterSuggestionService $suggestionService) {}
 
@@ -201,7 +201,7 @@ final class KeywordClusterService
             if ($keyword->market_code !== $data['market_code'] || $keyword->market_scope !== $data['market_scope']) {
                 throw new DomainException('keyword_cluster.market_boundary');
             }
-            if ($keyword->brand_relation !== $data['brand_relation']) {
+            if (! $this->brandRelationFitsCluster($keyword, $data, $keywords[$data['primary_keyword_id']])) {
                 throw new DomainException('keyword_cluster.brand_boundary');
             }
             if (! in_array($keyword->search_intent, $compatibleIntents, true)) {
@@ -228,10 +228,23 @@ final class KeywordClusterService
             if ($submittedRole === 'variant' && $expectedRole !== 'variant') {
                 throw new DomainException('keyword_cluster.variant_role_invalid');
             }
+            if ($submittedRole === 'brand_supporting' && $expectedRole !== 'brand_supporting') {
+                throw new DomainException('keyword_cluster.brand_supporting_role_invalid');
+            }
             if ($submittedRole !== $expectedRole) {
                 throw new DomainException('keyword_cluster.role_invalid');
             }
         }
+    }
+
+    /** @param array<string,mixed> $data */
+    private function brandRelationFitsCluster(Keyword $keyword, array $data, Keyword $primary): bool
+    {
+        if ($keyword->brand_relation === $data['brand_relation']) {
+            return true;
+        }
+
+        return $this->suggestionService->isBrandSupporting($keyword, $primary);
     }
 
     /** @param array<string,mixed> $data
