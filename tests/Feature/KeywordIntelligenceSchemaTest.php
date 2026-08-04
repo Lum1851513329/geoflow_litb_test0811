@@ -15,6 +15,7 @@ use App\Services\GeoFlow\Keywords\KeywordImportService;
 use Illuminate\Database\QueryException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
 use InvalidArgumentException;
 use Tests\TestCase;
@@ -281,47 +282,77 @@ class KeywordIntelligenceSchemaTest extends TestCase
     public function test_idempotency_migration_backfills_legacy_batches_and_blocks_replay(): void
     {
         Storage::fake('local');
-        $migration = require database_path('migrations/2026_08_03_000002_add_keyword_import_idempotency.php');
-        $migration->down();
-        $library = KeywordLibrary::query()->create(['name' => 'Legacy imports', 'description' => '', 'keyword_count' => 0]);
-        $source = base_path('tests/Fixtures/keywords/category-search-sample.xlsx');
-        $mapping = ['query' => 'keyword', 'clicks' => 'clicks'];
-        $metadata = ['device' => 'desktop'];
-        $legacyBatchId = DB::table('keyword_import_batches')->insertGetId([
-            'library_id' => $library->id,
-            'original_filename' => 'legacy.xlsx',
-            'stored_path' => 'keyword-imports/legacy.xlsx',
-            'file_sha256' => hash_file('sha256', $source),
-            'source_type' => 'search_console',
-            'status' => 'completed',
-            'mapping_json' => json_encode($mapping, JSON_THROW_ON_ERROR),
-            'metadata_json' => json_encode($metadata, JSON_THROW_ON_ERROR),
-            'period_start' => '2026-07-01',
-            'period_end' => '2026-07-31',
-            'created_at' => now(),
-            'updated_at' => now(),
+        $originalConnection = config('database.default');
+        config()->set('database.connections.keyword_upgrade', [
+            ...config('database.connections.sqlite'),
+            'database' => ':memory:',
         ]);
-
-        $migration->up();
-
-        $legacy = DB::table('keyword_import_batches')->where('id', $legacyBatchId)->first();
-        $this->assertNotNull($legacy->import_config_hash);
-        $this->assertSame(64, strlen($legacy->import_config_hash));
-        $this->assertSame('legacy-'.$legacyBatchId, $legacy->config_scope);
+        config()->set('database.default', 'keyword_upgrade');
+        DB::purge('keyword_upgrade');
         try {
-            (new KeywordImportService)->createBatch([
-                'library_id' => $library->id,
-                'source_path' => $source,
-                'original_filename' => 'replay.xlsx',
+            (require database_path('migrations/2026_04_18_100000_create_geoflow_admins_and_site_settings_tables.php'))->up();
+            (require database_path('migrations/2026_04_18_120002_sqlite_geoflow_minimal_for_testing.php'))->up();
+            (require database_path('migrations/2026_08_03_000001_add_keyword_intelligence_foundation.php'))->up();
+            (require database_path('migrations/2026_08_03_000002_add_keyword_import_idempotency.php'))->up();
+
+            $this->assertFalse(Schema::hasColumn('keyword_import_batches', 'config_scope'));
+            $libraryId = DB::table('keyword_libraries')->insertGetId([
+                'name' => 'Legacy imports',
+                'description' => '',
+                'keyword_count' => 0,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+            $source = base_path('tests/Fixtures/keywords/category-search-sample.xlsx');
+            $mapping = ['query' => 'keyword', 'clicks' => 'clicks'];
+            $metadata = ['device' => 'desktop'];
+            $legacyBatchId = DB::table('keyword_import_batches')->insertGetId([
+                'library_id' => $libraryId,
+                'original_filename' => 'legacy.xlsx',
+                'stored_path' => 'keyword-imports/legacy.xlsx',
+                'file_sha256' => hash_file('sha256', $source),
+                'import_config_hash' => null,
                 'source_type' => 'search_console',
-                'mapping_json' => $mapping,
-                'metadata_json' => $metadata,
+                'status' => 'completed',
+                'mapping_json' => json_encode($mapping, JSON_THROW_ON_ERROR),
+                'metadata_json' => json_encode($metadata, JSON_THROW_ON_ERROR),
                 'period_start' => '2026-07-01',
                 'period_end' => '2026-07-31',
+                'created_at' => now(),
+                'updated_at' => now(),
             ]);
-            $this->fail('The legacy file and configuration must block replay.');
-        } catch (InvalidArgumentException $exception) {
-            $this->assertStringContainsString('already have a batch', $exception->getMessage());
+
+            $this->assertNull(DB::table('keyword_import_batches')->where('id', $legacyBatchId)->value('import_config_hash'));
+            $upgrade = require database_path('migrations/2026_08_04_000003_upgrade_keyword_import_config_scope.php');
+            $upgrade->up();
+
+            $legacy = DB::table('keyword_import_batches')->where('id', $legacyBatchId)->first();
+            $this->assertTrue(Schema::hasColumn('keyword_import_batches', 'config_scope'));
+            $this->assertNotNull($legacy->import_config_hash);
+            $this->assertSame(64, strlen($legacy->import_config_hash));
+            $this->assertSame('legacy-'.$legacyBatchId, $legacy->config_scope);
+            try {
+                (new KeywordImportService)->createBatch([
+                    'library_id' => $libraryId,
+                    'source_path' => $source,
+                    'original_filename' => 'replay.xlsx',
+                    'source_type' => 'search_console',
+                    'mapping_json' => $mapping,
+                    'metadata_json' => $metadata,
+                    'period_start' => '2026-07-01',
+                    'period_end' => '2026-07-31',
+                ]);
+                $this->fail('The legacy file and configuration must block replay.');
+            } catch (InvalidArgumentException $exception) {
+                $this->assertStringContainsString('already have a batch', $exception->getMessage());
+            }
+
+            $upgrade->down();
+            $this->assertFalse(Schema::hasColumn('keyword_import_batches', 'config_scope'));
+            $this->assertNull(DB::table('keyword_import_batches')->where('id', $legacyBatchId)->value('import_config_hash'));
+        } finally {
+            DB::purge('keyword_upgrade');
+            config()->set('database.default', $originalConnection);
         }
     }
 

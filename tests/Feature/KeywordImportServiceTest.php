@@ -319,6 +319,42 @@ class KeywordImportServiceTest extends TestCase
         $this->assertSame(0, $library->fresh()->keyword_count);
     }
 
+    public function test_numeric_overflow_and_decimal_precision_are_rejected_without_rolling_back_valid_rows(): void
+    {
+        Storage::fake('local');
+        $library = $this->library();
+        $source = $this->workbook([
+            ['Keyword', 'Clicks', 'Impressions', 'CTR', 'Position', 'Cost', 'Conversions'],
+            ['valid numeric dresses', '9223372036854775807', 100, '0.123456', '123456.1234', '1234567890.1234', '1234567890.1234'],
+            ['bigint overflow dresses', '9223372036854775808', 100, '0.1', '1', '1', '1'],
+            ['exponent overflow dresses', 10, 100, '0.1', '1', '1e24', '1'],
+            ['ctr precision dresses', 10, 100, '12345.123456', '1', '1', '1'],
+            ['position scale dresses', 10, 100, '0.1', '1.12345', '1', '1'],
+            ['cost precision dresses', 10, 100, '0.1', '1', '12345678901.0000', '1'],
+            ['conversion scale dresses', 10, 100, '0.1', '1', '1', '1.12345'],
+        ]);
+        $batch = (new KeywordImportService)->createBatch($this->metadata($library, $source, [
+            'impressions' => 'impressions',
+            'ctr' => 'ctr',
+            'position' => 'position',
+            'cost' => 'cost',
+            'conversions' => 'conversions',
+        ]));
+
+        (new KeywordImportService(chunkSize: 20))->import($batch);
+
+        $this->assertSame('completed', $batch->fresh()->status);
+        $this->assertSame(1, $batch->fresh()->imported_count);
+        $this->assertSame(6, $batch->fresh()->rejected_count);
+        $this->assertDatabaseCount('keywords', 1);
+        $this->assertDatabaseCount('keyword_metrics', 1);
+        $this->assertDatabaseHas('keyword_metrics', [
+            'clicks' => 9223372036854775807,
+            'ctr' => 0.123456,
+            'average_position' => 123456.1234,
+        ]);
+    }
+
     public function test_metrics_are_unique_per_physical_import_row_but_other_batches_and_periods_can_append(): void
     {
         Storage::fake('local');

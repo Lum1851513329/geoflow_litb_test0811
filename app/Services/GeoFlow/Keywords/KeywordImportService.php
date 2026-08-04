@@ -242,12 +242,12 @@ class KeywordImportService
             }
             [$periodStart, $periodEnd] = $this->period($this->mappedValue($values, $mapping, 'date_range'), $batch);
             $metricValues = [
-                'clicks' => $this->nullableInteger($this->mappedValue($values, $mapping, 'clicks')),
-                'impressions' => $this->nullableInteger($this->mappedValue($values, $mapping, 'impressions')),
-                'ctr' => $this->nullableDecimal($this->mappedValue($values, $mapping, 'ctr'), true),
-                'average_position' => $this->nullableDecimal($this->mappedValue($values, $mapping, 'position')),
-                'cost' => $this->nullableDecimal($this->mappedValue($values, $mapping, 'cost')),
-                'conversions' => $this->nullableDecimal($this->mappedValue($values, $mapping, 'conversions')),
+                'clicks' => $this->nullableUnsignedBigInteger($this->mappedValue($values, $mapping, 'clicks')),
+                'impressions' => $this->nullableUnsignedBigInteger($this->mappedValue($values, $mapping, 'impressions')),
+                'ctr' => $this->nullableDecimal($this->mappedValue($values, $mapping, 'ctr'), 10, 6, true),
+                'average_position' => $this->nullableDecimal($this->mappedValue($values, $mapping, 'position'), 10, 4),
+                'cost' => $this->nullableDecimal($this->mappedValue($values, $mapping, 'cost'), 14, 4),
+                'conversions' => $this->nullableDecimal($this->mappedValue($values, $mapping, 'conversions'), 14, 4),
             ];
             $keyword = Keyword::query()
                 ->where('library_id', $batch->library_id)
@@ -417,31 +417,88 @@ class KeywordImportService
         return $date;
     }
 
-    private function nullableInteger(mixed $value): ?int
+    private function nullableUnsignedBigInteger(mixed $value): ?int
     {
         if ($value === null || $value === '') {
             return null;
         }
-        if (! is_numeric($value) || (float) $value < 0 || (float) $value !== floor((float) $value)) {
-            throw new InvalidArgumentException('Integer metrics must be non-negative whole numbers.');
+        $normalized = $this->metricString($value);
+        if (preg_match('/^\+?(\d+)$/', $normalized, $matches) !== 1) {
+            throw new InvalidArgumentException('Integer metrics must be complete non-negative decimal integers.');
+        }
+        $digits = ltrim($matches[1], '0');
+        $digits = $digits === '' ? '0' : $digits;
+        $maximum = '9223372036854775807';
+        if (strlen($digits) > strlen($maximum)
+            || strlen($digits) === strlen($maximum) && strcmp($digits, $maximum) > 0) {
+            throw new InvalidArgumentException('Integer metrics cannot exceed the signed BIGINT maximum.');
         }
 
-        return (int) $value;
+        return (int) $digits;
     }
 
-    private function nullableDecimal(mixed $value, bool $percent = false): ?float
+    private function nullableDecimal(mixed $value, int $precision, int $scale, bool $percent = false): ?string
     {
         if ($value === null || $value === '') {
             return null;
         }
-        $hasPercentSign = is_string($value) && str_ends_with(trim($value), '%');
-        $normalized = $hasPercentSign ? rtrim(trim($value), "% \t\n\r\0\x0B") : $value;
-        if (! is_numeric($normalized) || (float) $normalized < 0) {
-            throw new InvalidArgumentException('Decimal metrics must be non-negative numbers.');
+        $normalized = $this->metricString($value);
+        $hasPercentSign = str_ends_with($normalized, '%');
+        if ($hasPercentSign) {
+            if (! $percent) {
+                throw new InvalidArgumentException('Only CTR metrics may use percent notation.');
+            }
+            $normalized = trim(substr($normalized, 0, -1));
         }
-        $number = (float) $normalized;
+        if (preg_match('/^\+?(\d+)(?:\.(\d+))?$/', $normalized, $matches) !== 1) {
+            throw new InvalidArgumentException('Decimal metrics must use non-negative plain decimal notation.');
+        }
+        $integer = ltrim($matches[1], '0');
+        $integer = $integer === '' ? '0' : $integer;
+        $fraction = $matches[2] ?? '';
+        if ($hasPercentSign) {
+            [$integer, $fraction] = $this->divideDecimalByHundred($integer, $fraction);
+        }
 
-        return $percent && $hasPercentSign ? $number / 100 : $number;
+        $integerDigits = $integer === '0' ? 1 : strlen($integer);
+        if ($integerDigits > $precision - $scale || strlen($fraction) > $scale) {
+            throw new InvalidArgumentException("Decimal metrics must fit DECIMAL({$precision}, {$scale}).");
+        }
+
+        return $fraction === '' ? $integer : $integer.'.'.$fraction;
+    }
+
+    private function metricString(mixed $value): string
+    {
+        if (is_float($value) && ! is_finite($value)) {
+            throw new InvalidArgumentException('Metric values must be finite numbers.');
+        }
+        if (! is_int($value) && ! is_float($value) && ! is_string($value)) {
+            throw new InvalidArgumentException('Metric values must be decimal numbers.');
+        }
+        $normalized = trim((string) $value);
+        if ($normalized === '' || str_contains(strtolower($normalized), 'e')) {
+            throw new InvalidArgumentException('Metric values cannot use empty or exponent notation.');
+        }
+
+        return $normalized;
+    }
+
+    /** @return array{0:string,1:string} */
+    private function divideDecimalByHundred(string $integer, string $fraction): array
+    {
+        $combined = $integer.$fraction;
+        $decimalPosition = strlen($integer) - 2;
+        if ($decimalPosition <= 0) {
+            $resultInteger = '0';
+            $resultFraction = str_repeat('0', -$decimalPosition).$combined;
+        } else {
+            $resultInteger = substr($combined, 0, $decimalPosition);
+            $resultFraction = substr($combined, $decimalPosition);
+        }
+        $resultInteger = ltrim($resultInteger, '0');
+
+        return [$resultInteger === '' ? '0' : $resultInteger, $resultFraction];
     }
 
     /** @param array<string,mixed> $metadata */
