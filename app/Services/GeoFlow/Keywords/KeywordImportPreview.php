@@ -24,6 +24,10 @@ final class KeywordImportPreview
      */
     public function build(string $absolutePath, string $sourceType, array $mapping): array
     {
+        $sampleLimit = min(
+            max(0, $this->maxSamples),
+            max(1, (int) config('keyword_intelligence.workbook.max_preview_samples', 100)),
+        );
         $reader = $this->reader ?? new KeywordWorkbookReader;
         $mapper = $this->mapper ?? new KeywordColumnMapper;
         $normalizer = $this->normalizer ?? new KeywordNormalizer;
@@ -33,19 +37,23 @@ final class KeywordImportPreview
         $rejectedSamples = [];
         $counts = ['total_rows' => 0, 'valid_rows' => 0, 'rejected_rows' => 0];
 
+        $resolvedMappings = [];
         foreach ($inspection['sheets'] as $sheet) {
             $suggestedMapping = $mapper->suggest($sheet['headers'], $sourceType);
-            $resolvedMapping = $this->resolveMapping($suggestedMapping, $mapping, $sheet['headers']);
+            $resolvedMappings[$sheet['name']] = $this->resolveMapping($suggestedMapping, $mapping, $sheet['headers']);
+        }
 
-            foreach ($sheet['rows'] as $row) {
+        foreach ($reader->chunks($absolutePath, $inspection) as $chunk) {
+            $resolvedMapping = $resolvedMappings[$chunk['sheet_name']];
+            foreach ($chunk['rows'] as $row) {
                 $counts['total_rows']++;
                 $values = $row['values'];
-                $payload = ['sheet' => $sheet['name'], 'row_number' => $row['row_number'], 'source_payload' => $values];
+                $payload = ['sheet' => $chunk['sheet_name'], 'row_number' => $row['row_number'], 'source_payload' => $values];
                 $keyword = $this->mappedValue($values, $resolvedMapping, 'keyword');
 
                 if (! is_string($keyword) || trim($keyword) === '') {
                     $counts['rejected_rows']++;
-                    if (count($rejectedSamples) < $this->maxSamples) {
+                    if (count($rejectedSamples) < $sampleLimit) {
                         $rejectedSamples[] = $payload + [
                             'reason_key' => 'blank_keyword',
                             'reason' => 'The keyword cannot be blank.',
@@ -63,7 +71,7 @@ final class KeywordImportPreview
                     );
                 } catch (InvalidArgumentException $exception) {
                     $counts['rejected_rows']++;
-                    if (count($rejectedSamples) < $this->maxSamples) {
+                    if (count($rejectedSamples) < $sampleLimit) {
                         $rejectedSamples[] = $payload + [
                             'reason_key' => 'invalid_keyword_context',
                             'reason' => $exception->getMessage(),
@@ -74,7 +82,7 @@ final class KeywordImportPreview
                 }
 
                 $counts['valid_rows']++;
-                if (count($validSamples) < $this->maxSamples) {
+                if (count($validSamples) < $sampleLimit) {
                     $validSamples[] = $payload + [
                         'keyword' => [
                             'original' => $normalized->original,

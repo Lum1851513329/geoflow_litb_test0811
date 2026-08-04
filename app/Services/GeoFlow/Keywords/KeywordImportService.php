@@ -136,35 +136,42 @@ class KeywordImportService
             }
 
             $inspection = ($this->reader ?? new KeywordWorkbookReader)->inspect($absolutePath);
-            $work = [];
+            $resolvedMappings = [];
+            $estimatedTotal = 0;
             foreach ($inspection['sheets'] as $sheet) {
-                $resolvedMapping = $this->resolveMapping($sheet['headers'], $batch->source_type, $batch->mapping_json ?? []);
-                foreach ($sheet['rows'] as $row) {
-                    $work[] = ['sheet_name' => $sheet['name'], 'row' => $row, 'mapping' => $resolvedMapping];
-                }
+                $resolvedMappings[$sheet['name']] = $this->resolveMapping($sheet['headers'], $batch->source_type, $batch->mapping_json ?? []);
+                $estimatedTotal += $sheet['row_estimate'];
             }
-            unset($inspection);
 
-            DB::transaction(function () use ($batch, $work): void {
+            DB::transaction(function () use ($batch, $estimatedTotal): void {
                 $lockedBatch = KeywordImportBatch::query()->lockForUpdate()->findOrFail($batch->id);
                 if ($lockedBatch->status !== 'processing') {
                     throw new RuntimeException('The keyword import is no longer processing.');
                 }
-                $lockedBatch->forceFill(['total_count' => count($work)])->save();
+                $lockedBatch->forceFill(['total_count' => $estimatedTotal])->save();
             });
-            foreach (array_chunk($work, $this->chunkSize) as $chunk) {
-                DB::transaction(function () use ($batch, $chunk): void {
-                    $lockedBatch = KeywordImportBatch::query()->lockForUpdate()->findOrFail($batch->id);
-                    if ($lockedBatch->status !== 'processing') {
-                        throw new RuntimeException('The keyword import is no longer processing.');
-                    }
-                    foreach ($chunk as $item) {
-                        $this->importRow($lockedBatch, $item['sheet_name'], $item['row'], $item['mapping']);
-                    }
 
-                    $this->refreshCounts($lockedBatch);
-                });
-                $this->safeProgress($batch->fresh());
+            $reader = $this->reader ?? new KeywordWorkbookReader;
+            foreach ($reader->chunks($absolutePath, $inspection) as $workbookChunk) {
+                foreach (array_chunk($workbookChunk['rows'], $this->chunkSize) as $rows) {
+                    DB::transaction(function () use ($batch, $workbookChunk, $rows, $resolvedMappings): void {
+                        $lockedBatch = KeywordImportBatch::query()->lockForUpdate()->findOrFail($batch->id);
+                        if ($lockedBatch->status !== 'processing') {
+                            throw new RuntimeException('The keyword import is no longer processing.');
+                        }
+                        foreach ($rows as $row) {
+                            $this->importRow(
+                                $lockedBatch,
+                                $workbookChunk['sheet_name'],
+                                $row,
+                                $resolvedMappings[$workbookChunk['sheet_name']],
+                            );
+                        }
+
+                        $this->refreshCounts($lockedBatch);
+                    });
+                    $this->safeProgress($batch->fresh());
+                }
             }
 
             DB::transaction(function () use ($batch): void {
@@ -173,6 +180,7 @@ class KeywordImportService
                     throw new RuntimeException('The keyword import is no longer processing.');
                 }
                 $this->refreshCounts($lockedBatch);
+                $lockedBatch->forceFill(['total_count' => $lockedBatch->processed_count]);
                 $lockedBatch->library?->forceFill([
                     'keyword_count' => Keyword::query()->where('library_id', $lockedBatch->library_id)->count(),
                 ])->save();

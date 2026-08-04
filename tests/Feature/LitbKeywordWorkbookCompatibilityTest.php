@@ -79,8 +79,8 @@ class LitbKeywordWorkbookCompatibilityTest extends TestCase
                 array_values($mapper->suggest($sheet['headers'], 'google_search_console')),
             );
             $rowEstimate += $sheet['row_estimate'];
-            if ($sheet['rows'] !== []) {
-                $firstDataRowsBySheet[$sheet['name']] = min(array_column($sheet['rows'], 'row_number'));
+            if ($sheet['sample_rows'] !== []) {
+                $firstDataRowsBySheet[$sheet['name']] = min(array_column($sheet['sample_rows'], 'row_number'));
             }
         }
         $recognizedFields = array_values(array_unique($recognizedFields));
@@ -127,10 +127,10 @@ class LitbKeywordWorkbookCompatibilityTest extends TestCase
             $preview['counts']['rejected_rows'],
             'Rejected rows must not exceed 25% of non-empty data rows.',
         );
-        $this->assertSame(
-            $preview['counts']['rejected_rows'],
+        $this->assertLessThanOrEqual(
+            (int) config('keyword_intelligence.workbook.max_preview_samples'),
             count($preview['rejected_samples']),
-            'All rejected rows must be available for reason and physical-row validation.',
+            'Rejected samples must remain bounded independently of workbook size.',
         );
         $this->assertRejectionsAreExpectedAndKeepPhysicalRowOrder($preview, $firstDataRowsBySheet);
 

@@ -72,7 +72,7 @@ final class KeywordWorkbookReader
     }
 
     /**
-     * @return array{sheets:array<int,array{name:string,headers:array<int,string>,sample_rows:array<int,array{row_number:int,values:array<string,mixed>}>,row_estimate:int,rows:array<int,array{row_number:int,values:array<string,mixed>}>}>}
+     * @return array{sheets:array<int,array{name:string,headers:array<int,string>,sample_rows:array<int,array{row_number:int,values:array<string,mixed>}>,row_estimate:int,header_row:int,total_rows:int,column_count:int}>}
      */
     public function inspect(string $absolutePath): array
     {
@@ -130,8 +130,8 @@ final class KeywordWorkbookReader
             }
             $allocatedDataCells += $rowEstimate * $columnCount;
 
-            $rows = [];
-            for ($startRow = $headerRow + 1; $startRow <= $totalRows; $startRow += $this->chunkRows) {
+            $sampleRows = [];
+            for ($startRow = $headerRow + 1; $startRow <= $totalRows && count($sampleRows) < $this->maxSampleRows; $startRow += $this->chunkRows) {
                 $endRow = min($totalRows, $startRow + $this->chunkRows - 1);
                 $chunkSpreadsheet = $this->loadRange($absolutePath, $worksheetName, $startRow, $endRow, $columnCount);
                 try {
@@ -140,7 +140,8 @@ final class KeywordWorkbookReader
                         throw new InvalidArgumentException('The XLSX workbook could not be read.');
                     }
 
-                    array_push($rows, ...$this->rows($chunkSheet, $headers, $startRow, $endRow));
+                    $remaining = $this->maxSampleRows - count($sampleRows);
+                    array_push($sampleRows, ...array_slice($this->rows($chunkSheet, $headers, $startRow, $endRow), 0, $remaining));
                 } finally {
                     $chunkSpreadsheet->disconnectWorksheets();
                 }
@@ -149,13 +150,95 @@ final class KeywordWorkbookReader
             $sheets[] = [
                 'name' => $worksheetName,
                 'headers' => $headers,
-                'sample_rows' => array_slice($rows, 0, $this->maxSampleRows),
+                'sample_rows' => $sampleRows,
                 'row_estimate' => $rowEstimate,
-                'rows' => $rows,
+                'header_row' => $headerRow,
+                'total_rows' => $totalRows,
+                'column_count' => $columnCount,
             ];
         }
 
         return ['sheets' => $sheets];
+    }
+
+    /**
+     * Stream non-empty worksheet rows without retaining more than one configured chunk.
+     *
+     * @param  array{sheets:array<int,array{name:string,headers:array<int,string>,sample_rows:array<int,array{row_number:int,values:array<string,mixed>}>,row_estimate:int,header_row:int,total_rows:int,column_count:int}>}|null  $inspection
+     * @return \Generator<int,array{sheet_name:string,headers:array<int,string>,rows:array<int,array{row_number:int,values:array<string,mixed>}>}>
+     */
+    public function chunks(string $absolutePath, ?array $inspection = null): \Generator
+    {
+        $this->assertSafeWorkbook($absolutePath);
+        $this->assertSafeZipArchive($absolutePath);
+        $inspection ??= $this->inspect($absolutePath);
+        $this->assertSafeInspection($inspection);
+
+        foreach ($inspection['sheets'] as $sheet) {
+            for ($startRow = $sheet['header_row'] + 1; $startRow <= $sheet['total_rows']; $startRow += $this->chunkRows) {
+                $endRow = min($sheet['total_rows'], $startRow + $this->chunkRows - 1);
+                $chunkSpreadsheet = $this->loadRange(
+                    $absolutePath,
+                    $sheet['name'],
+                    $startRow,
+                    $endRow,
+                    $sheet['column_count'],
+                );
+                try {
+                    $chunkSheet = $chunkSpreadsheet->getSheetByName($sheet['name']);
+                    if ($chunkSheet === null) {
+                        throw new InvalidArgumentException('The XLSX workbook could not be read.');
+                    }
+
+                    $rows = $this->rows($chunkSheet, $sheet['headers'], $startRow, $endRow);
+                    if ($rows !== []) {
+                        yield [
+                            'sheet_name' => $sheet['name'],
+                            'headers' => $sheet['headers'],
+                            'rows' => $rows,
+                        ];
+                    }
+                } finally {
+                    $chunkSpreadsheet->disconnectWorksheets();
+                }
+            }
+        }
+    }
+
+    /** @param array<string,mixed> $inspection */
+    private function assertSafeInspection(array $inspection): void
+    {
+        $sheets = $inspection['sheets'] ?? null;
+        if (! is_array($sheets) || count($sheets) > $this->maxSheets) {
+            throw new InvalidArgumentException('The workbook exceeds the configured sheet limit.');
+        }
+
+        $allocatedDataCells = 0;
+        foreach ($sheets as $sheet) {
+            if (! is_array($sheet)
+                || ! is_string($sheet['name'] ?? null)
+                || ! is_array($sheet['headers'] ?? null)
+                || ! is_int($sheet['header_row'] ?? null)
+                || ! is_int($sheet['total_rows'] ?? null)
+                || ! is_int($sheet['column_count'] ?? null)) {
+                throw new InvalidArgumentException('The workbook inspection metadata is invalid.');
+            }
+
+            $headerRow = $sheet['header_row'];
+            $totalRows = $sheet['total_rows'];
+            $columnCount = $sheet['column_count'];
+            $dataRows = max(0, $totalRows - $headerRow);
+            if ($headerRow < 1 || $headerRow > $this->headerScanRows || $dataRows > $this->maxRowsPerSheet) {
+                throw new InvalidArgumentException('The workbook exceeds the configured row limit.');
+            }
+            if ($columnCount < 1 || $columnCount > $this->maxColumnsPerSheet || count($sheet['headers']) !== $columnCount) {
+                throw new InvalidArgumentException('The workbook exceeds the configured column limit.');
+            }
+            if ($dataRows > intdiv($this->maxDataCells - $allocatedDataCells, $columnCount)) {
+                throw new InvalidArgumentException('The workbook exceeds the configured data cell budget.');
+            }
+            $allocatedDataCells += $dataRows * $columnCount;
+        }
     }
 
     private function loadRange(string $absolutePath, string $worksheetName, int $startRow, int $endRow, int $columnCount): object

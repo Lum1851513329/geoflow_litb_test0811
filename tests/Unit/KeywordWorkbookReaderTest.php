@@ -55,8 +55,9 @@ class KeywordWorkbookReaderTest extends TestCase
 
         $this->assertSame(['keyword_status', 'keyword', 'impr', 'clicks'], $inspection['sheets'][0]['headers']);
         $this->assertSame(1, $inspection['sheets'][0]['row_estimate']);
-        $this->assertSame(4, $inspection['sheets'][0]['rows'][0]['row_number']);
-        $this->assertSame('formal dresses', $inspection['sheets'][0]['rows'][0]['values']['keyword']);
+        $this->assertArrayNotHasKey('rows', $inspection['sheets'][0]);
+        $this->assertSame(4, $inspection['sheets'][0]['sample_rows'][0]['row_number']);
+        $this->assertSame('formal dresses', $inspection['sheets'][0]['sample_rows'][0]['values']['keyword']);
     }
 
     public function test_chunked_reads_preserve_physical_rows_across_chunk_boundaries(): void
@@ -69,9 +70,11 @@ class KeywordWorkbookReaderTest extends TestCase
             ['prom dresses', 21],
         ]);
 
-        $inspection = (new KeywordWorkbookReader(chunkRows: 1))->inspect($path);
+        $reader = new KeywordWorkbookReader(chunkRows: 1);
+        $inspection = $reader->inspect($path);
+        $chunks = iterator_to_array($reader->chunks($path, $inspection), false);
 
-        $this->assertSame([4, 5], array_column($inspection['sheets'][0]['rows'], 'row_number'));
+        $this->assertSame([4, 5], array_column(array_merge(...array_column($chunks, 'rows')), 'row_number'));
     }
 
     public function test_it_rejects_a_low_confidence_keyword_candidate_after_the_first_row(): void
@@ -97,7 +100,43 @@ class KeywordWorkbookReaderTest extends TestCase
         $inspection = (new KeywordWorkbookReader)->inspect($path);
 
         $this->assertSame(['keyword'], $inspection['sheets'][0]['headers']);
-        $this->assertSame(2, $inspection['sheets'][0]['rows'][0]['row_number']);
+        $this->assertSame(2, $inspection['sheets'][0]['sample_rows'][0]['row_number']);
+    }
+
+    public function test_inspection_and_streaming_state_are_bounded_by_samples_and_chunk_size(): void
+    {
+        $rows = [['Keyword', 'Clicks']];
+        for ($index = 1; $index <= 17; $index++) {
+            $rows[] = ["dress {$index}", $index];
+        }
+        $path = $this->makeWorkbook($rows);
+        $reader = new KeywordWorkbookReader(maxSampleRows: 2, chunkRows: 3);
+
+        $inspection = $reader->inspect($path);
+        $retainedRows = count($inspection['sheets'][0]['sample_rows']);
+        $chunkSizes = [];
+        $physicalRows = [];
+        foreach ($reader->chunks($path, $inspection) as $chunk) {
+            $chunkSizes[] = count($chunk['rows']);
+            $physicalRows = array_merge($physicalRows, array_column($chunk['rows'], 'row_number'));
+        }
+
+        $this->assertArrayNotHasKey('rows', $inspection['sheets'][0], 'Inspection must not retain a workbook-sized rows array.');
+        $this->assertSame(2, $retainedRows);
+        $this->assertSame([3, 3, 3, 3, 3, 2], $chunkSizes);
+        $this->assertSame(range(2, 18), $physicalRows);
+    }
+
+    public function test_streaming_rejects_tampered_inspection_metadata_that_exceeds_reader_budgets(): void
+    {
+        $path = $this->makeWorkbook([['Keyword'], ['formal dresses']]);
+        $reader = new KeywordWorkbookReader(maxRowsPerSheet: 10);
+        $inspection = $reader->inspect($path);
+        $inspection['sheets'][0]['total_rows'] = 50_000;
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('row limit');
+        iterator_to_array($reader->chunks($path, $inspection));
     }
 
     public function test_it_enforces_a_cumulative_workbook_data_cell_budget(): void
@@ -296,6 +335,23 @@ class KeywordWorkbookReaderTest extends TestCase
         $this->assertSame([], $writes);
         Bus::assertNothingDispatched();
         Queue::assertNothingPushed();
+    }
+
+    public function test_preview_sample_output_cannot_exceed_the_configured_retention_budget(): void
+    {
+        config()->set('keyword_intelligence.workbook.max_preview_samples', 2);
+        $path = $this->makeWorkbook([
+            ['Keyword'],
+            ['dress one'],
+            ['dress two'],
+            ['dress three'],
+            ['dress four'],
+        ]);
+
+        $preview = (new KeywordImportPreview(maxSamples: 1000))->build($path, 'google_search_console', []);
+
+        $this->assertSame(4, $preview['counts']['valid_rows']);
+        $this->assertCount(2, $preview['valid_samples']);
     }
 
     public function test_preview_uses_raw_excel_row_numbers_after_ignoring_an_empty_row(): void

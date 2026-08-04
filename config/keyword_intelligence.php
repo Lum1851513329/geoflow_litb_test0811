@@ -8,6 +8,7 @@ return [
         'max_rows_per_sheet' => 50_000,
         'max_columns_per_sheet' => 50,
         'max_sample_rows' => 10,
+        'max_preview_samples' => 100,
         'header_scan_rows' => 10,
         'chunk_rows' => 5_000,
         'max_data_cells' => 500_000,
