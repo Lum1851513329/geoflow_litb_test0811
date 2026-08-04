@@ -186,9 +186,13 @@ final class KeywordClusterSuggestionService
             if (str_ends_with($last, 'ies') && strlen($last) > 4) {
                 $ieCandidate = implode(' ', [...$tokens, substr($last, 0, -1)]);
                 $yCandidate = implode(' ', [...$tokens, substr($last, 0, -3).'y']);
-                $last = isset($knownValues[$ieCandidate]) && ! isset($knownValues[$yCandidate])
-                    ? substr($last, 0, -1)
-                    : substr($last, 0, -3).'y';
+                $hasIeCandidate = isset($knownValues[$ieCandidate]);
+                $hasYCandidate = isset($knownValues[$yCandidate]);
+                if ($hasIeCandidate && ! $hasYCandidate) {
+                    $last = substr($last, 0, -1);
+                } elseif ($hasYCandidate && ! $hasIeCandidate) {
+                    $last = substr($last, 0, -3).'y';
+                }
             } elseif (preg_match('/(?:sses|xes|zes|ches|shes)$/', $last) === 1) {
                 $last = substr($last, 0, -2);
             } elseif (str_ends_with($last, 's') && ! str_ends_with($last, 'ss')) {

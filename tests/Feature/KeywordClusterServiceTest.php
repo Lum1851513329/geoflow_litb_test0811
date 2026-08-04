@@ -101,6 +101,48 @@ class KeywordClusterServiceTest extends TestCase
         }
     }
 
+    public function test_plural_only_cookie_and_movie_terms_remain_independent_suggestions(): void
+    {
+        [$node] = $this->nodes();
+        $cookies = $this->keyword('cookies', $node);
+        $movies = $this->keyword('movies', $node);
+
+        $suggestions = app(KeywordClusterSuggestionService::class)->suggest([$cookies, $movies]);
+
+        $this->assertCount(2, $suggestions);
+        $this->assertEqualsCanonicalizing(['cookies', 'movies'], array_column($suggestions, 'slug'));
+        $this->assertSame([1, 1], array_map(static fn (array $suggestion): int => count($suggestion['keywords']), $suggestions));
+    }
+
+    public function test_ambiguous_cookie_and_movie_plurals_do_not_merge_with_real_cooky_or_movy_terms(): void
+    {
+        [$node] = $this->nodes();
+        $cookie = $this->keyword('cookie', $node);
+        $cookies = $this->keyword('cookies', $node);
+        $cooky = $this->keyword('cooky', $node);
+        $movie = $this->keyword('movie', $node);
+        $movies = $this->keyword('movies', $node);
+        $movy = $this->keyword('movy', $node);
+
+        $suggestions = app(KeywordClusterSuggestionService::class)->suggest([
+            $cookie,
+            $cookies,
+            $cooky,
+            $movie,
+            $movies,
+            $movy,
+        ]);
+
+        $this->assertCount(6, $suggestions);
+        $this->assertEqualsCanonicalizing(
+            ['cookie', 'cookies', 'cooky', 'movie', 'movies', 'movy'],
+            array_column($suggestions, 'slug'),
+        );
+        foreach ($suggestions as $suggestion) {
+            $this->assertCount(1, $suggestion['keywords']);
+        }
+    }
+
     public function test_confirm_creates_an_active_audited_cluster_and_memberships_atomically(): void
     {
         [$node] = $this->nodes();
