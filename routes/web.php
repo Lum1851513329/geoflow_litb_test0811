@@ -23,6 +23,7 @@ use App\Http\Controllers\Admin\DashboardController;
 use App\Http\Controllers\Admin\DistributionController;
 use App\Http\Controllers\Admin\EnterpriseKnowledgeController;
 use App\Http\Controllers\Admin\ImageLibraryController;
+use App\Http\Controllers\Admin\KeywordIntelligenceController;
 use App\Http\Controllers\Admin\KeywordLibraryController;
 use App\Http\Controllers\Admin\KnowledgeBaseController;
 use App\Http\Controllers\Admin\LeadController;
@@ -221,6 +222,23 @@ Route::prefix($adminPrefix)->name('admin.')->middleware(['admin.locale'])->group
             Route::put('{libraryId}/detail', [KeywordLibraryController::class, 'updateFromDetail'])->name('detail.update');
             Route::put('{libraryId}', [KeywordLibraryController::class, 'update'])->name('update');
             Route::post('{libraryId}/delete', [KeywordLibraryController::class, 'destroy'])->name('delete');
+        });
+
+        Route::prefix('keyword-intelligence')->name('keyword-intelligence.')->group(function () {
+            Route::get('/', [KeywordIntelligenceController::class, 'index'])->name('index');
+            Route::get('import', [KeywordIntelligenceController::class, 'import'])->name('import');
+            Route::post('import/preview', [KeywordIntelligenceController::class, 'preview'])->name('import.preview');
+            Route::post('import/confirm', [KeywordIntelligenceController::class, 'confirm'])->name('import.confirm');
+            Route::get('imports/{batch}/status', [KeywordIntelligenceController::class, 'status'])->name('import.status')->whereNumber('batch');
+            Route::post('imports/{batch}/revert', [KeywordIntelligenceController::class, 'revert'])->name('import.revert')->whereNumber('batch');
+            Route::get('taxonomy', [KeywordIntelligenceController::class, 'taxonomy'])->name('taxonomy');
+            Route::post('taxonomy/nodes', [KeywordIntelligenceController::class, 'storeNode'])->name('taxonomy.nodes.store');
+            Route::post('taxonomy/nodes/move', [KeywordIntelligenceController::class, 'moveNode'])->name('taxonomy.nodes.move');
+            Route::post('taxonomy/nodes/{node}/assign', [KeywordIntelligenceController::class, 'assign'])->name('taxonomy.nodes.assign')->whereNumber('node');
+            Route::get('clusters', [KeywordIntelligenceController::class, 'clusters'])->name('clusters');
+            Route::post('clusters/confirm', [KeywordIntelligenceController::class, 'confirmCluster'])->name('clusters.confirm');
+            Route::get('clusters/{cluster}', [KeywordIntelligenceController::class, 'showCluster'])->name('clusters.show')->whereNumber('cluster');
+            Route::post('clusters/{cluster}/score', [KeywordIntelligenceController::class, 'score'])->name('clusters.score')->whereNumber('cluster');
         });
 
         // 素材管理：标题库管理

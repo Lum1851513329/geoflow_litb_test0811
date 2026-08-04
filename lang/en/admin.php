@@ -1,6 +1,22 @@
 <?php
 
 return [
+    'keyword_intelligence' => [
+        'nav' => ['overview' => 'Keyword Intelligence', 'import' => 'Import workbook', 'taxonomy' => 'Taxonomy', 'clusters' => 'Topic clusters'],
+        'legacy_libraries' => 'Legacy keyword libraries',
+        'overview' => ['title' => 'Keyword Intelligence', 'subtitle' => 'Manage normalized keywords, auditable imports, taxonomies, clusters, and opportunity scores.'],
+        'filters' => ['search' => 'Search keyword', 'type' => 'Type', 'intent' => 'Intent', 'language' => 'Language', 'market' => 'Market', 'apply' => 'Apply filters'],
+        'columns' => ['keyword' => 'Keyword', 'type' => 'Type', 'intent' => 'Intent', 'scope' => 'Locale / market', 'cluster' => 'Cluster', 'primary' => 'Primary keyword', 'score' => 'Opportunity score', 'status' => 'Status'],
+        'import' => ['title' => 'Keyword workbook import', 'read_only_notice' => 'Preview only reads the workbook. No keyword records are written until confirmation.', 'preview_title' => 'Read-only preview', 'preview_counts' => ':total_rows rows: :valid_rows valid, :rejected_rows rejected.', 'confirm_title' => 'Confirm import', 'choose_library' => 'Choose a keyword library', 'recent' => 'Recent imports'],
+        'taxonomy' => ['title' => 'Keyword taxonomy', 'root' => 'Root level', 'node_name' => 'Node name'],
+        'clusters' => ['title' => 'Topic clusters'],
+        'score' => ['components' => 'Score components', 'penalties' => 'Penalties'],
+        'actions' => ['preview' => 'Preview', 'confirm_import' => 'Confirm and queue import', 'revert' => 'Revert', 'create' => 'Create node', 'move' => 'Move', 'assign' => 'Assign keywords', 'recompute' => 'Recompute score'],
+        'status' => ['empty' => 'No imports yet.', 'uploaded' => 'Queued', 'processing' => 'Importing', 'failed' => 'Failed', 'completed' => 'Completed', 'reverting' => 'Reverting', 'reverted' => 'Reverted'],
+        'empty' => ['keywords' => 'No keywords match the filters.', 'nodes' => 'No nodes yet.', 'taxonomies' => 'No taxonomy configured.', 'clusters' => 'No confirmed clusters yet.', 'scores' => 'No opportunity score has been computed.'],
+        'messages' => ['import_queued' => 'The keyword import has been queued.', 'reverted' => 'The import was reverted and its audit rows were retained.', 'node_created' => 'Taxonomy node created.', 'node_moved' => 'Taxonomy node moved.', 'keywords_assigned' => 'Keywords assigned.', 'cluster_confirmed' => 'Cluster confirmed.', 'score_updated' => 'Opportunity score recomputed.'],
+        'validation' => ['attributes' => ['workbook' => 'workbook', 'source_type' => 'source type', 'library_id' => 'keyword library', 'language_code' => 'language', 'market_code' => 'market', 'period_start' => 'period start', 'period_end' => 'period end'], 'duplicate_mapping' => 'Each canonical field can be mapped only once.', 'revert_status' => 'Only completed or failed imports can be reverted.', 'cluster_invalid' => 'The cluster suggestion is incomplete or conflicts with existing keyword boundaries.'],
+    ],
     'nav' => [
         'dashboard' => 'Dashboard',
         'analytics' => 'Growth Center',

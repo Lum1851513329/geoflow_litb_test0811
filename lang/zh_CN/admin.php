@@ -1,6 +1,22 @@
 <?php
 
 return [
+    'keyword_intelligence' => [
+        'nav' => ['overview' => '关键词智能', 'import' => '导入工作簿', 'taxonomy' => '分类体系', 'clusters' => '主题集群'],
+        'legacy_libraries' => '原关键词库',
+        'overview' => ['title' => '关键词智能', 'subtitle' => '统一管理标准化关键词、可审计导入、分类体系、主题集群与机会评分。'],
+        'filters' => ['search' => '搜索关键词', 'type' => '类型', 'intent' => '意图', 'language' => '语言', 'market' => '市场', 'apply' => '筛选'],
+        'columns' => ['keyword' => '关键词', 'type' => '类型', 'intent' => '搜索意图', 'scope' => '语言／市场', 'cluster' => '集群', 'primary' => '主关键词', 'score' => '机会评分', 'status' => '状态'],
+        'import' => ['title' => '关键词工作簿导入', 'read_only_notice' => '预览只读取工作簿；确认前不会写入任何关键词业务数据。', 'preview_title' => '只读预览', 'preview_counts' => '共 :total_rows 行：有效 :valid_rows 行，拒绝 :rejected_rows 行。', 'confirm_title' => '确认导入', 'choose_library' => '选择关键词库', 'recent' => '最近导入'],
+        'taxonomy' => ['title' => '关键词分类体系', 'root' => '根节点', 'node_name' => '节点名称'],
+        'clusters' => ['title' => '主题集群'],
+        'score' => ['components' => '评分组成', 'penalties' => '扣分项'],
+        'actions' => ['preview' => '预览', 'confirm_import' => '确认并加入导入队列', 'revert' => '撤销', 'create' => '创建节点', 'move' => '移动', 'assign' => '分配关键词', 'recompute' => '重新计算评分'],
+        'status' => ['empty' => '暂无导入记录。', 'uploaded' => '已排队', 'processing' => '导入中', 'failed' => '失败', 'completed' => '已完成', 'reverting' => '撤销中', 'reverted' => '已撤销'],
+        'empty' => ['keywords' => '没有符合筛选条件的关键词。', 'nodes' => '暂无节点。', 'taxonomies' => '尚未配置分类体系。', 'clusters' => '暂无已确认集群。', 'scores' => '尚未计算机会评分。'],
+        'messages' => ['import_queued' => '关键词导入任务已加入队列。', 'reverted' => '导入已撤销，审计行已保留。', 'node_created' => '分类节点已创建。', 'node_moved' => '分类节点已移动。', 'keywords_assigned' => '关键词已分配。', 'cluster_confirmed' => '集群已确认。', 'score_updated' => '机会评分已重新计算。'],
+        'validation' => ['attributes' => ['workbook' => '工作簿', 'source_type' => '来源类型', 'library_id' => '关键词库', 'language_code' => '语言', 'market_code' => '市场', 'period_start' => '统计开始日期', 'period_end' => '统计结束日期'], 'duplicate_mapping' => '每个标准字段只能映射一次。', 'revert_status' => '只有已完成或失败的导入可以撤销。', 'cluster_invalid' => '集群建议不完整，或与现有关键词边界冲突。'],
+    ],
     'nav' => [
         'dashboard' => '首页',
         'analytics' => '增长中心',
