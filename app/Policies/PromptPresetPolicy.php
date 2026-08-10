@@ -33,4 +33,14 @@ final class PromptPresetPolicy
         return (int) $version->prompt_preset_id === (int) $preset->id
             && $this->update($admin, $preset);
     }
+
+    public function deprecateVersion(Admin $admin, PromptPreset $preset, PromptPresetVersion $version): bool
+    {
+        return $this->publishVersion($admin, $preset, $version);
+    }
+
+    public function archiveVersion(Admin $admin, PromptPreset $preset, PromptPresetVersion $version): bool
+    {
+        return $this->publishVersion($admin, $preset, $version);
+    }
 }

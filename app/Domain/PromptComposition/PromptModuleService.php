@@ -119,6 +119,30 @@ final class PromptModuleService
         return $archived;
     }
 
+    public function deprecate(PromptModuleVersion $version, Admin $actor, string $reason): PromptModuleVersion
+    {
+        $deprecated = DB::transaction(function () use ($version, $reason): PromptModuleVersion {
+            [$module, $lockedVersion] = $this->lockModuleAndVersion($version);
+            if ($lockedVersion->lifecycle_status === PromptModuleVersion::STATUS_ARCHIVED) {
+                throw ImmutablePromptVersionException::cannotTransitionArchived((int) $lockedVersion->id);
+            }
+
+            $lockedVersion->update([
+                'lifecycle_status' => PromptModuleVersion::STATUS_DEPRECATED,
+                'change_note' => $reason,
+            ]);
+            if ((int) $module->current_version_id === (int) $lockedVersion->id) {
+                $module->forceFill(['current_version_id' => null])->save();
+            }
+
+            return $lockedVersion->fresh();
+        });
+
+        $this->log($actor, 'prompt_module_version:deprecated', $deprecated->module, $deprecated, $reason);
+
+        return $deprecated;
+    }
+
     /** @param array<string, mixed> $data */
     private function createVersionForLockedModule(PromptModule $module, array $data, Admin $actor): PromptModuleVersion
     {

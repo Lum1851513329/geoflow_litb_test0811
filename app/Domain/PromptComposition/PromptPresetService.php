@@ -15,9 +15,9 @@ use InvalidArgumentException;
 final class PromptPresetService
 {
     /**
-     * @param array<string, mixed> $identity
-     * @param array<string, mixed> $version
-     * @param list<array<string, mixed>> $bindings
+     * @param  array<string, mixed>  $identity
+     * @param  array<string, mixed>  $version
+     * @param  list<array<string, mixed>>  $bindings
      */
     public function createPreset(array $identity, array $version, array $bindings, Admin $actor): PromptPreset
     {
@@ -39,8 +39,8 @@ final class PromptPresetService
     }
 
     /**
-     * @param array<string, mixed> $data
-     * @param list<array<string, mixed>> $bindings
+     * @param  array<string, mixed>  $data
+     * @param  list<array<string, mixed>>  $bindings
      */
     public function createVersion(PromptPreset $preset, array $data, array $bindings, Admin $actor): PromptPresetVersion
     {
@@ -52,12 +52,7 @@ final class PromptPresetService
     public function publish(PromptPresetVersion $version, Admin $actor, string $reason): PromptPresetVersion
     {
         return DB::transaction(function () use ($version, $reason): PromptPresetVersion {
-            $preset = PromptPreset::query()->whereKey($version->prompt_preset_id)->lockForUpdate()->firstOrFail();
-            $lockedVersion = PromptPresetVersion::query()
-                ->whereKey($version->getKey())
-                ->where('prompt_preset_id', $preset->id)
-                ->lockForUpdate()
-                ->firstOrFail();
+            [$preset, $lockedVersion] = $this->lockPresetAndVersion($version);
             if ($lockedVersion->lifecycle_status === PromptPresetVersion::STATUS_ARCHIVED) {
                 throw new InvalidArgumentException("Archived prompt preset version {$lockedVersion->id} cannot be published.");
             }
@@ -65,9 +60,9 @@ final class PromptPresetService
             $bindings = PromptPresetModuleVersion::query()
                 ->where('prompt_preset_version_id', $lockedVersion->id)
                 ->orderBy('sort_order')
-            ->orderBy('id')
-            ->lockForUpdate()
-            ->get();
+                ->orderBy('id')
+                ->lockForUpdate()
+                ->get();
             $boundVersions = $this->lockBoundModuleVersions($bindings);
             $this->assertNonArchived($boundVersions);
 
@@ -92,9 +87,49 @@ final class PromptPresetService
         });
     }
 
+    public function deprecate(PromptPresetVersion $version, Admin $actor, string $reason): PromptPresetVersion
+    {
+        return DB::transaction(function () use ($version, $reason): PromptPresetVersion {
+            [$preset, $lockedVersion] = $this->lockPresetAndVersion($version);
+            if ($lockedVersion->lifecycle_status === PromptPresetVersion::STATUS_ARCHIVED) {
+                throw new InvalidArgumentException("Archived prompt preset version {$lockedVersion->id} cannot change lifecycle status.");
+            }
+
+            $lockedVersion->update([
+                'lifecycle_status' => PromptPresetVersion::STATUS_DEPRECATED,
+                'change_note' => $reason,
+            ]);
+            if ((int) $preset->current_version_id === (int) $lockedVersion->id) {
+                $preset->forceFill(['current_version_id' => null])->save();
+            }
+
+            return $lockedVersion->fresh();
+        });
+    }
+
+    public function archive(PromptPresetVersion $version, Admin $actor, string $reason): PromptPresetVersion
+    {
+        return DB::transaction(function () use ($version, $reason): PromptPresetVersion {
+            [$preset, $lockedVersion] = $this->lockPresetAndVersion($version);
+            if ($lockedVersion->lifecycle_status === PromptPresetVersion::STATUS_ARCHIVED) {
+                throw new InvalidArgumentException("Prompt preset version {$lockedVersion->id} is already archived.");
+            }
+
+            $lockedVersion->update([
+                'lifecycle_status' => PromptPresetVersion::STATUS_ARCHIVED,
+                'change_note' => $reason,
+            ]);
+            if ((int) $preset->current_version_id === (int) $lockedVersion->id) {
+                $preset->forceFill(['current_version_id' => null])->save();
+            }
+
+            return $lockedVersion->fresh();
+        });
+    }
+
     /**
-     * @param array<string, mixed> $data
-     * @param list<array<string, mixed>> $bindings
+     * @param  array<string, mixed>  $data
+     * @param  list<array<string, mixed>>  $bindings
      */
     private function createVersionForLockedPreset(
         PromptPreset $preset,
@@ -132,6 +167,19 @@ final class PromptPresetService
     private function lockPreset(PromptPreset $preset): PromptPreset
     {
         return PromptPreset::query()->whereKey($preset->getKey())->lockForUpdate()->firstOrFail();
+    }
+
+    /** @return array{0: PromptPreset, 1: PromptPresetVersion} */
+    private function lockPresetAndVersion(PromptPresetVersion $version): array
+    {
+        $preset = PromptPreset::query()->whereKey($version->prompt_preset_id)->lockForUpdate()->firstOrFail();
+        $lockedVersion = PromptPresetVersion::query()
+            ->whereKey($version->getKey())
+            ->where('prompt_preset_id', $preset->id)
+            ->lockForUpdate()
+            ->firstOrFail();
+
+        return [$preset, $lockedVersion];
     }
 
     /** @param list<array<string, mixed>> $bindings @return Collection<int, PromptModuleVersion> */

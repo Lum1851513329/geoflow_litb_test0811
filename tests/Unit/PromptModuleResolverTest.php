@@ -3,6 +3,7 @@
 namespace Tests\Unit;
 
 use App\Domain\PromptComposition\PromptModuleResolver;
+use App\Domain\PromptComposition\PromptModuleService;
 use App\Domain\PromptComposition\PromptPresetService;
 use App\Domain\PromptComposition\ResolvedPromptModule;
 use App\Exceptions\ImmutablePromptVersionException;
@@ -241,11 +242,27 @@ class PromptModuleResolverTest extends TestCase
         $this->assertModuleQueryPrecedesVersionQuery($queries);
         $this->expectException(ImmutablePromptVersionException::class);
 
-        app(\App\Domain\PromptComposition\PromptModuleService::class)->archive(
+        app(PromptModuleService::class)->archive(
             $this->versions['buying_guide'],
             $this->admin,
             'Referenced by the production preset',
         );
+    }
+
+    public function test_preset_version_can_be_explicitly_deprecated_then_archived(): void
+    {
+        $preset = $this->presetVersion->preset;
+        $preset->forceFill(['current_version_id' => $this->presetVersion->id])->save();
+        $service = app(PromptPresetService::class);
+
+        $deprecated = $service->deprecate($this->presetVersion, $this->admin, 'Retire active preset');
+
+        $this->assertSame(PromptPresetVersion::STATUS_DEPRECATED, $deprecated->lifecycle_status);
+        $this->assertNull($preset->fresh()->current_version_id);
+
+        $archived = $service->archive($deprecated, $this->admin, 'Retention archive');
+        $this->assertSame(PromptPresetVersion::STATUS_ARCHIVED, $archived->lifecycle_status);
+        $this->assertSame('Retention archive', $archived->change_note);
     }
 
     /** @return array<string, string> */

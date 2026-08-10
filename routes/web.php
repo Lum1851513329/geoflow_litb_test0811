@@ -99,8 +99,10 @@ Route::prefix($adminPrefix)->name('admin.')->middleware(['admin.locale'])->group
             Route::get('/', [PromptModuleController::class, 'index'])->name('index');
             Route::post('/', [PromptModuleController::class, 'store'])->name('store');
             Route::get('{module}', [PromptModuleController::class, 'show'])->name('show');
+            Route::patch('{module}', [PromptModuleController::class, 'update'])->name('update');
             Route::post('{module}/versions', [PromptModuleController::class, 'storeVersion'])->name('versions.store');
             Route::post('{module}/versions/{version}/publish', [PromptModuleController::class, 'publish'])->name('versions.publish');
+            Route::post('{module}/versions/{version}/deprecate', [PromptModuleController::class, 'deprecate'])->name('versions.deprecate');
             Route::post('{module}/versions/{version}/archive', [PromptModuleController::class, 'archive'])->name('versions.archive');
             Route::delete('{module}/versions/{version}', [PromptModuleController::class, 'destroyVersion'])->name('versions.destroy');
         });
@@ -110,7 +112,11 @@ Route::prefix($adminPrefix)->name('admin.')->middleware(['admin.locale'])->group
             Route::get('{preset}/edit', [PromptPresetController::class, 'edit'])->name('edit');
             Route::post('{preset}/versions', [PromptPresetController::class, 'storeVersion'])->name('versions.store');
             Route::post('{preset}/versions/{version}/publish', [PromptPresetController::class, 'publish'])->name('versions.publish');
+            Route::post('{preset}/versions/{version}/deprecate', [PromptPresetController::class, 'deprecate'])->name('versions.deprecate');
+            Route::post('{preset}/versions/{version}/archive', [PromptPresetController::class, 'archive'])->name('versions.archive');
         });
+        Route::get('prompt-module-version-options', [PromptPresetController::class, 'moduleVersionOptions'])
+            ->name('prompt-module-version-options');
     });
 
     // 后台受保护路由

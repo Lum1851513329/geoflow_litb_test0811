@@ -136,6 +136,21 @@ class PromptModuleServiceTest extends TestCase
         app(PromptModuleService::class)->publish($version, $this->admin, 'Restore archived version');
     }
 
+    public function test_explicit_deprecation_clears_the_current_version_without_mutating_content(): void
+    {
+        $module = $this->moduleWithVersions(['production']);
+        $version = $module->versions()->sole();
+        $module->forceFill(['current_version_id' => $version->id])->save();
+        $content = $version->content;
+
+        $deprecated = app(PromptModuleService::class)->deprecate($version, $this->admin, 'Superseded manually');
+
+        $this->assertSame(PromptModuleVersion::STATUS_DEPRECATED, $deprecated->lifecycle_status);
+        $this->assertNull($module->fresh()->current_version_id);
+        $this->assertSame($content, $deprecated->content);
+        $this->assertSame('Superseded manually', $deprecated->change_note);
+    }
+
     public function test_publish_and_archive_query_the_parent_module_before_relevant_versions(): void
     {
         $module = $this->moduleWithVersions(['production', 'draft']);

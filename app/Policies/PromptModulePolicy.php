@@ -28,6 +28,11 @@ final class PromptModulePolicy
         return $this->canManage($admin, $module);
     }
 
+    public function update(Admin $admin, PromptModule $module): bool
+    {
+        return $this->canManage($admin, $module);
+    }
+
     public function publishVersion(Admin $admin, PromptModule $module, PromptModuleVersion $version): bool
     {
         return (int) $version->prompt_module_id === (int) $module->id
@@ -35,6 +40,11 @@ final class PromptModulePolicy
     }
 
     public function archiveVersion(Admin $admin, PromptModule $module, PromptModuleVersion $version): bool
+    {
+        return $this->publishVersion($admin, $module, $version);
+    }
+
+    public function deprecateVersion(Admin $admin, PromptModule $module, PromptModuleVersion $version): bool
     {
         return $this->publishVersion($admin, $module, $version);
     }

@@ -9,7 +9,7 @@ return [
     'prompt_modules' => [
         'title' => 'Prompt 模块',
         'subtitle' => '管理不可变 Prompt 快照、生命周期发布、版本对比与使用记录。',
-        'create_title' => '创建 Prompt 模块', 'version_create_title' => '创建新版本', 'empty' => '当前筛选条件下没有 Prompt 模块。',
+        'create_title' => '创建 Prompt 模块', 'version_create_title' => '创建新版本', 'identity_title' => '模块设置', 'empty' => '当前筛选条件下没有 Prompt 模块。',
         'filters' => ['search' => '搜索键或名称', 'all_types' => '全部模块类型'],
         'fields' => [
             'module' => '模块', 'module_key' => '模块键', 'display_name' => '显示名称', 'type' => '类型', 'description' => '说明',
@@ -18,12 +18,12 @@ return [
             'current_version' => '当前版本', 'status' => '状态', 'enabled' => '启用', 'mandatory' => '必选模块', 'system' => '系统模块',
             'change_note' => '变更说明', 'reason' => '必填原因',
         ],
-        'actions' => ['manage_presets' => '管理预设', 'filter' => '筛选', 'create' => '创建模块', 'create_version' => '创建版本', 'publish' => '发布', 'rollback_publish' => '作为回滚版本发布', 'archive' => '归档', 'compare' => '对比'],
+        'actions' => ['manage_presets' => '管理预设', 'filter' => '筛选', 'create' => '创建模块', 'create_version' => '创建版本', 'publish' => '发布', 'rollback_publish' => '作为回滚版本发布', 'deprecate' => '弃用', 'archive' => '归档', 'compare' => '对比', 'update' => '更新模块'],
         'types' => ['foundation' => '基础', 'geo' => 'GEO', 'seo' => 'SEO', 'content_type' => '内容类型', 'platform' => '平台', 'language_market' => '语言／市场', 'knowledge_policy' => '知识策略', 'output_format' => '输出格式', 'quality_check' => '质量检查'],
         'status' => ['none' => '无当前版本'],
-        'diff' => ['title' => '逐行对比', 'subtitle' => '对比两个精确不可变版本的新增与删除行。', 'compare_to' => '对比版本', 'empty' => '请选择另一个版本进行对比。'],
+        'diff' => ['title' => '逐行对比', 'subtitle' => '对比两个精确不可变版本的新增与删除行。', 'compare_to' => '对比版本', 'empty' => '请选择另一个版本进行对比。', 'truncated' => '版本超过 :limit 行，本次对比采用采样（旧版：:old 行，新版：:new 行）。当前展示开头和结尾；请查看精确快照以核对省略的中间内容。'],
         'usage' => ['title' => '版本使用记录', 'subtitle' => '使用过该精确版本的生成运行与文章。', 'run' => '生成运行', 'article' => '文章', 'empty' => '尚无生成运行使用该精确版本。'],
-        'messages' => ['created' => 'Prompt 模块已创建。', 'version_created' => 'Prompt 模块版本已创建。', 'published' => 'Prompt 模块版本已发布。', 'archived' => 'Prompt 模块版本已归档。'],
+        'messages' => ['created' => 'Prompt 模块已创建。', 'updated' => 'Prompt 模块已更新。', 'version_created' => 'Prompt 模块版本已创建。', 'published' => 'Prompt 模块版本已发布。', 'deprecated' => 'Prompt 模块版本已弃用。', 'archived' => 'Prompt 模块版本已归档。'],
         'validation' => ['version_in_use' => '该不可变版本正在被使用，不能删除。', 'version_immutable' => 'Prompt 版本快照不可变，不能删除。'],
     ],
     'prompt_presets' => [
@@ -31,9 +31,9 @@ return [
         'version_create_title' => '创建新的预设版本', 'version_create_hint' => '保存会创建新的不可变版本，不会修改当前快照。',
         'order_hint' => '系统按从上到下的顺序保存精确版本 ID。', 'empty' => '当前筛选条件下没有 Prompt 预设。', 'filters' => ['search' => '搜索键或名称'],
         'fields' => ['preset' => '预设', 'preset_key' => '预设键', 'display_name' => '显示名称', 'description' => '说明', 'current_version' => '当前版本', 'status' => '状态', 'matching_rules' => '匹配规则（JSON）', 'generation_policy' => '生成策略（JSON）', 'conflict_policy' => '冲突策略（JSON）', 'change_note' => '变更说明', 'ordered_modules' => '有序精确模块版本', 'choose_version' => '选择精确模块版本', 'required' => '必选', 'optional' => '可选', 'enabled' => '启用', 'system' => '系统预设', 'reason' => '必填原因'],
-        'actions' => ['manage_modules' => '管理模块', 'filter' => '筛选', 'add_module' => '添加一行', 'remove' => '移除', 'create' => '创建预设', 'create_version' => '创建版本', 'publish' => '发布', 'rollback_publish' => '作为回滚版本发布'],
+        'actions' => ['manage_modules' => '管理模块', 'filter' => '筛选', 'add_module' => '添加一行', 'remove' => '移除', 'move_up' => '上移', 'move_down' => '下移', 'create' => '创建预设', 'create_version' => '创建版本', 'publish' => '发布', 'rollback_publish' => '作为回滚版本发布', 'deprecate' => '弃用', 'archive' => '归档'],
         'usage' => ['title' => '预设版本使用记录', 'run' => '生成运行', 'article' => '文章', 'empty' => '尚未使用该精确预设版本。'],
-        'messages' => ['created' => 'Prompt 预设已创建。', 'version_created' => 'Prompt 预设版本已创建。', 'published' => 'Prompt 预设版本已发布。'],
+        'messages' => ['created' => 'Prompt 预设已创建。', 'version_created' => 'Prompt 预设版本已创建。', 'published' => 'Prompt 预设版本已发布。', 'deprecated' => 'Prompt 预设版本已弃用。', 'archived' => 'Prompt 预设版本已归档。'],
     ],
     'keyword_intelligence' => [
         'nav' => ['overview' => '关键词智能', 'import' => '导入工作簿', 'taxonomy' => '分类体系', 'clusters' => '主题集群'],

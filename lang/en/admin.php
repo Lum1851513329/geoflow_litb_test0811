@@ -11,6 +11,7 @@ return [
         'subtitle' => 'Manage immutable Prompt snapshots, lifecycle promotion, comparisons, and usage.',
         'create_title' => 'Create Prompt module',
         'version_create_title' => 'Create a new version',
+        'identity_title' => 'Module settings',
         'empty' => 'No Prompt modules match the current filters.',
         'filters' => ['search' => 'Search key or name', 'all_types' => 'All module types'],
         'fields' => [
@@ -24,7 +25,7 @@ return [
         'actions' => [
             'manage_presets' => 'Manage presets', 'filter' => 'Filter', 'create' => 'Create module',
             'create_version' => 'Create version', 'publish' => 'Publish', 'rollback_publish' => 'Publish as rollback',
-            'archive' => 'Archive', 'compare' => 'Compare',
+            'deprecate' => 'Deprecate', 'archive' => 'Archive', 'compare' => 'Compare', 'update' => 'Update module',
         ],
         'types' => [
             'foundation' => 'Foundation', 'geo' => 'GEO', 'seo' => 'SEO', 'content_type' => 'Content type',
@@ -32,9 +33,9 @@ return [
             'output_format' => 'Output format', 'quality_check' => 'Quality check',
         ],
         'status' => ['none' => 'No current version'],
-        'diff' => ['title' => 'Line comparison', 'subtitle' => 'Added and removed lines between exact immutable versions.', 'compare_to' => 'Compare with', 'empty' => 'Choose another version to compare.'],
+        'diff' => ['title' => 'Line comparison', 'subtitle' => 'Added and removed lines between exact immutable versions.', 'compare_to' => 'Compare with', 'empty' => 'Choose another version to compare.', 'truncated' => 'Comparison is sampled because one or both versions exceed :limit lines (old: :old, new: :new). The beginning and end are shown; inspect the exact snapshots for omitted middle lines.'],
         'usage' => ['title' => 'Version usage', 'subtitle' => 'Generation runs and articles that used this exact version.', 'run' => 'Generation run', 'article' => 'Article', 'empty' => 'This exact version has not been used by a generation run.'],
-        'messages' => ['created' => 'Prompt module created.', 'version_created' => 'Prompt module version created.', 'published' => 'Prompt module version published.', 'archived' => 'Prompt module version archived.'],
+        'messages' => ['created' => 'Prompt module created.', 'updated' => 'Prompt module updated.', 'version_created' => 'Prompt module version created.', 'published' => 'Prompt module version published.', 'deprecated' => 'Prompt module version deprecated.', 'archived' => 'Prompt module version archived.'],
         'validation' => ['version_in_use' => 'This immutable version is in use and cannot be deleted.', 'version_immutable' => 'Prompt version snapshots are immutable and cannot be deleted.'],
     ],
     'prompt_presets' => [
@@ -54,10 +55,11 @@ return [
         ],
         'actions' => [
             'manage_modules' => 'Manage modules', 'filter' => 'Filter', 'add_module' => 'Add row', 'remove' => 'Remove',
-            'create' => 'Create preset', 'create_version' => 'Create version', 'publish' => 'Publish', 'rollback_publish' => 'Publish as rollback',
+            'move_up' => 'Move up', 'move_down' => 'Move down', 'create' => 'Create preset', 'create_version' => 'Create version',
+            'publish' => 'Publish', 'rollback_publish' => 'Publish as rollback', 'deprecate' => 'Deprecate', 'archive' => 'Archive',
         ],
         'usage' => ['title' => 'Preset version usage', 'run' => 'Generation run', 'article' => 'Article', 'empty' => 'This exact preset version has not been used.'],
-        'messages' => ['created' => 'Prompt preset created.', 'version_created' => 'Prompt preset version created.', 'published' => 'Prompt preset version published.'],
+        'messages' => ['created' => 'Prompt preset created.', 'version_created' => 'Prompt preset version created.', 'published' => 'Prompt preset version published.', 'deprecated' => 'Prompt preset version deprecated.', 'archived' => 'Prompt preset version archived.'],
     ],
     'keyword_intelligence' => [
         'nav' => ['overview' => 'Keyword Intelligence', 'import' => 'Import workbook', 'taxonomy' => 'Taxonomy', 'clusters' => 'Topic clusters'],

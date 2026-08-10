@@ -47,6 +47,7 @@ final class StorePromptPresetRequest extends FormRequest
             'module_versions.*.prompt_module_version_id' => [
                 'required', 'integer', 'distinct', 'exists:prompt_module_versions,id',
             ],
+            'module_versions.*.sort_order' => ['sometimes', 'integer', 'min:1', 'max:100', 'distinct'],
             'module_versions.*.is_required' => ['sometimes', 'boolean'],
         ];
     }

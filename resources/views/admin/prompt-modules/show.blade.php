@@ -12,12 +12,26 @@
             <a href="{{ route('admin.prompt-modules.show', [$module, 'version_id' => $version->id]) }}" class="rounded-full px-3 py-1 text-sm {{ $selectedVersion?->id === $version->id ? 'bg-blue-600 text-white' : 'bg-white text-gray-700 ring-1 ring-gray-200' }}">v{{ $version->version }} · {{ $version->lifecycle_status }}</a>
         @endforeach
     </nav>
+    <div>{{ $versions->links() }}</div>
+
+    @if(\Illuminate\Support\Facades\Gate::forUser(auth('admin')->user())->allows('update', $module))
+        <section class="rounded-lg bg-white p-6 shadow"><h2 class="text-lg font-semibold">{{ __('admin.prompt_modules.identity_title') }}</h2><form method="POST" action="{{ route('admin.prompt-modules.update', $module) }}" class="mt-4 grid gap-4 lg:grid-cols-2">@csrf @method('PATCH')
+            <label class="text-sm font-medium">{{ __('admin.prompt_modules.fields.display_name') }}<input name="display_name" value="{{ old('display_name', $module->display_name) }}" required class="mt-1 w-full rounded-md border-gray-300"></label>
+            <label class="text-sm font-medium">{{ __('admin.prompt_modules.fields.type') }}<select name="module_type" required class="mt-1 w-full rounded-md border-gray-300">@foreach($moduleTypes as $type => $label)<option value="{{ $type }}" @selected(old('module_type', $module->module_type) === $type)>{{ $label }}</option>@endforeach</select></label>
+            <label class="lg:col-span-2 text-sm font-medium">{{ __('admin.prompt_modules.fields.description') }}<textarea name="description" rows="2" class="mt-1 w-full rounded-md border-gray-300">{{ old('description', $module->description) }}</textarea></label>
+            <label class="text-sm font-medium">{{ __('admin.prompt_modules.fields.priority') }}<input type="number" name="default_priority" value="{{ old('default_priority', $module->default_priority) }}" required class="mt-1 w-full rounded-md border-gray-300"></label>
+            <label class="lg:col-span-2 text-sm font-medium">{{ __('admin.prompt_modules.fields.applicability') }}<textarea name="applicability" rows="4" class="mt-1 w-full rounded-md border-gray-300 font-mono text-xs">{{ old('applicability', json_encode($module->applicability ?? [], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)) }}</textarea></label>
+            <div class="flex flex-wrap gap-5 lg:col-span-2"><input type="hidden" name="is_enabled" value="0"><label class="inline-flex items-center gap-2"><input type="checkbox" name="is_enabled" value="1" @checked($module->is_enabled)>{{ __('admin.prompt_modules.fields.enabled') }}</label><input type="hidden" name="is_mandatory" value="0"><label class="inline-flex items-center gap-2"><input type="checkbox" name="is_mandatory" value="1" @checked($module->is_mandatory)>{{ __('admin.prompt_modules.fields.mandatory') }}</label>@if(auth('admin')->user()?->isSuperAdmin())<input type="hidden" name="is_system" value="0"><label class="inline-flex items-center gap-2"><input type="checkbox" name="is_system" value="1" @checked($module->is_system)>{{ __('admin.prompt_modules.fields.system') }}</label>@endif</div>
+            <div class="lg:col-span-2"><button class="rounded-md bg-blue-600 px-4 py-2 text-sm font-semibold text-white">{{ __('admin.prompt_modules.actions.update') }}</button></div>
+        </form></section>
+    @endif
 
     @if($selectedVersion)
         <section class="overflow-hidden rounded-lg bg-white shadow">
             <div class="flex flex-wrap items-center justify-between gap-3 border-b border-gray-200 px-6 py-4"><div><h2 class="font-semibold text-gray-900">v{{ $selectedVersion->version }} · {{ $selectedVersion->lifecycle_status }}</h2><p class="mt-1 text-xs text-gray-500">SHA-256 {{ $selectedVersion->content_sha256 }}</p></div><div class="flex flex-wrap gap-2">
                 @if($selectedVersion->lifecycle_status !== \App\Models\PromptModuleVersion::STATUS_ARCHIVED && \Illuminate\Support\Facades\Gate::forUser(auth('admin')->user())->allows('publishVersion', [$module, $selectedVersion]))
                     <form method="POST" action="{{ route('admin.prompt-modules.versions.publish', [$module, $selectedVersion]) }}" class="flex gap-2">@csrf<input name="reason" required maxlength="2000" class="rounded-md border-gray-300 text-sm" placeholder="{{ __('admin.prompt_modules.fields.reason') }}"><button class="rounded-md bg-green-600 px-3 py-2 text-sm font-semibold text-white">{{ $selectedVersion->lifecycle_status === \App\Models\PromptModuleVersion::STATUS_DEPRECATED ? __('admin.prompt_modules.actions.rollback_publish') : __('admin.prompt_modules.actions.publish') }}</button></form>
+                    @if($selectedVersion->lifecycle_status !== \App\Models\PromptModuleVersion::STATUS_DEPRECATED)<form method="POST" action="{{ route('admin.prompt-modules.versions.deprecate', [$module, $selectedVersion]) }}" class="flex gap-2">@csrf<input name="reason" required maxlength="2000" class="rounded-md border-gray-300 text-sm" placeholder="{{ __('admin.prompt_modules.fields.reason') }}"><button class="rounded-md border border-amber-300 px-3 py-2 text-sm font-semibold text-amber-700">{{ __('admin.prompt_modules.actions.deprecate') }}</button></form>@endif
                     <form method="POST" action="{{ route('admin.prompt-modules.versions.archive', [$module, $selectedVersion]) }}" class="flex gap-2">@csrf<input name="reason" required maxlength="2000" class="rounded-md border-gray-300 text-sm" placeholder="{{ __('admin.prompt_modules.fields.reason') }}"><button class="rounded-md border border-red-300 px-3 py-2 text-sm font-semibold text-red-700">{{ __('admin.prompt_modules.actions.archive') }}</button></form>
                 @endif
             </div></div>
@@ -29,6 +43,7 @@
             <div class="mt-4 overflow-auto rounded-md bg-gray-950 p-4 font-mono text-xs text-gray-200">
                 @forelse($diffLines as $line)<div class="whitespace-pre-wrap {{ $line['kind'] === 'added' ? 'bg-green-950 text-green-200' : ($line['kind'] === 'removed' ? 'bg-red-950 text-red-200' : '') }}"><span class="inline-block w-5 select-none opacity-70">{{ $line['kind'] === 'added' ? '+' : ($line['kind'] === 'removed' ? '-' : ' ') }}</span>{{ $line['line'] }}</div>@empty<div class="text-gray-400">{{ __('admin.prompt_modules.diff.empty') }}</div>@endforelse
             </div>
+            @if($diffMetadata['truncated'])<p class="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">{{ __('admin.prompt_modules.diff.truncated', ['old' => $diffMetadata['old_line_count'], 'new' => $diffMetadata['new_line_count'], 'limit' => $diffMetadata['compared_line_limit']]) }}</p>@endif
         </section>
 
         <section class="rounded-lg bg-white p-6 shadow">

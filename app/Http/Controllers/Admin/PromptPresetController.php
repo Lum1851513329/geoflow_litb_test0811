@@ -11,7 +11,10 @@ use App\Models\PromptModuleVersion;
 use App\Models\PromptPreset;
 use App\Models\PromptPresetVersion;
 use App\Support\AdminActivityLogger;
+use Closure;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Collection;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -28,7 +31,9 @@ final class PromptPresetController extends Controller
     {
         Gate::forUser($this->actor($request))->authorize('viewAny', PromptPreset::class);
 
-        $query = PromptPreset::query()->with('currentVersion')->orderBy('preset_key');
+        $query = PromptPreset::query()
+            ->with(['currentVersion:id,prompt_preset_id,version,lifecycle_status'])
+            ->orderBy('preset_key');
         if (($search = trim((string) $request->query('q'))) !== '') {
             $query->where(function ($builder) use ($search): void {
                 $builder->where('preset_key', 'like', '%'.$search.'%')
@@ -40,7 +45,7 @@ final class PromptPresetController extends Controller
             'pageTitle' => __('admin.prompt_presets.title'),
             'activeMenu' => 'ai_config',
             'presets' => $query->paginate(20)->withQueryString(),
-            'moduleVersions' => $this->moduleVersionOptions(),
+            'moduleVersions' => $this->moduleVersionChoices(),
         ]);
     }
 
@@ -70,10 +75,25 @@ final class PromptPresetController extends Controller
         Gate::forUser($this->actor($request))->authorize('view', $preset);
 
         $versions = $preset->versions()
-            ->with(['moduleVersions.promptModuleVersion.module'])
+            ->select(['id', 'prompt_preset_id', 'version', 'lifecycle_status', 'change_note', 'published_at', 'created_at'])
             ->orderByDesc('version')
-            ->get();
-        $selected = $versions->firstWhere('id', (int) $request->query('version_id')) ?? $versions->first();
+            ->paginate(20, ['*'], 'versions_page')
+            ->withQueryString();
+        $selectedQuery = $preset->versions();
+        $selected = $request->query->has('version_id')
+            ? $selectedQuery->whereKey((int) $request->query('version_id'))->firstOrFail()
+            : $selectedQuery->orderByDesc('version')->first();
+        $selected?->load([
+            'moduleVersions' => fn ($query) => $query->select([
+                'id', 'prompt_preset_version_id', 'prompt_module_version_id', 'sort_order', 'is_required',
+            ])->orderBy('sort_order'),
+            'moduleVersions.promptModuleVersion' => fn ($query) => $query->select([
+                'id', 'prompt_module_id', 'version', 'lifecycle_status',
+            ]),
+            'moduleVersions.promptModuleVersion.module' => fn ($query) => $query->select([
+                'id', 'module_key', 'display_name', 'module_type',
+            ]),
+        ]);
         $usages = ContentGenerationRun::query()
             ->when($selected !== null, fn ($query) => $query->where('preset_version_id', $selected->id))
             ->when($selected === null, fn ($query) => $query->whereRaw('1 = 0'))
@@ -89,8 +109,27 @@ final class PromptPresetController extends Controller
             'versions' => $versions,
             'selectedVersion' => $selected,
             'usages' => $usages,
-            'moduleVersions' => $this->moduleVersionOptions(),
+            'moduleVersions' => $this->moduleVersionChoices(),
         ]);
+    }
+
+    public function moduleVersionOptions(Request $request): JsonResponse
+    {
+        Gate::forUser($this->actor($request))->authorize('viewAny', PromptPreset::class);
+        $validated = $request->validate(['q' => ['nullable', 'string', 'max:150']]);
+        $search = trim((string) ($validated['q'] ?? ''));
+        $query = $this->moduleVersionOptionQuery($search);
+        $paginator = $query->paginate(25)->withQueryString();
+        $paginator->through(fn (PromptModuleVersion $version): array => [
+            'id' => (int) $version->id,
+            'module_id' => (int) $version->prompt_module_id,
+            'module_key' => (string) $version->module?->module_key,
+            'display_name' => (string) $version->module?->display_name,
+            'version' => (int) $version->version,
+            'lifecycle_status' => (string) $version->lifecycle_status,
+        ]);
+
+        return response()->json($paginator);
     }
 
     public function storeVersion(StorePromptPresetRequest $request, PromptPreset $preset): RedirectResponse
@@ -99,10 +138,12 @@ final class PromptPresetController extends Controller
         $actor = $this->actor($request);
         try {
             $version = DB::transaction(function () use ($preset, $data, $actor): PromptPresetVersion {
-                $preset->update($this->identityData($data, $preset));
+                $lockedPreset = PromptPreset::query()->whereKey($preset->id)->lockForUpdate()->firstOrFail();
+                Gate::forUser($actor)->authorize('update', $lockedPreset);
+                $lockedPreset->update($this->mutableIdentityData($data, $actor));
 
                 return $this->presets->createVersion(
-                    $preset,
+                    $lockedPreset,
                     $this->versionData($data),
                     $this->bindings($data),
                     $actor,
@@ -119,41 +160,128 @@ final class PromptPresetController extends Controller
 
     public function publish(Request $request, PromptPreset $preset, PromptPresetVersion $version): RedirectResponse
     {
+        return $this->mutateLifecycle(
+            $request,
+            $preset,
+            $version,
+            'publishVersion',
+            'prompt_preset_version:published',
+            __('admin.prompt_presets.messages.published'),
+            fn (PromptPresetVersion $lockedVersion, Admin $actor, string $reason): PromptPresetVersion => $this->presets->publish($lockedVersion, $actor, $reason),
+        );
+    }
+
+    public function deprecate(Request $request, PromptPreset $preset, PromptPresetVersion $version): RedirectResponse
+    {
+        return $this->mutateLifecycle(
+            $request,
+            $preset,
+            $version,
+            'deprecateVersion',
+            'prompt_preset_version:deprecated',
+            __('admin.prompt_presets.messages.deprecated'),
+            fn (PromptPresetVersion $lockedVersion, Admin $actor, string $reason): PromptPresetVersion => $this->presets->deprecate($lockedVersion, $actor, $reason),
+        );
+    }
+
+    public function archive(Request $request, PromptPreset $preset, PromptPresetVersion $version): RedirectResponse
+    {
+        return $this->mutateLifecycle(
+            $request,
+            $preset,
+            $version,
+            'archiveVersion',
+            'prompt_preset_version:archived',
+            __('admin.prompt_presets.messages.archived'),
+            fn (PromptPresetVersion $lockedVersion, Admin $actor, string $reason): PromptPresetVersion => $this->presets->archive($lockedVersion, $actor, $reason),
+        );
+    }
+
+    /** @param Closure(PromptPresetVersion, Admin, string): PromptPresetVersion $mutation */
+    private function mutateLifecycle(
+        Request $request,
+        PromptPreset $preset,
+        PromptPresetVersion $version,
+        string $ability,
+        string $action,
+        string $message,
+        Closure $mutation,
+    ): RedirectResponse {
         $actor = $this->actor($request);
-        Gate::forUser($actor)->authorize('publishVersion', [$preset, $version]);
         $validated = $request->validate(['reason' => ['required', 'string', 'max:2000']]);
+        $reason = (string) $validated['reason'];
         try {
-            $published = $this->presets->publish($version, $actor, (string) $validated['reason']);
+            [$lockedPreset, $changed] = DB::transaction(function () use ($preset, $version, $actor, $ability, $mutation, $reason): array {
+                $lockedPreset = PromptPreset::query()->whereKey($preset->id)->lockForUpdate()->firstOrFail();
+                $lockedVersion = PromptPresetVersion::query()
+                    ->whereKey($version->id)
+                    ->where('prompt_preset_id', $lockedPreset->id)
+                    ->lockForUpdate()
+                    ->firstOrFail();
+                Gate::forUser($actor)->authorize($ability, [$lockedPreset, $lockedVersion]);
+
+                return [$lockedPreset, $mutation($lockedVersion, $actor, $reason)];
+            });
         } catch (InvalidArgumentException $exception) {
             throw ValidationException::withMessages(['reason' => $exception->getMessage()]);
         }
-        $this->log($actor, 'prompt_preset_version:published', $preset, $published, (string) $validated['reason']);
+        $this->log($actor, $action, $lockedPreset, $changed, $reason);
 
         return redirect()->route('admin.prompt-presets.edit', $preset)
-            ->with('message', __('admin.prompt_presets.messages.published'));
+            ->with('message', $message);
     }
 
     /** @return Collection<int, PromptModuleVersion> */
-    private function moduleVersionOptions()
+    private function moduleVersionChoices(): Collection
+    {
+        return $this->moduleVersionOptionQuery('')->limit(50)->get();
+    }
+
+    /** @return Builder<PromptModuleVersion> */
+    private function moduleVersionOptionQuery(string $search)
     {
         return PromptModuleVersion::query()
+            ->select(['id', 'prompt_module_id', 'version', 'lifecycle_status'])
             ->where('lifecycle_status', '!=', PromptModuleVersion::STATUS_ARCHIVED)
+            ->when($search !== '', fn ($query) => $query->whereHas('module', function ($moduleQuery) use ($search): void {
+                $moduleQuery->where(function ($searchQuery) use ($search): void {
+                    $searchQuery->where('module_key', 'like', '%'.$search.'%')
+                        ->orWhere('display_name', 'like', '%'.$search.'%');
+                });
+            }))
             ->with('module:id,module_key,display_name,module_type')
             ->orderBy('prompt_module_id')
-            ->orderByDesc('version')
-            ->get();
+            ->orderByDesc('version');
     }
 
     /** @param array<string, mixed> $data @return array<string, mixed> */
-    private function identityData(array $data, ?PromptPreset $preset = null): array
+    private function identityData(array $data): array
     {
         return [
             'preset_key' => $data['preset_key'],
             'display_name' => $data['display_name'],
             'description' => $data['description'] ?? null,
-            'is_system' => (bool) ($data['is_system'] ?? $preset?->is_system ?? false),
-            'is_enabled' => (bool) ($data['is_enabled'] ?? $preset?->is_enabled ?? true),
+            'is_system' => (bool) ($data['is_system'] ?? false),
+            'is_enabled' => (bool) ($data['is_enabled'] ?? true),
         ];
+    }
+
+    /** @param array<string, mixed> $data @return array<string, mixed> */
+    private function mutableIdentityData(array $data, Admin $actor): array
+    {
+        $identity = [
+            'preset_key' => $data['preset_key'],
+            'display_name' => $data['display_name'],
+            'description' => $data['description'] ?? null,
+        ];
+        if (array_key_exists('is_enabled', $data)) {
+            $identity['is_enabled'] = (bool) $data['is_enabled'];
+        }
+        if (array_key_exists('is_system', $data) && $actor->isSuperAdmin()) {
+            $identity['is_system'] = (bool) $data['is_system'];
+        }
+
+        return $identity;
     }
 
     /** @param array<string, mixed> $data @return array<string, mixed> */
@@ -170,13 +298,22 @@ final class PromptPresetController extends Controller
     /** @param array<string, mixed> $data @return list<array<string, mixed>> */
     private function bindings(array $data): array
     {
-        return collect($data['module_versions'])->values()->map(
-            fn (array $binding, int $index): array => [
-                'prompt_module_version_id' => (int) $binding['prompt_module_version_id'],
-                'sort_order' => $index + 1,
-                'is_required' => (bool) ($binding['is_required'] ?? false),
-            ],
-        )->all();
+        return collect($data['module_versions'])
+            ->values()
+            ->map(fn (array $binding, int $index): array => [
+                ...$binding,
+                '_input_index' => $index,
+                '_requested_order' => (int) ($binding['sort_order'] ?? $index + 1),
+            ])
+            ->sortBy(fn (array $binding): array => [$binding['_requested_order'], $binding['_input_index']])
+            ->values()
+            ->map(
+                fn (array $binding, int $index): array => [
+                    'prompt_module_version_id' => (int) $binding['prompt_module_version_id'],
+                    'sort_order' => $index + 1,
+                    'is_required' => (bool) ($binding['is_required'] ?? false),
+                ],
+            )->all();
     }
 
     private function log(

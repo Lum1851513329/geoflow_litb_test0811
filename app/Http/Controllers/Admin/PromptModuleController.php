@@ -8,12 +8,15 @@ use App\Http\Controllers\Controller;
 use App\Http\Requests\Admin\PublishPromptModuleVersionRequest;
 use App\Http\Requests\Admin\StorePromptModuleRequest;
 use App\Http\Requests\Admin\StorePromptModuleVersionRequest;
+use App\Http\Requests\Admin\UpdatePromptModuleRequest;
 use App\Models\Admin;
 use App\Models\ContentGenerationRunModule;
 use App\Models\PromptModule;
 use App\Models\PromptModuleVersion;
+use App\Support\AdminActivityLogger;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Gate;
 use Illuminate\Validation\ValidationException;
 use Illuminate\View\View;
@@ -26,7 +29,10 @@ final class PromptModuleController extends Controller
     {
         Gate::forUser($this->actor($request))->authorize('viewAny', PromptModule::class);
 
-        $query = PromptModule::query()->with('currentVersion')->orderBy('module_type')->orderBy('module_key');
+        $query = PromptModule::query()
+            ->with(['currentVersion:id,prompt_module_id,version,lifecycle_status'])
+            ->orderBy('module_type')
+            ->orderBy('module_key');
         if (($search = trim((string) $request->query('q'))) !== '') {
             $query->where(function ($builder) use ($search): void {
                 $builder->where('module_key', 'like', '%'.$search.'%')
@@ -58,19 +64,60 @@ final class PromptModuleController extends Controller
             ->with('message', __('admin.prompt_modules.messages.created'));
     }
 
+    public function update(UpdatePromptModuleRequest $request, PromptModule $module): RedirectResponse
+    {
+        $actor = $this->actor($request);
+        DB::transaction(function () use ($request, $module, $actor): void {
+            $locked = PromptModule::query()->whereKey($module->id)->lockForUpdate()->firstOrFail();
+            Gate::forUser($actor)->authorize('update', $locked);
+            $data = $request->validated();
+            $updates = [
+                'display_name' => $data['display_name'],
+                'module_type' => $data['module_type'],
+                'description' => $data['description'] ?? null,
+                'applicability' => $data['applicability'] ?? null,
+                'default_priority' => (int) $data['default_priority'],
+                'is_mandatory' => (bool) $data['is_mandatory'],
+                'is_enabled' => (bool) $data['is_enabled'],
+            ];
+            if (array_key_exists('is_system', $data) && $actor->isSuperAdmin()) {
+                $updates['is_system'] = (bool) $data['is_system'];
+            }
+            $locked->update($updates);
+        });
+
+        AdminActivityLogger::log($actor, 'prompt_module:updated', [
+            'target_type' => 'prompt_module',
+            'target_id' => $module->id,
+            'details' => ['updated_fields' => array_keys($request->validated())],
+        ]);
+
+        return redirect()->route('admin.prompt-modules.show', $module)
+            ->with('message', __('admin.prompt_modules.messages.updated'));
+    }
+
     public function show(Request $request, PromptModule $module): View
     {
         Gate::forUser($this->actor($request))->authorize('view', $module);
 
-        $allVersions = $module->versions()->orderByDesc('version')->get();
-        $selected = $allVersions->firstWhere('id', (int) $request->query('version_id')) ?? $allVersions->first();
+        $versions = $module->versions()
+            ->select(['id', 'prompt_module_id', 'version', 'content_sha256', 'lifecycle_status', 'change_note', 'published_at', 'created_at'])
+            ->orderByDesc('version')
+            ->paginate(20, ['*'], 'versions_page')
+            ->withQueryString();
+        $selectedQuery = $module->versions();
+        $selected = $request->query->has('version_id')
+            ? $selectedQuery->whereKey((int) $request->query('version_id'))->firstOrFail()
+            : $selectedQuery->orderByDesc('version')->first();
         $compareTo = null;
         if ($selected !== null) {
-            $requestedCompareId = (int) $request->query('compare_to');
-            $compareTo = $requestedCompareId > 0
-                ? $allVersions->firstWhere('id', $requestedCompareId)
-                : $allVersions->first(fn (PromptModuleVersion $item): bool => $item->version < $selected->version);
+            $compareTo = $request->query->has('compare_to')
+                ? $module->versions()->whereKey((int) $request->query('compare_to'))->firstOrFail()
+                : $module->versions()->where('version', '<', $selected->version)->orderByDesc('version')->first();
         }
+        [$diffLines, $diffMetadata] = $selected !== null && $compareTo !== null
+            ? $this->lineDiff((string) $compareTo->content, (string) $selected->content)
+            : [[], ['truncated' => false, 'old_line_count' => 0, 'new_line_count' => 0, 'compared_line_limit' => 500]];
 
         $usages = ContentGenerationRunModule::query()
             ->when($selected !== null, fn ($query) => $query->where('prompt_module_version_id', $selected->id))
@@ -84,12 +131,12 @@ final class PromptModuleController extends Controller
             'pageTitle' => $module->display_name,
             'activeMenu' => 'ai_config',
             'module' => $module,
-            'versions' => $allVersions,
+            'moduleTypes' => $this->moduleTypes(),
+            'versions' => $versions,
             'selectedVersion' => $selected,
             'compareVersion' => $compareTo,
-            'diffLines' => $selected !== null && $compareTo !== null
-                ? $this->lineDiff((string) $compareTo->content, (string) $selected->content)
-                : [],
+            'diffLines' => $diffLines,
+            'diffMetadata' => $diffMetadata,
             'usages' => $usages,
         ]);
     }
@@ -131,6 +178,22 @@ final class PromptModuleController extends Controller
 
         return redirect()->route('admin.prompt-modules.show', $module)
             ->with('message', __('admin.prompt_modules.messages.archived'));
+    }
+
+    public function deprecate(Request $request, PromptModule $module, PromptModuleVersion $version): RedirectResponse
+    {
+        $actor = $this->actor($request);
+        Gate::forUser($actor)->authorize('deprecateVersion', [$module, $version]);
+        $validated = $request->validate(['reason' => ['required', 'string', 'max:2000']]);
+
+        try {
+            $this->modules->deprecate($version, $actor, (string) $validated['reason']);
+        } catch (ImmutablePromptVersionException $exception) {
+            throw ValidationException::withMessages(['reason' => $exception->getMessage()]);
+        }
+
+        return redirect()->route('admin.prompt-modules.show', $module)
+            ->with('message', __('admin.prompt_modules.messages.deprecated'));
     }
 
     public function destroyVersion(Request $request, PromptModule $module, PromptModuleVersion $version): RedirectResponse
@@ -191,11 +254,15 @@ final class PromptModuleController extends Controller
         ])->mapWithKeys(fn (string $type): array => [$type => __('admin.prompt_modules.types.'.$type)])->all();
     }
 
-    /** @return list<array{kind:string,line:string}> */
+    /** @return array{0:list<array{kind:string,line:string}>,1:array{truncated:bool,old_line_count:int,new_line_count:int,compared_line_limit:int}} */
     private function lineDiff(string $old, string $new): array
     {
-        $oldLines = array_slice(preg_split('/\R/u', $old) ?: [], 0, 500);
-        $newLines = array_slice(preg_split('/\R/u', $new) ?: [], 0, 500);
+        $oldAllLines = preg_split('/\R/u', $old) ?: [];
+        $newAllLines = preg_split('/\R/u', $new) ?: [];
+        $oldLineCount = count($oldAllLines);
+        $newLineCount = count($newAllLines);
+        $oldLines = $this->boundedDiffLines($oldAllLines);
+        $newLines = $this->boundedDiffLines($newAllLines);
         $rows = count($oldLines);
         $columns = count($newLines);
         $matrix = array_fill(0, $rows + 1, array_fill(0, $columns + 1, 0));
@@ -223,7 +290,26 @@ final class PromptModuleController extends Controller
             }
         }
 
-        return $diff;
+        return [$diff, [
+            'truncated' => $oldLineCount > 500 || $newLineCount > 500,
+            'old_line_count' => $oldLineCount,
+            'new_line_count' => $newLineCount,
+            'compared_line_limit' => 500,
+        ]];
+    }
+
+    /** @param list<string> $lines @return list<string> */
+    private function boundedDiffLines(array $lines): array
+    {
+        if (count($lines) <= 500) {
+            return $lines;
+        }
+
+        return array_merge(
+            array_slice($lines, 0, 250),
+            ['[… bounded diff omits middle lines …]'],
+            array_slice($lines, -250),
+        );
     }
 
     private function actor(Request $request): Admin

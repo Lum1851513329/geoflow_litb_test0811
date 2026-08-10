@@ -15,4 +15,9 @@ final class ImmutablePromptVersionException extends DomainException
     {
         return new self("Archived prompt module version {$versionId} cannot be published.");
     }
+
+    public static function cannotTransitionArchived(int $versionId): self
+    {
+        return new self("Archived prompt module version {$versionId} cannot change lifecycle status.");
+    }
 }
