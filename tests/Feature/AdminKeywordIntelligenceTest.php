@@ -175,6 +175,23 @@ class AdminKeywordIntelligenceTest extends TestCase
             ->assertOk()->assertSee('Evening Dresses')->assertSee(route('admin.keyword-intelligence.clusters.confirm'), false)->assertSee('candidate_token', false)->assertDontSee('suggestion[primary_keyword_id]', false);
     }
 
+    public function test_cluster_page_hides_brand_supporting_group_when_its_non_brand_primary_is_already_active(): void
+    {
+        $taxonomy = KeywordTaxonomy::query()->create(['name' => 'Products', 'slug' => 'products', 'status' => 'active']);
+        $node = KeywordNode::query()->create(['taxonomy_id' => $taxonomy->id, 'name' => 'Dresses', 'slug' => 'dresses', 'path' => 'dresses', 'depth' => 0, 'sort_order' => 0]);
+        $library = $this->library();
+        $primary = Keyword::query()->create(['library_id' => $library->id, 'keyword' => 'summer dresses', 'normalized_keyword' => 'summer dresses', 'language_code' => 'en', 'market_scope' => 'GLOBAL', 'keyword_type' => 'category', 'search_intent' => 'commercial', 'brand_relation' => 'non_brand', 'status' => 'active']);
+        $brandSupporting = Keyword::query()->create(['library_id' => $library->id, 'keyword' => 'LightInTheBox summer dresses', 'normalized_keyword' => 'lightinthebox summer dresses', 'language_code' => 'en', 'market_scope' => 'GLOBAL', 'keyword_type' => 'category', 'search_intent' => 'commercial', 'brand_relation' => 'brand_category', 'status' => 'active']);
+        $node->keywords()->attach($primary->id, ['is_primary' => true]);
+        $node->keywords()->attach($brandSupporting->id, ['is_primary' => false]);
+        KeywordCluster::query()->create(['name' => 'Existing Summer Dresses', 'slug' => 'existing-summer-dresses', 'taxonomy_node_id' => $node->id, 'primary_keyword_id' => $primary->id, 'primary_scope_key' => hash('sha256', "{$primary->id}|en|GLOBAL"), 'language_code' => 'en', 'market_scope' => 'GLOBAL', 'search_intent' => 'commercial', 'status' => 'active', 'confirmed_at' => now()]);
+
+        $response = $this->actingAs($this->admin(), 'admin')->get(route('admin.keyword-intelligence.clusters'))->assertOk();
+
+        $this->assertSame([], $response->viewData('suggestions'));
+        $response->assertDontSee('LightInTheBox summer dresses');
+    }
+
     public function test_taxonomy_keyword_picker_is_filtered_and_paginated_without_a_200_item_cap(): void
     {
         $library = $this->library();

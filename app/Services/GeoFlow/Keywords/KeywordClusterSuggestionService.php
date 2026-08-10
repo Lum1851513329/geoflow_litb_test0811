@@ -101,13 +101,6 @@ final class KeywordClusterSuggestionService
     private function toSuggestion(array $group, array $blockedPrimaryIds): ?array
     {
         usort($group, static function (array $left, array $right): int {
-            $leftPreferred = $left['keyword']->brand_relation === 'non_brand'
-                && $left['keyword']->keyword_type === 'category';
-            $rightPreferred = $right['keyword']->brand_relation === 'non_brand'
-                && $right['keyword']->keyword_type === 'category';
-            if ($leftPreferred !== $rightPreferred) {
-                return $leftPreferred ? -1 : 1;
-            }
             $leftPrimary = (bool) $left['node']->pivot->is_primary;
             $rightPrimary = (bool) $right['node']->pivot->is_primary;
 
@@ -116,9 +109,19 @@ final class KeywordClusterSuggestionService
                 : ($leftPrimary ? -1 : 1);
         });
 
+        $requiresNonBrandPrimary = collect($group)->contains(
+            static fn (array $item): bool => $item['keyword']->brand_relation === 'non_brand'
+                && $item['keyword']->keyword_type === 'category',
+        ) && collect($group)->contains(
+            static fn (array $item): bool => $item['keyword']->brand_relation === 'brand_category'
+                && $item['keyword']->keyword_type === 'category',
+        );
         $primaryIndex = null;
         foreach ($group as $index => $item) {
-            if (! isset($blockedPrimaryIds[(int) $item['keyword']->id])) {
+            $keyword = $item['keyword'];
+            $eligibleForBrandSupportingGroup = ! $requiresNonBrandPrimary
+                || ($keyword->brand_relation === 'non_brand' && $keyword->keyword_type === 'category');
+            if ($eligibleForBrandSupportingGroup && ! isset($blockedPrimaryIds[(int) $keyword->id])) {
                 $primaryIndex = $index;
                 break;
             }
@@ -187,8 +190,8 @@ final class KeywordClusterSuggestionService
 
     private function brandScope(Keyword $keyword): string
     {
-        return in_array($keyword->brand_relation, ['non_brand', 'brand_category'], true)
-            && $keyword->keyword_type === 'category'
+        return ($keyword->brand_relation === 'non_brand'
+            || ($keyword->brand_relation === 'brand_category' && $keyword->keyword_type === 'category'))
                 ? 'category_demand'
                 : (string) $keyword->brand_relation;
     }

@@ -127,6 +127,41 @@ class KeywordClusterServiceTest extends TestCase
         }
     }
 
+    public function test_brand_supporting_group_is_skipped_when_its_only_non_brand_primary_is_blocked(): void
+    {
+        [$node] = $this->nodes();
+        $primary = $this->keyword('summer dresses', $node, brandRelation: 'non_brand', searchIntent: 'commercial');
+        $brandSupporting = $this->keyword('LightInTheBox summer dresses', $node, brandRelation: 'brand_category', searchIntent: 'commercial');
+
+        $suggestions = app(KeywordClusterSuggestionService::class)->suggest(
+            [$primary, $brandSupporting],
+            [$primary->id],
+        );
+
+        $this->assertSame([], $suggestions);
+    }
+
+    public function test_brand_supporting_group_selects_another_eligible_non_brand_primary_deterministically(): void
+    {
+        [$node] = $this->nodes();
+        $blocked = $this->keyword('summer dresses', $node, brandRelation: 'non_brand', searchIntent: 'commercial', isTaxonomyPrimary: true);
+        $eligible = $this->keyword('summer dress', $node, brandRelation: 'non_brand', searchIntent: 'commercial');
+        $brandSupporting = $this->keyword('LightInTheBox summer dresses', $node, brandRelation: 'brand_category', searchIntent: 'commercial');
+
+        $suggestions = app(KeywordClusterSuggestionService::class)->suggest(
+            [$blocked, $eligible, $brandSupporting],
+            [$blocked->id],
+        );
+
+        $this->assertCount(1, $suggestions);
+        $this->assertSame($eligible->id, $suggestions[0]['primary_keyword_id']);
+        $this->assertSame([
+            $eligible->id => 'primary',
+            $blocked->id => 'secondary',
+            $brandSupporting->id => 'brand_supporting',
+        ], collect($suggestions[0]['keywords'])->pluck('role', 'keyword_id')->all());
+    }
+
     public function test_confirm_rejects_a_forged_brand_supporting_role(): void
     {
         [$node] = $this->nodes();
