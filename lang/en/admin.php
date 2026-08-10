@@ -6,6 +6,59 @@ if (! is_file($manualPublicationsPath) && function_exists('lang_path')) {
 }
 
 return [
+    'prompt_modules' => [
+        'title' => 'Prompt Modules',
+        'subtitle' => 'Manage immutable Prompt snapshots, lifecycle promotion, comparisons, and usage.',
+        'create_title' => 'Create Prompt module',
+        'version_create_title' => 'Create a new version',
+        'empty' => 'No Prompt modules match the current filters.',
+        'filters' => ['search' => 'Search key or name', 'all_types' => 'All module types'],
+        'fields' => [
+            'module' => 'Module', 'module_key' => 'Module key', 'display_name' => 'Display name', 'type' => 'Type',
+            'description' => 'Description', 'priority' => 'Default priority', 'content' => 'Prompt content',
+            'variable_contract' => 'Variable contract (JSON)', 'output_contract' => 'Output contract (JSON)',
+            'parameter_defaults' => 'Parameter defaults (JSON)', 'applicability' => 'Applicability (JSON)',
+            'current_version' => 'Current version', 'status' => 'Status', 'enabled' => 'Enabled',
+            'mandatory' => 'Mandatory', 'system' => 'System module', 'change_note' => 'Change note', 'reason' => 'Required reason',
+        ],
+        'actions' => [
+            'manage_presets' => 'Manage presets', 'filter' => 'Filter', 'create' => 'Create module',
+            'create_version' => 'Create version', 'publish' => 'Publish', 'rollback_publish' => 'Publish as rollback',
+            'archive' => 'Archive', 'compare' => 'Compare',
+        ],
+        'types' => [
+            'foundation' => 'Foundation', 'geo' => 'GEO', 'seo' => 'SEO', 'content_type' => 'Content type',
+            'platform' => 'Platform', 'language_market' => 'Language / market', 'knowledge_policy' => 'Knowledge policy',
+            'output_format' => 'Output format', 'quality_check' => 'Quality check',
+        ],
+        'status' => ['none' => 'No current version'],
+        'diff' => ['title' => 'Line comparison', 'subtitle' => 'Added and removed lines between exact immutable versions.', 'compare_to' => 'Compare with', 'empty' => 'Choose another version to compare.'],
+        'usage' => ['title' => 'Version usage', 'subtitle' => 'Generation runs and articles that used this exact version.', 'run' => 'Generation run', 'article' => 'Article', 'empty' => 'This exact version has not been used by a generation run.'],
+        'messages' => ['created' => 'Prompt module created.', 'version_created' => 'Prompt module version created.', 'published' => 'Prompt module version published.', 'archived' => 'Prompt module version archived.'],
+        'validation' => ['version_in_use' => 'This immutable version is in use and cannot be deleted.', 'version_immutable' => 'Prompt version snapshots are immutable and cannot be deleted.'],
+    ],
+    'prompt_presets' => [
+        'title' => 'Prompt Presets',
+        'subtitle' => 'Compose exact Prompt module versions in deterministic order.',
+        'create_title' => 'Create Prompt preset', 'version_create_title' => 'Create a new preset version',
+        'version_create_hint' => 'Saving creates a new immutable version; it never edits the selected snapshot.',
+        'order_hint' => 'Rows are persisted from top to bottom using exact version IDs.',
+        'empty' => 'No Prompt presets match the current filters.',
+        'filters' => ['search' => 'Search key or name'],
+        'fields' => [
+            'preset' => 'Preset', 'preset_key' => 'Preset key', 'display_name' => 'Display name', 'description' => 'Description',
+            'current_version' => 'Current version', 'status' => 'Status', 'matching_rules' => 'Matching rules (JSON)',
+            'generation_policy' => 'Generation policy (JSON)', 'conflict_policy' => 'Conflict policy (JSON)',
+            'change_note' => 'Change note', 'ordered_modules' => 'Ordered exact module versions', 'choose_version' => 'Choose an exact module version',
+            'required' => 'Required', 'optional' => 'Optional', 'enabled' => 'Enabled', 'system' => 'System preset', 'reason' => 'Required reason',
+        ],
+        'actions' => [
+            'manage_modules' => 'Manage modules', 'filter' => 'Filter', 'add_module' => 'Add row', 'remove' => 'Remove',
+            'create' => 'Create preset', 'create_version' => 'Create version', 'publish' => 'Publish', 'rollback_publish' => 'Publish as rollback',
+        ],
+        'usage' => ['title' => 'Preset version usage', 'run' => 'Generation run', 'article' => 'Article', 'empty' => 'This exact preset version has not been used.'],
+        'messages' => ['created' => 'Prompt preset created.', 'version_created' => 'Prompt preset version created.', 'published' => 'Prompt preset version published.'],
+    ],
     'keyword_intelligence' => [
         'nav' => ['overview' => 'Keyword Intelligence', 'import' => 'Import workbook', 'taxonomy' => 'Taxonomy', 'clusters' => 'Topic clusters'],
         'legacy_libraries' => 'Legacy keyword libraries',

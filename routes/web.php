@@ -36,6 +36,8 @@ use App\Http\Controllers\Admin\LegacyController;
 use App\Http\Controllers\Admin\ManualPublicationController;
 use App\Http\Controllers\Admin\ManualPublicationSettingsController;
 use App\Http\Controllers\Admin\MaterialsController;
+use App\Http\Controllers\Admin\PromptModuleController;
+use App\Http\Controllers\Admin\PromptPresetController;
 use App\Http\Controllers\Admin\SecuritySettingsController;
 use App\Http\Controllers\Admin\SiteSettingsController;
 use App\Http\Controllers\Admin\SiteThemeReplicationController;
@@ -86,6 +88,29 @@ Route::prefix($adminPrefix)->name('admin.')->middleware(['admin.locale'])->group
         Route::post('login', [AdminAuthController::class, 'login'])
             ->middleware('throttle:admin-login')
             ->name('login.attempt');
+    });
+
+    // Feature middleware intentionally runs before authentication so disabled modules stay undiscoverable.
+    Route::middleware([
+        'geoflow.feature:modular_prompts_enabled',
+        'admin.auth',
+    ])->scopeBindings()->group(function (): void {
+        Route::prefix('prompt-modules')->name('prompt-modules.')->group(function (): void {
+            Route::get('/', [PromptModuleController::class, 'index'])->name('index');
+            Route::post('/', [PromptModuleController::class, 'store'])->name('store');
+            Route::get('{module}', [PromptModuleController::class, 'show'])->name('show');
+            Route::post('{module}/versions', [PromptModuleController::class, 'storeVersion'])->name('versions.store');
+            Route::post('{module}/versions/{version}/publish', [PromptModuleController::class, 'publish'])->name('versions.publish');
+            Route::post('{module}/versions/{version}/archive', [PromptModuleController::class, 'archive'])->name('versions.archive');
+            Route::delete('{module}/versions/{version}', [PromptModuleController::class, 'destroyVersion'])->name('versions.destroy');
+        });
+        Route::prefix('prompt-presets')->name('prompt-presets.')->group(function (): void {
+            Route::get('/', [PromptPresetController::class, 'index'])->name('index');
+            Route::post('/', [PromptPresetController::class, 'store'])->name('store');
+            Route::get('{preset}/edit', [PromptPresetController::class, 'edit'])->name('edit');
+            Route::post('{preset}/versions', [PromptPresetController::class, 'storeVersion'])->name('versions.store');
+            Route::post('{preset}/versions/{version}/publish', [PromptPresetController::class, 'publish'])->name('versions.publish');
+        });
     });
 
     // 后台受保护路由
