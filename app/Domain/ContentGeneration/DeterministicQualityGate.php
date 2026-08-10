@@ -2,9 +2,13 @@
 
 namespace App\Domain\ContentGeneration;
 
+use App\Domain\ContentStrategy\BlueprintValidator;
+
 final class DeterministicQualityGate
 {
     private const KEYWORD_DENSITY_LIMIT = 0.03;
+
+    public function __construct(private readonly BlueprintValidator $blueprintValidator = new BlueprintValidator) {}
 
     /**
      * @param  array<string, mixed>  $blueprint
@@ -12,11 +16,31 @@ final class DeterministicQualityGate
      */
     public function inspect(string $markdown, array $blueprint, array $requirements): QualityGateResult
     {
+        $blueprintErrors = $this->blueprintValidator->validate($blueprint);
+        if ($blueprintErrors !== []) {
+            $issues = [];
+            foreach ($blueprintErrors as $field => $messages) {
+                foreach ($messages as $message) {
+                    $issues[] = new QualityIssue(
+                        code: 'invalid_blueprint',
+                        severity: QualityIssue::SEVERITY_ERROR,
+                        sectionKey: $field,
+                        message: "Blueprint is invalid at \"{$field}\": {$message}",
+                        repairInstruction: "Correct blueprint field \"{$field}\" before generation.",
+                    );
+                }
+            }
+
+            return $this->result($issues);
+        }
+
         $sections = $this->blueprintSections($blueprint);
-        $document = $this->parseMarkdown($markdown, $sections);
+        $language = $this->languageCode($blueprint, $requirements);
+        $visibleMarkdown = $this->renderedMarkdown($markdown);
+        $document = $this->parseMarkdown($visibleMarkdown, $sections);
         $issues = [];
 
-        foreach ($this->unresolvedVariables($markdown) as $variable) {
+        foreach ($this->unresolvedVariables($visibleMarkdown) as $variable) {
             $issues[] = new QualityIssue(
                 code: 'unresolved_variable',
                 severity: QualityIssue::SEVERITY_ERROR,
@@ -40,14 +64,14 @@ final class DeterministicQualityGate
                 continue;
             }
 
-            $actualWords = $this->wordCount($document['section_content'][$sectionKey]);
-            if ($actualWords < $section['minimum_words']) {
+            $actualUnits = $this->contentUnitCount($document['section_content'][$sectionKey], $language);
+            if ($actualUnits < $section['minimum_words']) {
                 $issues[] = new QualityIssue(
                     code: 'section_too_thin',
                     severity: QualityIssue::SEVERITY_ERROR,
                     sectionKey: $sectionKey,
-                    message: "Section \"{$section['heading']}\" has {$actualWords} words; it requires at least {$section['minimum_words']}.",
-                    repairInstruction: "Expand \"{$section['heading']}\" with ".($section['minimum_words'] - $actualWords).' more substantive words that address its planned question.',
+                    message: "Section \"{$section['heading']}\" has {$actualUnits} content units; it requires at least {$section['minimum_words']}.",
+                    repairInstruction: "Expand \"{$section['heading']}\" with ".($section['minimum_words'] - $actualUnits).' more substantive content units that address its planned question.',
                 );
             }
         }
@@ -62,10 +86,10 @@ final class DeterministicQualityGate
             );
         }
 
-        $articleWordCount = $this->wordCount($document['body']);
+        $articleWordCount = $this->contentUnitCount($document['body'], $language);
         foreach ($this->keywords($blueprint, $requirements) as $keyword) {
             $occurrences = $this->phraseOccurrences($document['body'], $keyword);
-            $keywordWords = $this->wordCount($keyword);
+            $keywordWords = $this->contentUnitCount($keyword, $language);
             $density = $articleWordCount === 0 ? 0.0 : ($occurrences * $keywordWords) / $articleWordCount;
             if ($density > self::KEYWORD_DENSITY_LIMIT) {
                 $issues[] = new QualityIssue(
@@ -115,7 +139,6 @@ final class DeterministicQualityGate
             );
         }
 
-        $language = $this->languageCode($blueprint, $requirements);
         if ($language !== null && $this->hasLanguageMismatch($document['body'], $language)) {
             $issues[] = new QualityIssue(
                 code: 'language_mismatch',
@@ -126,14 +149,7 @@ final class DeterministicQualityGate
             );
         }
 
-        $errorCount = count(array_filter($issues, static fn (QualityIssue $issue): bool => $issue->severity === QualityIssue::SEVERITY_ERROR));
-        $warningCount = count($issues) - $errorCount;
-
-        return new QualityGateResult(
-            passed: $errorCount === 0,
-            score: max(0, 100 - ($errorCount * 15) - ($warningCount * 5)),
-            issues: $issues,
-        );
+        return $this->result($issues);
     }
 
     /**
@@ -184,8 +200,6 @@ final class DeterministicQualityGate
         $paragraphLines = [];
         $currentSectionKey = null;
         $currentSectionLevel = null;
-        $inCodeFence = false;
-
         $flushParagraph = function () use (&$paragraphLines, &$paragraphs, &$currentSectionKey): void {
             $text = trim(implode(' ', $paragraphLines));
             $paragraphLines = [];
@@ -195,17 +209,6 @@ final class DeterministicQualityGate
         };
 
         foreach (preg_split('/\R/u', $markdown) ?: [] as $line) {
-            if (preg_match('/^\s*```/', $line) === 1) {
-                $flushParagraph();
-                $inCodeFence = ! $inCodeFence;
-
-                continue;
-            }
-
-            if ($inCodeFence) {
-                continue;
-            }
-
             if (preg_match('/^\s*(#{1,6})\s+(.+?)\s*#*\s*$/u', $line, $matches) === 1) {
                 $flushParagraph();
                 $level = strlen($matches[1]);
@@ -251,6 +254,37 @@ final class DeterministicQualityGate
             'section_content' => $sectionContent,
             'body' => trim(implode(' ', $bodyLines)),
         ];
+    }
+
+    private function renderedMarkdown(string $markdown): string
+    {
+        $markdown = preg_replace('/<!--.*?-->/su', '', $markdown) ?? $markdown;
+        $visibleLines = [];
+        $fence = null;
+
+        foreach (preg_split('/\R/u', $markdown) ?: [] as $line) {
+            if ($fence !== null) {
+                $closingPattern = '/^\s*'.preg_quote($fence['character'], '/').'{'.$fence['length'].',}\s*$/u';
+                if (preg_match($closingPattern, $line) === 1) {
+                    $fence = null;
+                }
+
+                continue;
+            }
+
+            if (preg_match('/^\s*(`{3,}|~{3,})[^\r\n]*$/u', $line, $matches) === 1) {
+                $fence = [
+                    'character' => $matches[1][0],
+                    'length' => strlen($matches[1]),
+                ];
+
+                continue;
+            }
+
+            $visibleLines[] = $line;
+        }
+
+        return implode("\n", $visibleLines);
     }
 
     /** @return list<string> */
@@ -437,6 +471,7 @@ final class DeterministicQualityGate
 
     private function wordCount(string $text): int
     {
+        $text = $this->withoutFormatCharacters($text);
         preg_match_all('/[\p{L}\p{N}]+/u', $text, $matches);
 
         return count($matches[0] ?? []);
@@ -461,11 +496,43 @@ final class DeterministicQualityGate
 
     private function stripMarkdown(string $value): string
     {
+        $value = $this->withoutFormatCharacters($value);
         $value = preg_replace('/!?(?:\[([^\]]*)\])\([^)]*\)/u', '$1', $value) ?? $value;
         $value = preg_replace('/[`*_~>#]+/u', ' ', $value) ?? $value;
         $value = preg_replace('/^\s*(?:[-+*]|\d+\.)\s+/u', '', $value) ?? $value;
 
         return trim($value);
+    }
+
+    private function withoutFormatCharacters(string $value): string
+    {
+        return preg_replace('/\p{Cf}+/u', '', $value) ?? $value;
+    }
+
+    private function contentUnitCount(string $text, ?string $language): int
+    {
+        if ($language === null || ! preg_match('/^(zh|ja|ko)(?:-|$)/i', $language)) {
+            return $this->wordCount($text);
+        }
+
+        $text = $this->withoutFormatCharacters($text);
+        preg_match_all('/[\p{Han}\p{Hiragana}\p{Katakana}\p{Hangul}]/u', $text, $cjk);
+        $nonCjkText = preg_replace('/[\p{Han}\p{Hiragana}\p{Katakana}\p{Hangul}]+/u', ' ', $text) ?? $text;
+
+        return count($cjk[0] ?? []) + $this->wordCount($nonCjkText);
+    }
+
+    /** @param list<QualityIssue> $issues */
+    private function result(array $issues): QualityGateResult
+    {
+        $errorCount = count(array_filter($issues, static fn (QualityIssue $issue): bool => $issue->severity === QualityIssue::SEVERITY_ERROR));
+        $warningCount = count($issues) - $errorCount;
+
+        return new QualityGateResult(
+            passed: $errorCount === 0,
+            score: max(0, 100 - ($errorCount * 15) - ($warningCount * 5)),
+            issues: $issues,
+        );
     }
 
     /**

@@ -43,6 +43,7 @@ final class BlueprintValidator
                 $keys[$key] = true;
             }
 
+            $this->requiredText($section, 'heading', $errors, $path);
             $this->requiredText($section, 'purpose', $errors, $path);
             $this->questions($section, $path, $errors);
 

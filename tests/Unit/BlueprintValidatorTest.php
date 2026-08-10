@@ -12,17 +12,19 @@ class BlueprintValidatorTest extends TestCase
         $this->assertSame([], app(BlueprintValidator::class)->validate($this->blueprint()));
     }
 
-    public function test_sections_require_stable_unique_keys_and_non_empty_purposes(): void
+    public function test_sections_require_stable_unique_keys_non_empty_headings_and_non_empty_purposes(): void
     {
         $blueprint = $this->blueprint();
         $blueprint['sections'][0]['key'] = 'Not stable';
         $blueprint['sections'][] = $blueprint['sections'][1];
         $blueprint['sections'][1]['purpose'] = '  ';
+        $blueprint['sections'][1]['heading'] = '  ';
 
         $errors = app(BlueprintValidator::class)->validate($blueprint);
 
         $this->assertArrayHasKey('sections.0.key.format', $errors);
         $this->assertArrayHasKey('sections.2.key.duplicate', $errors);
+        $this->assertArrayHasKey('sections.1.heading.required', $errors);
         $this->assertArrayHasKey('sections.1.purpose.required', $errors);
     }
 

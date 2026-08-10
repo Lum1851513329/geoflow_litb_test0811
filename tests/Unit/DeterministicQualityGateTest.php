@@ -25,6 +25,18 @@ class DeterministicQualityGateTest extends TestCase
         $this->assertContains('unresolved_variable', array_column($result->issuesAsArray(), 'code'));
     }
 
+    public function test_gate_fails_closed_when_a_blueprint_section_has_no_heading(): void
+    {
+        $blueprint = $this->blueprint();
+        unset($blueprint['sections'][0]['heading']);
+
+        $result = $this->gate->inspect('', $blueprint, []);
+
+        $this->assertFalse($result->passed);
+        $this->assertContains('invalid_blueprint', array_column($result->issuesAsArray(), 'code'));
+        $this->assertSame('sections.0.heading.required', $this->issue($result, 'invalid_blueprint')['section_key']);
+    }
+
     public function test_gate_reports_each_blueprint_section_missing_from_markdown(): void
     {
         $result = $this->gate->inspect("## Sizing\n".$this->words(80), $this->blueprint(), []);
@@ -97,6 +109,63 @@ class DeterministicQualityGateTest extends TestCase
         $this->assertContains('language_mismatch', array_column($result->issuesAsArray(), 'code'));
     }
 
+    public function test_fenced_and_commented_markdown_is_excluded_from_prose_and_placeholder_checks(): void
+    {
+        $markdown = "## Sizing\n~~~php\n{{product_name}}\n".$this->words(80)."\n~~~~\n<!-- {{comment_only}} -->\n\n## Care\n```\n{{care_variable}}\n".$this->words(80)."\n```\n<!-- hidden guidance -->";
+
+        $result = $this->gate->inspect($markdown, $this->blueprint(), []);
+
+        $this->assertContains('section_too_thin', array_column($result->issuesAsArray(), 'code'));
+        $this->assertNotContains('unresolved_variable', array_column($result->issuesAsArray(), 'code'));
+    }
+
+    public function test_html_comment_only_sections_do_not_supply_prose_or_placeholder_values(): void
+    {
+        $markdown = "## Sizing\n<!-- {{sizing_variable}} ".$this->words(80)." -->\n\n## Care\n<!-- {{care_variable}} ".$this->words(80).' -->';
+
+        $result = $this->gate->inspect($markdown, $this->blueprint(), []);
+
+        $this->assertCount(2, array_filter($result->issuesAsArray(), fn (array $issue): bool => $issue['code'] === 'section_too_thin'));
+        $this->assertNotContains('unresolved_variable', array_column($result->issuesAsArray(), 'code'));
+    }
+
+    public function test_visible_prose_placeholders_still_fail_after_non_rendered_markdown_is_removed(): void
+    {
+        $markdown = "## Sizing\n".$this->words(80)."\n\n## Care\n".$this->words(80)."\n{{visible_variable}}\n~~~\n{{fenced_variable}}\n~~~\n<!-- {{comment_variable}} -->";
+
+        $result = $this->gate->inspect($markdown, $this->blueprint(), []);
+
+        $variables = array_values(array_filter($result->issuesAsArray(), fn (array $issue): bool => $issue['code'] === 'unresolved_variable'));
+
+        $this->assertCount(1, $variables);
+        $this->assertStringContainsString('{{visible_variable}}', $variables[0]['message']);
+    }
+
+    public function test_zero_width_characters_do_not_inflate_word_counts_or_evade_keyword_and_duplicate_checks(): void
+    {
+        $thinBlueprint = $this->blueprint();
+        $thinBlueprint['sections'][0]['minimum_words'] = 2;
+        $thinBlueprint['sections'][1]['minimum_words'] = 2;
+        $thin = $this->gate->inspect("## Sizing\nsmall\u{200B}guide\n\n## Care\nsmall\u{200B}guide", $thinBlueprint, []);
+
+        $paragraph = 'Measure the heel and toe room before choosing a pair for a stable stride.';
+        $duplicate = $this->gate->inspect("## Sizing\n".$this->words(80)."\n\n".str_replace('stable', "sta\u{200B}ble", $paragraph)."\n\n## Care\n".$this->words(80)."\n\n{$paragraph}", $this->blueprint(), []);
+        $stuffed = $this->gate->inspect("## Sizing\n".trim(str_repeat("run\u{200B}ning shoes ", 20)).' '.$this->words(80)."\n\n## Care\n".$this->words(80), $this->blueprint(), ['primary_keyword' => 'running shoes']);
+
+        $this->assertContains('section_too_thin', array_column($thin->issuesAsArray(), 'code'));
+        $this->assertContains('duplicate_paragraph', array_column($duplicate->issuesAsArray(), 'code'));
+        $this->assertContains('keyword_stuffing', array_column($stuffed->issuesAsArray(), 'code'));
+    }
+
+    public function test_chinese_content_uses_han_characters_as_content_units_for_section_minimums(): void
+    {
+        $short = $this->gate->inspect("## 尺码\n".str_repeat('跑', 79), $this->chineseBlueprint(80), ['language_code' => 'zh']);
+        $substantive = $this->gate->inspect("## 尺码\n".str_repeat('跑', 80), $this->chineseBlueprint(80), ['language_code' => 'zh']);
+
+        $this->assertContains('section_too_thin', array_column($short->issuesAsArray(), 'code'));
+        $this->assertTrue($substantive->passed);
+    }
+
     public function test_gate_passes_a_substantive_article_that_meets_the_blueprint(): void
     {
         $blueprint = $this->blueprint();
@@ -116,21 +185,47 @@ class DeterministicQualityGateTest extends TestCase
     private function blueprint(): array
     {
         return [
+            'working_title' => 'How to choose running shoes for new runners',
+            'target_length' => 200,
             'sections' => [
                 [
                     'key' => 'sizing',
                     'heading' => 'Sizing',
+                    'purpose' => 'Explain the fitting criteria that make a first pair comfortable.',
                     'minimum_words' => 60,
                     'questions_to_answer' => ['How should running shoes fit?'],
+                    'required_fact_ids' => [],
+                    'cta_allowed' => false,
                 ],
                 [
                     'key' => 'care',
                     'heading' => 'Care',
+                    'purpose' => 'Explain practical care that extends the useful life of running shoes.',
                     'minimum_words' => 60,
                     'questions_to_answer' => ['How do you care for running shoes?'],
+                    'required_fact_ids' => [],
+                    'cta_allowed' => false,
                 ],
             ],
             'required_entities' => ['Acme Run Lab'],
+        ];
+    }
+
+    /** @return array<string, mixed> */
+    private function chineseBlueprint(int $minimumWords): array
+    {
+        return [
+            'working_title' => '跑鞋尺码指南',
+            'target_length' => $minimumWords,
+            'sections' => [[
+                'key' => 'sizing',
+                'heading' => '尺码',
+                'purpose' => '说明跑鞋尺码的选择方法。',
+                'questions_to_answer' => [str_repeat('跑', $minimumWords)],
+                'required_fact_ids' => [],
+                'minimum_words' => $minimumWords,
+                'cta_allowed' => false,
+            ]],
         ];
     }
 
