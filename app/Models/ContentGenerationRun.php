@@ -23,11 +23,8 @@ final class ContentGenerationRun extends Model
     public const STATUS_ADOPTED = 'adopted';
 
     protected $fillable = [
-        'content_brief_id', 'strategy_version_id', 'blueprint_version_id', 'preset_version_id',
-        'ai_model_id', 'article_id', 'compiled_prompt', 'variables_snapshot', 'model_snapshot',
-        'generation_parameters', 'raw_output', 'adopted_output', 'status', 'idempotency_key',
-        'error_message', 'created_by_admin_id', 'adopted_by_admin_id', 'started_at',
-        'completed_at', 'adopted_at',
+        'article_id', 'raw_output', 'adopted_output', 'status', 'error_message',
+        'adopted_by_admin_id', 'started_at', 'completed_at', 'adopted_at',
     ];
 
     protected function casts(): array

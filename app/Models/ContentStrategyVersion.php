@@ -17,8 +17,7 @@ final class ContentStrategyVersion extends Model
     public const STATUS_ARCHIVED = 'archived';
 
     protected $fillable = [
-        'content_brief_id', 'version', 'strategy', 'suggestion_snapshot', 'lifecycle_status',
-        'change_note', 'created_by_admin_id', 'confirmed_by_admin_id', 'confirmed_at',
+        'lifecycle_status', 'change_note', 'confirmed_by_admin_id', 'confirmed_at',
     ];
 
     protected function casts(): array

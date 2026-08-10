@@ -21,9 +21,7 @@ final class PromptModuleVersion extends Model
     public const STATUS_ARCHIVED = 'archived';
 
     protected $fillable = [
-        'prompt_module_id', 'version', 'content', 'variable_contract', 'output_contract',
-        'parameter_defaults', 'content_sha256', 'lifecycle_status', 'change_note',
-        'created_by_admin_id', 'published_at',
+        'lifecycle_status', 'change_note', 'published_at',
     ];
 
     protected function casts(): array

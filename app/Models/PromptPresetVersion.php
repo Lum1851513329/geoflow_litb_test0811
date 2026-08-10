@@ -21,9 +21,7 @@ final class PromptPresetVersion extends Model
     public const STATUS_ARCHIVED = 'archived';
 
     protected $fillable = [
-        'prompt_preset_id', 'version', 'matching_rules', 'generation_policy',
-        'conflict_policy', 'lifecycle_status', 'change_note', 'created_by_admin_id',
-        'published_at',
+        'lifecycle_status', 'change_note', 'published_at',
     ];
 
     protected function casts(): array

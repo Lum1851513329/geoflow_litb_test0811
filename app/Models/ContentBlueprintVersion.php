@@ -16,9 +16,7 @@ final class ContentBlueprintVersion extends Model
     public const STATUS_ARCHIVED = 'archived';
 
     protected $fillable = [
-        'content_brief_id', 'content_strategy_version_id', 'version', 'blueprint',
-        'validation_report', 'lifecycle_status', 'change_note', 'created_by_admin_id',
-        'confirmed_by_admin_id', 'confirmed_at',
+        'lifecycle_status', 'change_note', 'confirmed_by_admin_id', 'confirmed_at',
     ];
 
     protected function casts(): array

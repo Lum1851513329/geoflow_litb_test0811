@@ -51,13 +51,13 @@ class ContentStrategySchemaTest extends TestCase
             'planned_publish_at' => '2026-08-20 09:00:00',
             'status' => ContentBrief::STATUS_DRAFT,
         ]);
-        $strategy = ContentStrategyVersion::query()->create([
+        $strategy = ContentStrategyVersion::forceCreate([
             'content_brief_id' => $brief->id,
             'version' => 1,
             'strategy' => ['primary_intent' => 'informational'],
             'lifecycle_status' => ContentStrategyVersion::STATUS_CONFIRMED,
         ]);
-        $blueprint = ContentBlueprintVersion::query()->create([
+        $blueprint = ContentBlueprintVersion::forceCreate([
             'content_brief_id' => $brief->id,
             'content_strategy_version_id' => $strategy->id,
             'version' => 1,
@@ -70,7 +70,7 @@ class ContentStrategySchemaTest extends TestCase
             'display_name' => 'Wedding guest guide',
             'module_type' => 'content_type',
         ]);
-        $moduleVersion = PromptModuleVersion::query()->create([
+        $moduleVersion = PromptModuleVersion::forceCreate([
             'prompt_module_id' => $module->id,
             'version' => 1,
             'content' => 'Write for {{ audience }}.',
@@ -81,7 +81,7 @@ class ContentStrategySchemaTest extends TestCase
             'preset_key' => 'us-wedding-guide',
             'display_name' => 'US wedding guide',
         ]);
-        $presetVersion = PromptPresetVersion::query()->create([
+        $presetVersion = PromptPresetVersion::forceCreate([
             'prompt_preset_id' => $preset->id,
             'version' => 1,
             'matching_rules' => ['market_code' => 'US'],
@@ -99,7 +99,7 @@ class ContentStrategySchemaTest extends TestCase
             'api_key' => 'test-key',
             'model_id' => 'test-model',
         ]);
-        $run = ContentGenerationRun::query()->create([
+        $run = ContentGenerationRun::forceCreate([
             'content_brief_id' => $brief->id,
             'strategy_version_id' => $strategy->id,
             'blueprint_version_id' => $blueprint->id,
@@ -124,7 +124,7 @@ class ContentStrategySchemaTest extends TestCase
         $this->assertInstanceOf(ContentGenerationRunStep::class, $run->steps()->sole());
 
         $this->expectException(QueryException::class);
-        PromptModuleVersion::query()->create([
+        PromptModuleVersion::forceCreate([
             'prompt_module_id' => $module->id,
             'version' => 1,
             'content' => 'A replacement is a new version.',
@@ -152,5 +152,254 @@ class ContentStrategySchemaTest extends TestCase
         $generationMigration->up();
 
         $this->assertTrue(Schema::hasTable('content_generation_runs'));
+    }
+
+    public function test_version_tables_require_contiguous_per_parent_numbers(): void
+    {
+        $brief = $this->createBrief('strategy');
+        $strategyOne = $this->createStrategyVersion($brief, 1);
+        $strategyTwo = $this->createStrategyVersion($brief, 2);
+        $this->assertSame(1, $strategyOne->version);
+        $this->assertSame(2, $strategyTwo->version);
+        $this->assertDatabaseRejects(fn () => $this->createStrategyVersion($brief, 4));
+        $this->assertDatabaseRejects(fn () => $this->createStrategyVersion($brief, 2));
+        $this->assertDatabaseRejects(fn () => $this->createStrategyVersion($this->createBrief('strategy-first'), 2));
+
+        $blueprintOne = $this->createBlueprintVersion($brief, $strategyOne, 1);
+        $blueprintTwo = $this->createBlueprintVersion($brief, $strategyTwo, 2);
+        $this->assertSame(1, $blueprintOne->version);
+        $this->assertSame(2, $blueprintTwo->version);
+        $this->assertDatabaseRejects(fn () => $this->createBlueprintVersion($brief, $strategyTwo, 4));
+        $this->assertDatabaseRejects(fn () => $this->createBlueprintVersion($brief, $strategyTwo, 2));
+        $firstBlueprintBrief = $this->createBrief('blueprint-first');
+        $this->assertDatabaseRejects(fn () => $this->createBlueprintVersion(
+            $firstBlueprintBrief,
+            $this->createStrategyVersion($firstBlueprintBrief, 1),
+            2,
+        ));
+
+        $module = $this->createModule('sequence');
+        $moduleOne = $this->createModuleVersion($module, 1);
+        $moduleTwo = $this->createModuleVersion($module, 2);
+        $this->assertSame(1, $moduleOne->version);
+        $this->assertSame(2, $moduleTwo->version);
+        $this->assertDatabaseRejects(fn () => $this->createModuleVersion($module, 4));
+        $this->assertDatabaseRejects(fn () => $this->createModuleVersion($module, 2));
+        $this->assertDatabaseRejects(fn () => $this->createModuleVersion($this->createModule('module-first'), 2));
+
+        $preset = $this->createPreset('sequence');
+        $presetOne = $this->createPresetVersion($preset, 1);
+        $presetTwo = $this->createPresetVersion($preset, 2);
+        $this->assertSame(1, $presetOne->version);
+        $this->assertSame(2, $presetTwo->version);
+        $this->assertDatabaseRejects(fn () => $this->createPresetVersion($preset, 4));
+        $this->assertDatabaseRejects(fn () => $this->createPresetVersion($preset, 2));
+        $this->assertDatabaseRejects(fn () => $this->createPresetVersion($this->createPreset('preset-first'), 2));
+    }
+
+    public function test_database_guards_reject_immutable_snapshot_updates_and_deletions(): void
+    {
+        $pipeline = $this->createPipeline('immutable');
+        $pipeline['strategy']->lifecycle_status = ContentStrategyVersion::STATUS_ARCHIVED;
+        $pipeline['strategy']->save();
+        $this->assertSame(ContentStrategyVersion::STATUS_ARCHIVED, $pipeline['strategy']->fresh()->lifecycle_status);
+
+        $this->assertDatabaseRejects(fn () => ContentStrategyVersion::query()->whereKey($pipeline['strategy'])->update([
+            'strategy' => ['primary_intent' => 'commercial'],
+        ]));
+        $this->assertDatabaseRejects(fn () => ContentBlueprintVersion::query()->whereKey($pipeline['blueprint'])->update([
+            'blueprint' => ['working_title' => 'Replacement title'],
+        ]));
+        $this->assertDatabaseRejects(fn () => PromptModuleVersion::query()->whereKey($pipeline['module_version'])->update([
+            'content' => 'Replacement content',
+        ]));
+        $this->assertDatabaseRejects(fn () => PromptPresetVersion::query()->whereKey($pipeline['preset_version'])->update([
+            'matching_rules' => ['market_code' => 'GB'],
+        ]));
+        $this->assertDatabaseRejects(fn () => ContentGenerationRun::query()->whereKey($pipeline['run'])->update([
+            'compiled_prompt' => 'Replacement prompt',
+        ]));
+
+        $strategyTwo = $this->createStrategyVersion($pipeline['brief'], 2);
+        $blueprintTwo = $this->createBlueprintVersion($pipeline['brief'], $strategyTwo, 2);
+        $moduleTwo = $this->createModuleVersion($pipeline['module'], 2);
+        $presetTwo = $this->createPresetVersion($pipeline['preset'], 2);
+        $this->assertDatabaseRejects(fn () => $strategyTwo->delete());
+        $this->assertDatabaseRejects(fn () => $blueprintTwo->delete());
+        $this->assertDatabaseRejects(fn () => $moduleTwo->delete());
+        $this->assertDatabaseRejects(fn () => $presetTwo->delete());
+        $this->assertDatabaseRejects(fn () => $pipeline['run']->delete());
+    }
+
+    public function test_database_guards_enforce_stable_keys_idempotency_and_same_brief_lineage(): void
+    {
+        $pipeline = $this->createPipeline('lineage-one');
+        $otherBrief = $this->createBrief('lineage-two');
+        $otherStrategy = $this->createStrategyVersion($otherBrief, 1);
+        $otherBlueprint = $this->createBlueprintVersion($otherBrief, $otherStrategy, 1);
+
+        $this->assertDatabaseRejects(fn () => PromptModule::query()->create([
+            'module_key' => $pipeline['module']->module_key,
+            'display_name' => 'Duplicate module',
+            'module_type' => PromptModule::TYPE_GEO,
+        ]));
+        $this->assertDatabaseRejects(fn () => PromptPreset::query()->create([
+            'preset_key' => $pipeline['preset']->preset_key,
+            'display_name' => 'Duplicate preset',
+        ]));
+        $this->assertDatabaseRejects(fn () => ContentGenerationRun::forceCreate([
+            'content_brief_id' => $pipeline['brief']->id,
+            'strategy_version_id' => $pipeline['strategy']->id,
+            'blueprint_version_id' => $pipeline['blueprint']->id,
+            'preset_version_id' => $pipeline['preset_version']->id,
+            'ai_model_id' => $pipeline['ai_model']->id,
+            'compiled_prompt' => 'Duplicate idempotency key.',
+            'status' => ContentGenerationRun::STATUS_QUEUED,
+            'idempotency_key' => $pipeline['run']->idempotency_key,
+        ]));
+        $this->assertDatabaseRejects(fn () => $this->createBlueprintVersion(
+            $otherBrief,
+            $pipeline['strategy'],
+            2,
+        ));
+        $this->assertDatabaseRejects(fn () => ContentGenerationRun::forceCreate([
+            'content_brief_id' => $otherBrief->id,
+            'strategy_version_id' => $pipeline['strategy']->id,
+            'blueprint_version_id' => $otherBlueprint->id,
+            'preset_version_id' => $pipeline['preset_version']->id,
+            'ai_model_id' => $pipeline['ai_model']->id,
+            'compiled_prompt' => 'Mismatched strategy brief lineage.',
+            'status' => ContentGenerationRun::STATUS_QUEUED,
+            'idempotency_key' => 'mismatched-strategy-brief-lineage',
+        ]));
+        $this->assertDatabaseRejects(fn () => ContentGenerationRun::forceCreate([
+            'content_brief_id' => $otherBrief->id,
+            'strategy_version_id' => $otherStrategy->id,
+            'blueprint_version_id' => $pipeline['blueprint']->id,
+            'preset_version_id' => $pipeline['preset_version']->id,
+            'ai_model_id' => $pipeline['ai_model']->id,
+            'compiled_prompt' => 'Mismatched blueprint brief lineage.',
+            'status' => ContentGenerationRun::STATUS_QUEUED,
+            'idempotency_key' => 'mismatched-blueprint-brief-lineage',
+        ]));
+
+        $this->assertTrue($otherBlueprint->contentBrief->is($otherBrief));
+    }
+
+    /** @return array{brief: ContentBrief, strategy: ContentStrategyVersion, blueprint: ContentBlueprintVersion, module: PromptModule, module_version: PromptModuleVersion, preset: PromptPreset, preset_version: PromptPresetVersion, ai_model: AiModel, run: ContentGenerationRun} */
+    private function createPipeline(string $suffix): array
+    {
+        $brief = $this->createBrief($suffix);
+        $strategy = $this->createStrategyVersion($brief, 1);
+        $blueprint = $this->createBlueprintVersion($brief, $strategy, 1);
+        $module = $this->createModule($suffix);
+        $moduleVersion = $this->createModuleVersion($module, 1);
+        $preset = $this->createPreset($suffix);
+        $presetVersion = $this->createPresetVersion($preset, 1);
+        $aiModel = AiModel::query()->create([
+            'name' => "Test model {$suffix}",
+            'api_key' => 'test-key',
+            'model_id' => "test-model-{$suffix}",
+        ]);
+        $run = ContentGenerationRun::forceCreate([
+            'content_brief_id' => $brief->id,
+            'strategy_version_id' => $strategy->id,
+            'blueprint_version_id' => $blueprint->id,
+            'preset_version_id' => $presetVersion->id,
+            'ai_model_id' => $aiModel->id,
+            'compiled_prompt' => "Write a helpful {$suffix} guide.",
+            'status' => ContentGenerationRun::STATUS_QUEUED,
+            'idempotency_key' => "content-run-{$suffix}",
+        ]);
+
+        return compact('brief', 'strategy', 'blueprint', 'module', 'moduleVersion', 'preset', 'presetVersion', 'aiModel', 'run') + [
+            'module_version' => $moduleVersion,
+            'preset_version' => $presetVersion,
+            'ai_model' => $aiModel,
+        ];
+    }
+
+    private function createBrief(string $suffix): ContentBrief
+    {
+        return ContentBrief::query()->create([
+            'topic' => "Topic {$suffix}",
+            'market_code' => 'US',
+            'language_code' => 'en',
+            'audience' => 'Wedding guests',
+            'core_question' => 'What should I wear to a wedding?',
+            'business_goal' => 'Help visitors choose a suitable dress',
+            'content_type' => 'guide',
+            'status' => ContentBrief::STATUS_DRAFT,
+        ]);
+    }
+
+    private function createStrategyVersion(ContentBrief $brief, int $version): ContentStrategyVersion
+    {
+        return ContentStrategyVersion::forceCreate([
+            'content_brief_id' => $brief->id,
+            'version' => $version,
+            'strategy' => ['primary_intent' => 'informational'],
+            'lifecycle_status' => ContentStrategyVersion::STATUS_CONFIRMED,
+        ]);
+    }
+
+    private function createBlueprintVersion(ContentBrief $brief, ContentStrategyVersion $strategy, int $version): ContentBlueprintVersion
+    {
+        return ContentBlueprintVersion::forceCreate([
+            'content_brief_id' => $brief->id,
+            'content_strategy_version_id' => $strategy->id,
+            'version' => $version,
+            'blueprint' => ['working_title' => 'Wedding guest dress guide'],
+            'lifecycle_status' => ContentBlueprintVersion::STATUS_CONFIRMED,
+        ]);
+    }
+
+    private function createModule(string $suffix): PromptModule
+    {
+        return PromptModule::query()->create([
+            'module_key' => "module-{$suffix}",
+            'display_name' => "Module {$suffix}",
+            'module_type' => PromptModule::TYPE_CONTENT_TYPE,
+        ]);
+    }
+
+    private function createModuleVersion(PromptModule $module, int $version): PromptModuleVersion
+    {
+        return PromptModuleVersion::forceCreate([
+            'prompt_module_id' => $module->id,
+            'version' => $version,
+            'content' => 'Write for {{ audience }}.',
+            'variable_contract' => ['required' => ['audience']],
+            'lifecycle_status' => PromptModuleVersion::STATUS_PRODUCTION,
+        ]);
+    }
+
+    private function createPreset(string $suffix): PromptPreset
+    {
+        return PromptPreset::query()->create([
+            'preset_key' => "preset-{$suffix}",
+            'display_name' => "Preset {$suffix}",
+        ]);
+    }
+
+    private function createPresetVersion(PromptPreset $preset, int $version): PromptPresetVersion
+    {
+        return PromptPresetVersion::forceCreate([
+            'prompt_preset_id' => $preset->id,
+            'version' => $version,
+            'matching_rules' => ['market_code' => 'US'],
+            'generation_policy' => ['max_tokens' => 1200],
+            'lifecycle_status' => PromptPresetVersion::STATUS_PRODUCTION,
+        ]);
+    }
+
+    private function assertDatabaseRejects(callable $operation): void
+    {
+        try {
+            $operation();
+            $this->fail('Expected the database to reject the operation.');
+        } catch (QueryException) {
+            $this->addToAssertionCount(1);
+        }
     }
 }
