@@ -61,3 +61,15 @@
 - Pint: 5 scoped files clean. `git diff --check`: clean.
 - PostgreSQL disposable database: full migration, rollback of `010310` and `010300`, and reapply all succeeded. The disposable `geoflow_task7_round1` database was dropped afterward.
 - Independent repair re-review: `Ready: yes`; focused suite independently confirmed at `25 passed, 126 assertions`.
+
+## Root review repair round 2
+
+- `010300` rollback now restores the exact `010200` contract: `compiled_prompt` becomes `NOT NULL`, the default status returns to `queued`, and all lineage/input snapshot fields use the original immediate immutability guard.
+- Rollback refuses with a clear count-bearing exception before changing guards or schema when any run still has a `NULL compiled_prompt`. No placeholder is used, so a legitimate empty prompt cannot be conflated with migration state.
+- The refusal path leaves the forward nullable schema and one-time guard intact, allowing the pending run to initialize. After a safe rollback and re-up, still-null companion snapshots can initialize exactly once without becoming stranded.
+- The preflight, trigger change, SQLite table rebuild, and original-guard restoration run atomically. SQLite foreign keys are disabled outside that transaction and restored in a `finally` path. A failure-injection regression aborts after the original table is dropped but before the temporary table is renamed, then verifies the table, forward schema, and one-time guard were all rolled back.
+- The migration assertions use portable schema metadata and run unchanged on SQLite and PostgreSQL. PostgreSQL execution uses an opt-in test connection because the repository test base intentionally forces SQLite by default.
+- SQLite focused coordinator plus schema suites: `32 passed, 194 assertions` (focused coordinator: `26 passed, 142 assertions`).
+- PostgreSQL targeted migration behavior: `1 passed, 20 assertions`; subsequent Artisan rollback of `010310`/`010300` and reapply both succeeded. The disposable `geoflow_task7_round2` database was dropped afterward.
+- Pint: 2 scoped files clean. `git diff --check`: clean.
+- Independent round-2 re-review: no Critical or Important findings; `Ready: yes`.

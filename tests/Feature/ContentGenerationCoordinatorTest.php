@@ -25,6 +25,7 @@ use Illuminate\Database\QueryException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
+use Illuminate\Support\Facades\Schema;
 use Laravel\Ai\Responses\AgentResponse;
 use Laravel\Ai\Responses\Data\Meta;
 use Laravel\Ai\Responses\Data\Usage;
@@ -39,6 +40,26 @@ class ContentGenerationCoordinatorTest extends TestCase
     private FakeArticleContentGenerationService $fakeGenerator;
 
     private ContentGenerationCoordinator $coordinator;
+
+    public function createApplication()
+    {
+        $app = parent::createApplication();
+        if (getenv('GEOFLOW_TASK7_PGSQL_TEST') !== 'true') {
+            return $app;
+        }
+
+        $connection = $app['config']->get('database.connections.pgsql');
+        $connection['url'] = null;
+        $connection['host'] = getenv('GEOFLOW_TASK7_PGSQL_HOST') ?: 'postgres';
+        $connection['port'] = getenv('GEOFLOW_TASK7_PGSQL_PORT') ?: '5432';
+        $connection['database'] = getenv('GEOFLOW_TASK7_PGSQL_DATABASE');
+        $connection['username'] = getenv('GEOFLOW_TASK7_PGSQL_USERNAME');
+        $connection['password'] = getenv('GEOFLOW_TASK7_PGSQL_PASSWORD');
+        $app['config']->set('database.connections.pgsql', $connection);
+        $app['config']->set('database.default', 'pgsql');
+
+        return $app;
+    }
 
     public function refreshDatabase(): void
     {
@@ -477,37 +498,88 @@ class ContentGenerationCoordinatorTest extends TestCase
         $run = $this->pendingRun();
         $migration = require database_path('migrations/2026_08_10_010300_prepare_content_generation_run_snapshots.php');
 
-        $migration->down();
-        $downColumns = collect(DB::select("PRAGMA table_info('content_generation_runs')"))->keyBy('name');
-        $this->assertSame(0, (int) $downColumns['compiled_prompt']->notnull);
-        $this->assertSame("'queued'", $downColumns['status']->dflt_value);
+        $rollbackException = null;
+        try {
+            $migration->down();
+        } catch (RuntimeException $exception) {
+            $rollbackException = $exception;
+        }
+        $this->assertInstanceOf(RuntimeException::class, $rollbackException);
+        $this->assertSame(
+            'Cannot roll back content generation snapshots while 1 run has a NULL compiled_prompt. Initialize or remove those Task 7 runs first.',
+            $rollbackException->getMessage(),
+        );
+
+        $this->assertTrue($this->generationRunColumn('compiled_prompt')['nullable']);
+        $this->assertSame('pending', $this->columnDefault('status'));
         $this->assertNull($run->fresh()->compiled_prompt);
+        $run->fresh()->forceFill(['compiled_prompt' => 'initialized before rollback'])->save();
+
+        $migration->down();
+        $this->assertFalse($this->generationRunColumn('compiled_prompt')['nullable']);
+        $this->assertSame('queued', $this->columnDefault('status'));
+        $this->assertDatabaseRejects(fn () => $run->fresh()->forceFill([
+            'variables_snapshot' => ['must' => 'remain immutable before Task 7'],
+        ])->save());
         $this->assertDatabaseRejects(fn () => ContentGenerationRun::query()->whereKey($run->id)->delete());
 
         $migration->up();
-        $upColumns = collect(DB::select("PRAGMA table_info('content_generation_runs')"))->keyBy('name');
-        $this->assertSame(0, (int) $upColumns['compiled_prompt']->notnull);
-        $this->assertSame("'pending'", $upColumns['status']->dflt_value);
-        $this->assertNull($run->fresh()->compiled_prompt);
+        $this->assertTrue($this->generationRunColumn('compiled_prompt')['nullable']);
+        $this->assertSame('pending', $this->columnDefault('status'));
         $run->fresh()->forceFill([
-            'compiled_prompt' => 'initialized exactly once',
             'variables_snapshot' => ['initialized' => true],
             'model_snapshot' => ['model_id' => 'frozen-model'],
             'generation_parameters' => ['temperature' => 0.2],
         ])->save();
-        $this->assertSame('initialized exactly once', $run->fresh()->compiled_prompt);
+        $this->assertSame(['initialized' => true], $run->fresh()->variables_snapshot);
         $this->assertDatabaseRejects(fn () => $run->fresh()->forceFill([
-            'compiled_prompt' => 'initialized twice',
+            'variables_snapshot' => ['initialized' => 'twice'],
         ])->save());
         $this->assertDatabaseRejects(fn () => ContentGenerationRun::query()->whereKey($run->id)->delete());
     }
 
+    public function test_failed_sqlite_snapshot_rollback_restores_the_forward_guard(): void
+    {
+        if (DB::getDriverName() !== 'sqlite') {
+            $this->markTestSkipped('SQLite table-rebuild failure regression.');
+        }
+
+        $run = $this->pendingRun();
+        $run->forceFill(['compiled_prompt' => 'initialized before rollback'])->save();
+        $migration = require database_path('migrations/2026_08_10_010300_prepare_content_generation_run_snapshots.php');
+        $injected = false;
+        DB::connection()->beforeExecuting(function (string $query) use (&$injected): void {
+            if (! $injected && str_starts_with(strtolower($query), 'alter table "__temp__content_generation_runs" rename to "content_generation_runs"')) {
+                $injected = true;
+
+                throw new RuntimeException('injected SQLite rebuild failure');
+            }
+        });
+
+        try {
+            $migration->down();
+            $this->fail('Expected the injected SQLite rebuild failure.');
+        } catch (RuntimeException $exception) {
+            $this->assertSame('injected SQLite rebuild failure', $exception->getMessage());
+        }
+
+        $this->assertTrue($injected);
+        $this->assertTrue(Schema::hasTable('content_generation_runs'));
+        $this->assertTrue($this->generationRunColumn('compiled_prompt')['nullable']);
+        $this->assertSame('pending', $this->columnDefault('status'));
+        $run->fresh()->forceFill(['variables_snapshot' => ['initialized' => true]])->save();
+        $this->assertDatabaseRejects(fn () => $run->fresh()->forceFill([
+            'variables_snapshot' => ['initialized' => 'twice'],
+        ])->save());
+    }
+
     public function test_generation_schema_fences_claims_and_allows_only_one_targeted_revision(): void
     {
-        $columns = collect(DB::select("PRAGMA table_info('content_generation_runs')"))->keyBy('name');
-        $this->assertTrue($columns->has('claim_token'));
-        $this->assertTrue($columns->has('lease_version'));
-        $this->assertTrue($columns->has('lease_expires_at'));
+        $this->assertTrue(Schema::hasColumns('content_generation_runs', [
+            'claim_token',
+            'lease_version',
+            'lease_expires_at',
+        ]));
 
         $run = $this->pendingRun();
         $run->steps()->create([
@@ -741,6 +813,25 @@ class ContentGenerationCoordinatorTest extends TestCase
         } catch (QueryException) {
             $this->assertTrue(true);
         }
+    }
+
+    /** @return array<string, mixed> */
+    private function generationRunColumn(string $name): array
+    {
+        $column = collect(Schema::getColumns('content_generation_runs'))->firstWhere('name', $name);
+        $this->assertIsArray($column);
+
+        return $column;
+    }
+
+    private function columnDefault(string $name): string
+    {
+        $default = (string) $this->generationRunColumn($name)['default'];
+        if (preg_match("/^'([^']*)'/", $default, $matches) === 1) {
+            return $matches[1];
+        }
+
+        return trim($default, "'\"");
     }
 }
 
