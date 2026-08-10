@@ -29,10 +29,10 @@ final class GenerationAdoptionService
 
             if ($lockedRun->status === ContentGenerationRun::STATUS_ADOPTED) {
                 if ($lockedRun->article_id === null) {
-                    throw new DomainException('An adopted generation run must reference its article.');
+                    throw GenerationAdoptionIntegrityException::adoptedRunMissingArticle((int) $lockedRun->id);
                 }
 
-                return Article::query()->findOrFail($lockedRun->article_id);
+                return Article::withTrashed()->findOrFail($lockedRun->article_id);
             }
 
             if ($lockedRun->status !== ContentGenerationRun::STATUS_READY_FOR_REVIEW) {

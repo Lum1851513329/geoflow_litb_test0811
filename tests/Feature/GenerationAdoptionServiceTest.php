@@ -2,10 +2,12 @@
 
 namespace Tests\Feature;
 
+use App\Domain\ContentGeneration\GenerationAdoptionIntegrityException;
 use App\Domain\ContentGeneration\GenerationAdoptionService;
 use App\Models\Admin;
 use App\Models\AiModel;
 use App\Models\Article;
+use App\Models\ArticleRiskScan;
 use App\Models\Author;
 use App\Models\Category;
 use App\Models\ContentBlueprintVersion;
@@ -17,6 +19,8 @@ use App\Models\PromptPreset;
 use App\Models\PromptPresetVersion;
 use DomainException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\DB;
+use RuntimeException;
 use Tests\TestCase;
 
 class GenerationAdoptionServiceTest extends TestCase
@@ -113,11 +117,72 @@ class GenerationAdoptionServiceTest extends TestCase
         }
     }
 
-    public function test_second_adoption_of_the_same_stale_run_returns_the_original_article_without_a_duplicate(): void
+    public function test_soft_deleted_adopted_article_is_returned_on_a_retry_without_creating_a_replacement(): void
     {
         $run = $this->readyRun();
         $first = $this->service->adopt($run, $this->articleData(), $this->admin);
-        $second = $this->service->adopt($run, $this->articleData(['title' => 'A conflicting retry title']), $this->admin);
+        $first->delete();
+
+        $retry = $this->service->adopt($run, $this->articleData(['title' => 'A conflicting retry title']), $this->admin);
+
+        $this->assertSame($first->id, $retry->id);
+        $this->assertTrue($retry->trashed());
+        $this->assertSame(0, Article::query()->count());
+        $this->assertSame(1, Article::withTrashed()->count());
+        $this->assertSame(1, $run->fresh()->steps()->where('step_type', ContentGenerationRunStep::TYPE_ADOPTION)->count());
+    }
+
+    public function test_adopted_run_with_a_hard_deleted_article_is_unrecoverable_lineage_corruption(): void
+    {
+        $run = $this->readyRun();
+        $article = $this->service->adopt($run, $this->articleData(), $this->admin);
+        $article->forceDelete();
+
+        try {
+            $this->service->adopt($run, $this->articleData(), $this->admin);
+            $this->fail('Expected an adopted run without its Article link to be rejected as corruption.');
+        } catch (GenerationAdoptionIntegrityException) {
+            $this->assertNull($run->fresh()->article_id);
+            $this->assertSame(ContentGenerationRun::STATUS_ADOPTED, $run->fresh()->status);
+            $this->assertSame(0, Article::withTrashed()->count());
+            $this->assertSame(1, $run->fresh()->steps()->where('step_type', ContentGenerationRunStep::TYPE_ADOPTION)->count());
+        }
+    }
+
+    public function test_failure_after_article_creation_rolls_back_the_article_scan_run_link_and_adoption_step(): void
+    {
+        $run = $this->readyRun();
+        $injected = false;
+        DB::listen(function ($query) use (&$injected): void {
+            if (! $injected && str_contains(strtolower($query->sql), 'content_generation_run_steps')) {
+                $injected = true;
+
+                throw new RuntimeException('injected adoption-step persistence failure');
+            }
+        });
+
+        try {
+            $this->service->adopt($run, $this->articleData(), $this->admin);
+            $this->fail('Expected the injected post-create failure to abort adoption.');
+        } catch (RuntimeException $exception) {
+            $this->assertSame('injected adoption-step persistence failure', $exception->getMessage());
+            $this->assertTrue($injected);
+            $this->assertSame(0, Article::withTrashed()->count());
+            $this->assertSame(0, ArticleRiskScan::query()->count());
+            $this->assertSame(ContentGenerationRun::STATUS_READY_FOR_REVIEW, $run->fresh()->status);
+            $this->assertNull($run->fresh()->article_id);
+            $this->assertSame(0, $run->fresh()->steps()->count());
+        }
+    }
+
+    public function test_two_stale_adoption_attempts_return_the_same_article_and_record_one_adoption_step(): void
+    {
+        $run = $this->readyRun();
+        $firstAttempt = $run->fresh();
+        $secondAttempt = $run->fresh();
+
+        $first = $this->service->adopt($firstAttempt, $this->articleData(), $this->admin);
+        $second = $this->service->adopt($secondAttempt, $this->articleData(['title' => 'A conflicting retry title']), $this->admin);
 
         $this->assertSame($first->id, $second->id);
         $this->assertSame(1, Article::query()->count());
