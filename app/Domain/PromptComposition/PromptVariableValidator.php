@@ -42,6 +42,7 @@ final class PromptVariableValidator
         $errors = [];
         $definitionsByVersion = [];
         $declared = [];
+        $declaredVersions = [];
         $sensitive = [];
         $moduleVariables = [];
 
@@ -52,6 +53,7 @@ final class PromptVariableValidator
 
             foreach ($definitions as $name => $definition) {
                 $declared[$name] = true;
+                $declaredVersions[$name][$module->versionId] = true;
                 if (str_contains($name, '.')) {
                     $this->error(
                         $errors,
@@ -134,7 +136,7 @@ final class PromptVariableValidator
             }
         }
 
-        [$resolved, $precedenceDecisions] = $this->resolveCandidates($candidates);
+        [$resolved, $precedenceDecisions] = $this->resolveCandidates($candidates, $declaredVersions);
 
         foreach (self::BUILT_IN_TYPES as $name => $type) {
             if (array_key_exists($name, $resolved) && ! $this->matchesType($resolved[$name], $type)) {
@@ -229,9 +231,10 @@ final class PromptVariableValidator
 
     /**
      * @param array<string, list<array{value: mixed, rank: int, tie: int, source: string, version_ids: list<int>}>> $candidates
+     * @param array<string, array<int, true>> $declaredVersions
      * @return array{0: array<string, mixed>, 1: list<array{code: string, winner: string, loser: string, reason: string, affected_module_version_ids: list<int>}>}
      */
-    private function resolveCandidates(array $candidates): array
+    private function resolveCandidates(array $candidates, array $declaredVersions): array
     {
         $resolved = [];
         $decisions = [];
@@ -250,15 +253,18 @@ final class PromptVariableValidator
                 if ($this->sameValue($winner['value'], $loser['value'])) {
                     continue;
                 }
+                $affectedVersionIds = array_values(array_unique(array_merge(
+                    $winner['version_ids'],
+                    $loser['version_ids'],
+                    array_keys($declaredVersions[$name] ?? []),
+                )));
+                sort($affectedVersionIds, SORT_NUMERIC);
                 $decisions[] = [
                     'code' => 'variable_precedence_resolved',
                     'winner' => $winner['source'].'='.$this->displayValue($winner['value']),
                     'loser' => $loser['source'].'='.$this->displayValue($loser['value']),
                     'reason' => 'Resolved by hard constraint > evidence > stage > brand > strategy > style precedence.',
-                    'affected_module_version_ids' => array_values(array_unique(array_merge(
-                        $winner['version_ids'],
-                        $loser['version_ids'],
-                    ))),
+                    'affected_module_version_ids' => $affectedVersionIds,
                 ];
             }
         }

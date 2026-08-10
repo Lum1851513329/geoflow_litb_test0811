@@ -148,12 +148,13 @@ final class PromptCompiler
      */
     private function render(array $modules, PromptContext $context, array $variables, array $evidence): string
     {
+        [$effectiveStrategy, $effectiveBlueprint] = $this->effectiveStrategyAndBlueprint($context, $variables);
         $sections = array_fill(1, 9, []);
         $sections[1][] = 'Produce one coherent, complete article. Treat every section below as one writing contract.';
         $sections[2][] = $this->resolvedConstraintText($variables);
-        $sections[4][] = "CONTENT STRATEGY\n".$this->prettyJson($context->strategy);
-        $sections[4][] = "CONTENT BLUEPRINT\n".$this->prettyJson($context->blueprint);
-        $sections[6][] = 'Target language: '.$this->dataJson($context->language)
+        $sections[4][] = "CONTENT STRATEGY\n".$this->prettyJson($effectiveStrategy);
+        $sections[4][] = "CONTENT BLUEPRINT\n".$this->prettyJson($effectiveBlueprint);
+        $sections[6][] = 'Target language: '.$this->dataJson($variables['language'] ?? $context->language)
             ."\nTarget market: ".$this->dataJson($context->market);
         $sections[7][] = "KEYWORDS\n".$this->prettyJson($context->keywords);
         $sections[7][] = "PRODUCTS\n".$this->prettyJson($context->products);
@@ -180,15 +181,35 @@ final class PromptCompiler
         }
 
         $text = implode("\n\n---\n\n", $rendered);
-        if (preg_match('/{{[^{}]*}}/u', $text, $unresolved) === 1) {
+        if (str_contains($text, '{{') || str_contains($text, '}}')) {
             throw new PromptCompilationException(
                 'Compiled prompt contains an unresolved placeholder.',
                 'unresolved_prompt_placeholder',
-                ['compiled_prompt.placeholder.unresolved' => [$unresolved[0]]],
+                ['compiled_prompt.placeholder.unresolved' => ['A residual template delimiter remains after rendering.']],
             );
         }
 
         return $text;
+    }
+
+    /** @param array<string, mixed> $variables @return array{0: array<string, mixed>, 1: array<string, mixed>} */
+    private function effectiveStrategyAndBlueprint(PromptContext $context, array $variables): array
+    {
+        $strategy = $context->strategy;
+        $blueprint = $context->blueprint;
+        foreach (['language', 'output_format', 'target_length'] as $name) {
+            if (! array_key_exists($name, $variables)) {
+                continue;
+            }
+            if (array_key_exists($name, $strategy)) {
+                $strategy[$name] = $variables[$name];
+            }
+            if (array_key_exists($name, $blueprint)) {
+                $blueprint[$name] = $variables[$name];
+            }
+        }
+
+        return [$strategy, $blueprint];
     }
 
     private function sectionFor(ResolvedPromptModule $module): int

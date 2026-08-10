@@ -371,7 +371,7 @@ class PromptCompilerTest extends TestCase
             array_fill(0, 6, 'variable_precedence_resolved'),
             array_column($compiled->conflictDecisions, 'code'),
         );
-        $this->assertSame([303, 302], $compiled->conflictDecisions[0]['affected_module_version_ids']);
+        $this->assertSame([301, 302, 303, 304, 305, 306], $compiled->conflictDecisions[0]['affected_module_version_ids']);
     }
 
     public function test_free_form_variables_cannot_override_protected_blueprint_fields(): void
@@ -433,6 +433,61 @@ class PromptCompilerTest extends TestCase
         } catch (PromptCompilationException $exception) {
             $this->assertSame('unresolved_prompt_placeholder', $exception->codeName);
         }
+    }
+
+    #[DataProvider('malformedPlaceholderProvider')]
+    public function test_post_render_check_rejects_every_residual_template_delimiter(string $content): void
+    {
+        $module = $this->module(
+            key: 'residual_delimiter',
+            type: 'foundation',
+            content: $content,
+        );
+
+        try {
+            app(PromptCompiler::class)->compile([$module], $this->context());
+            $this->fail('Expected every residual template delimiter to be rejected.');
+        } catch (PromptCompilationException $exception) {
+            $this->assertSame('unresolved_prompt_placeholder', $exception->codeName);
+        }
+    }
+
+    public static function malformedPlaceholderProvider(): array
+    {
+        return [
+            'nested opening brace' => ['Never leave {{foo{bar}} here.'],
+            'unmatched opening delimiter' => ['Never leave {{ here.'],
+            'unmatched closing delimiter' => ['Never leave }} here.'],
+            'nested closing brace' => ['Never leave {{foo}bar}} here.'],
+        ];
+    }
+
+    public function test_whitespace_placeholder_resolves_while_dynamic_delimiters_remain_escaped_data(): void
+    {
+        $module = $this->module(
+            key: 'whitespace_placeholder',
+            type: 'foundation',
+            content: 'Audience {{   audience   }}.',
+            contract: ['variables' => [
+                'audience' => ['type' => 'string', 'required' => true],
+            ]],
+        );
+        $context = new PromptContext(
+            strategy: ['audience' => 'buyers {{not_a_template}}'],
+            blueprint: ['target_length' => 1800],
+            keywords: [],
+            evidence: [],
+            products: [],
+            language: 'English',
+            market: 'US',
+            modelTokenBudget: 20_000,
+        );
+
+        $compiled = app(PromptCompiler::class)->compile([$module], $context);
+
+        $this->assertStringNotContainsString('{{', $compiled->text);
+        $this->assertStringNotContainsString('}}', $compiled->text);
+        $this->assertStringContainsString('buyers', $compiled->text);
     }
 
     public function test_sensitive_values_are_redacted_from_precedence_decisions(): void
@@ -593,6 +648,71 @@ class PromptCompilerTest extends TestCase
         $this->assertSame(1200, $compiled->resolvedVariables['target_length']);
         $this->assertContains('language_enforced', array_column($compiled->conflictDecisions, 'code'));
         $this->assertContains('target_length_capped', array_column($compiled->conflictDecisions, 'code'));
+        $this->assertStringContainsString('"target_length": 1200', $compiled->text);
+        $this->assertStringNotContainsString('"target_length": 1800', $compiled->text);
+    }
+
+    public function test_required_language_is_rendered_without_a_language_consuming_module(): void
+    {
+        $context = new PromptContext(
+            strategy: ['audience' => 'procurement teams', 'language' => 'English'],
+            blueprint: ['target_length' => 1800],
+            keywords: [],
+            evidence: [],
+            products: [],
+            language: 'English',
+            market: 'United States',
+            variables: ['required_language' => 'Spanish'],
+            modelTokenBudget: 20_000,
+        );
+        $compiled = app(PromptCompiler::class)->compile([], $context);
+
+        $this->assertStringContainsString('Target language: "Spanish"', $compiled->text);
+        $this->assertStringNotContainsString('Target language: "English"', $compiled->text);
+        $this->assertStringNotContainsString('"language": "English"', $compiled->text);
+        $this->assertStringContainsString('"language": "Spanish"', $compiled->text);
+        $this->assertSame('Spanish', $compiled->resolvedVariables['language']);
+    }
+
+    public function test_required_language_is_rendered_consistently_by_fixed_section_and_module(): void
+    {
+        $module = $this->module(
+            key: 'language_consumer',
+            type: 'language_market',
+            content: 'Write only in {{language}}.',
+            contract: ['variables' => [
+                'language' => ['type' => 'string', 'required' => true],
+            ]],
+        );
+        $compiled = app(PromptCompiler::class)->compile([$module], $this->context([
+            'required_language' => 'Spanish',
+        ]));
+
+        $this->assertStringContainsString('Target language: "Spanish"', $compiled->text);
+        $this->assertStringContainsString('Write only in "Spanish".', $compiled->text);
+        $this->assertStringNotContainsString('Target language: "English"', $compiled->text);
+    }
+
+    public function test_context_precedence_decision_lists_every_module_declaring_the_variable(): void
+    {
+        $module = $this->module(
+            key: 'length_consumer',
+            type: 'output_format',
+            content: 'Target {{target_length}} words.',
+            contract: ['variables' => [
+                'target_length' => ['type' => 'integer', 'required' => true],
+            ]],
+            versionId: 77,
+        );
+
+        $compiled = app(PromptCompiler::class)->compile([$module], $this->context([
+            'target_length' => 400,
+        ]));
+        $decision = collect($compiled->conflictDecisions)->firstWhere('code', 'variable_precedence_resolved');
+
+        $this->assertSame([77], $decision['affected_module_version_ids']);
+        $this->assertStringContainsString('blueprint.target_length=1800', $decision['winner']);
+        $this->assertStringContainsString('context.variables.target_length=400', $decision['loser']);
     }
 
     public function test_context_digest_rejects_unsupported_objects(): void
