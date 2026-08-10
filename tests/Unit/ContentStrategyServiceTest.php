@@ -14,6 +14,7 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Config;
 use Illuminate\Validation\ValidationException;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
 class ContentStrategyServiceTest extends TestCase
@@ -163,6 +164,27 @@ class ContentStrategyServiceTest extends TestCase
         $this->assertSame([], $blueprint->validation_report);
     }
 
+    #[DataProvider('nonConfirmedStrategyStatuses')]
+    public function test_confirming_a_blueprint_rejects_each_non_confirmed_strategy_lifecycle(string $status): void
+    {
+        $strategy = ContentStrategyVersion::forceCreate([
+            'content_brief_id' => $this->brief->id,
+            'version' => 1,
+            'strategy' => $this->strategy('informational'),
+            'lifecycle_status' => $status,
+            'created_by_admin_id' => $this->admin->id,
+        ]);
+
+        try {
+            $this->service->confirmBlueprint($this->brief, $strategy, $this->blueprint(), $this->admin);
+            $this->fail("Expected {$status} strategy to be rejected.");
+        } catch (ValidationException $exception) {
+            $this->assertArrayHasKey('strategy_version_id', $exception->errors());
+        }
+
+        $this->assertDatabaseCount('content_blueprint_versions', 0);
+    }
+
     public function test_invalid_blueprint_is_rejected_before_a_version_is_persisted(): void
     {
         $strategy = $this->service->confirmStrategy($this->brief, $this->strategy('informational'), $this->admin, 'Initial');
@@ -232,6 +254,16 @@ class ContentStrategyServiceTest extends TestCase
             ],
             'required_entities' => ['LightInTheBox'],
             'faq_questions' => ['How often should running shoes be replaced?'],
+        ];
+    }
+
+    /** @return array<string, array{string}> */
+    public static function nonConfirmedStrategyStatuses(): array
+    {
+        return [
+            'draft' => [ContentStrategyVersion::STATUS_DRAFT],
+            'superseded' => [ContentStrategyVersion::STATUS_SUPERSEDED],
+            'archived' => [ContentStrategyVersion::STATUS_ARCHIVED],
         ];
     }
 }

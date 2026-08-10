@@ -119,11 +119,6 @@ final class ContentStrategyService
         array $blueprint,
         Admin $actor,
     ): ContentBlueprintVersion {
-        $errors = $this->blueprintValidator->validate($blueprint);
-        if ($errors !== []) {
-            throw ValidationException::withMessages($errors);
-        }
-
         return DB::transaction(function () use ($brief, $strategy, $blueprint, $actor): ContentBlueprintVersion {
             $lockedBrief = ContentBrief::query()->whereKey($brief->getKey())->lockForUpdate()->firstOrFail();
             $lockedStrategy = ContentStrategyVersion::query()
@@ -133,6 +128,16 @@ final class ContentStrategyService
                 ->first();
             if ($lockedStrategy === null) {
                 throw (new ModelNotFoundException)->setModel(ContentStrategyVersion::class, [$strategy->getKey()]);
+            }
+            if ($lockedStrategy->lifecycle_status !== ContentStrategyVersion::STATUS_CONFIRMED) {
+                throw ValidationException::withMessages([
+                    'strategy_version_id' => ['Content strategy version must be confirmed before confirming a blueprint.'],
+                ]);
+            }
+
+            $errors = $this->blueprintValidator->validate($blueprint);
+            if ($errors !== []) {
+                throw ValidationException::withMessages($errors);
             }
 
             $version = (int) $lockedBrief->blueprintVersions()->max('version') + 1;
