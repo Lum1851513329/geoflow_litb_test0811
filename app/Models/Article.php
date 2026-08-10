@@ -101,6 +101,11 @@ class Article extends Model
         return $this->hasMany(ArticleDistribution::class, 'article_id');
     }
 
+    public function generationRuns(): HasMany
+    {
+        return $this->hasMany(ContentGenerationRun::class, 'article_id');
+    }
+
     public function syncedRemoteDistributions(): HasMany
     {
         return $this->hasMany(ArticleDistribution::class, 'article_id')
