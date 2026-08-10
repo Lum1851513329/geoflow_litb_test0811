@@ -2,6 +2,8 @@
 
 namespace App\Domain\PromptComposition;
 
+use App\Exceptions\PromptCompilationException;
+
 final class PromptConflictResolver
 {
     /**
@@ -16,6 +18,20 @@ final class PromptConflictResolver
             fn (ResolvedPromptModule $module): int => $module->versionId,
             $modules,
         ));
+
+        if (($variables['evidence_required'] ?? false) === true
+            && ($variables['evidence_available'] ?? false) === false) {
+            throw new PromptCompilationException(
+                'Required evidence is unavailable for prompt compilation.',
+                'required_evidence_unavailable',
+                ['context.evidence.required' => ['At least one evidence item is required.']],
+            );
+        }
+
+        if (array_key_exists('external_links_requested', $variables)
+            && ! array_key_exists('requested_external_links', $variables)) {
+            $variables['requested_external_links'] = $variables['external_links_requested'];
+        }
 
         if (($variables['cta_allowed'] ?? true) === false && $this->isRequested($variables['requested_cta'] ?? null)) {
             $loser = $variables['requested_cta'];
@@ -32,6 +48,9 @@ final class PromptConflictResolver
         if (($variables['external_links_allowed'] ?? true) === false && $this->isRequested($variables['requested_external_links'] ?? null)) {
             $loser = $variables['requested_external_links'];
             $variables['requested_external_links'] = false;
+            if (array_key_exists('external_links_requested', $variables)) {
+                $variables['external_links_requested'] = false;
+            }
             $decisions[] = $this->decision(
                 'external_links_disabled_by_hard_constraint',
                 'external_links_allowed=false',
@@ -52,12 +71,24 @@ final class PromptConflictResolver
             );
         }
 
-        if (isset($variables['requested_language']) && $variables['requested_language'] !== $context->language) {
-            $loser = $variables['requested_language'];
-            $variables['requested_language'] = $context->language;
+        $requiredLanguage = $variables['required_language'] ?? $context->language;
+        if ($requiredLanguage !== $context->language) {
+            $variables['language'] = $requiredLanguage;
             $decisions[] = $this->decision(
                 'language_enforced',
+                'required_language='.$requiredLanguage,
                 'language='.$context->language,
+                'A required language constraint takes precedence over the confirmed strategy language.',
+                $versionIds,
+            );
+        }
+
+        if (isset($variables['requested_language']) && $variables['requested_language'] !== $requiredLanguage) {
+            $loser = $variables['requested_language'];
+            $variables['requested_language'] = $requiredLanguage;
+            $decisions[] = $this->decision(
+                'language_enforced',
+                'language='.$requiredLanguage,
                 'requested_language='.$this->value($loser),
                 'The confirmed target language takes precedence over a writing preference.',
                 $versionIds,
@@ -87,6 +118,21 @@ final class PromptConflictResolver
                 'blueprint.target_length='.$targetLength,
                 'requested_target_length='.$this->value($loser),
                 'The confirmed content blueprint takes precedence over a target-length preference.',
+                $versionIds,
+            );
+        }
+
+        if (is_int($variables['target_length'] ?? null)
+            && is_int($variables['max_target_length'] ?? null)
+            && $variables['target_length'] > $variables['max_target_length']) {
+            $loser = $variables['target_length'];
+            $variables['target_length'] = $variables['max_target_length'];
+            $variables['requested_target_length'] = $variables['max_target_length'];
+            $decisions[] = $this->decision(
+                'target_length_capped',
+                'max_target_length='.$variables['max_target_length'],
+                'target_length='.$loser,
+                'A hard maximum target length takes precedence over strategy and style targets.',
                 $versionIds,
             );
         }

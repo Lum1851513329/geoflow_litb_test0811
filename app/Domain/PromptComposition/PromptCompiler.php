@@ -28,6 +28,7 @@ final class PromptCompiler
     public function compile(array $modules, PromptContext $context): CompiledPrompt
     {
         $this->assertModules($modules);
+        $context = $this->normalizedContext($context);
 
         $validation = $this->variableValidator->validate($modules, $context);
         $resolution = $this->conflictResolver->resolve(
@@ -36,7 +37,7 @@ final class PromptCompiler
             $context,
         );
         $variables = $resolution['variables'];
-        $decisions = $resolution['decisions'];
+        $decisions = array_merge($validation['precedence_decisions'], $resolution['decisions']);
         $evidence = $context->evidence;
 
         $text = $this->render($modules, $context, $variables, $evidence);
@@ -72,6 +73,7 @@ final class PromptCompiler
         }
 
         if ($estimatedTokens > $context->modelTokenBudget) {
+            $safeDecisions = $this->redactDecisions($decisions, $validation['sensitive_variables']);
             throw new PromptCompilationException(
                 'Protected prompt content exceeds the selected model token budget.',
                 'prompt_token_budget_exceeded',
@@ -84,13 +86,18 @@ final class PromptCompiler
                         array_values(array_filter($modules, fn (ResolvedPromptModule $module): bool => $module->required)),
                     )),
                     'protected_context' => ['strategy', 'blueprint'],
-                    'conflict_decisions' => $decisions,
+                    'conflict_decisions' => $safeDecisions,
                 ],
             );
         }
 
         $variables['evidence'] = $evidence;
         $safeVariables = $this->redactVariables($variables, $validation['sensitive_variables']);
+        $safeDecisions = $this->redactDecisions($decisions, $validation['sensitive_variables']);
+        $contextDigest = hash('sha256', $this->canonicalJson([
+            'context' => $context->snapshot(),
+            'resolved_variables' => $variables,
+        ]));
 
         return new CompiledPrompt(
             text: $text,
@@ -101,9 +108,9 @@ final class PromptCompiler
                 $validation['module_variables'],
             ),
             resolvedVariables: $safeVariables,
-            conflictDecisions: $decisions,
+            conflictDecisions: $safeDecisions,
             estimatedTokens: $estimatedTokens,
-            contextDigest: hash('sha256', $this->canonicalJson($context->snapshot())),
+            contextDigest: $contextDigest,
         );
     }
 
@@ -116,6 +123,12 @@ final class PromptCompiler
                 throw new PromptCompilationException(
                     "Prompt module at index {$index} is not a ResolvedPromptModule.",
                     'invalid_resolved_prompt_module',
+                );
+            }
+            if (! mb_check_encoding($module->content, 'UTF-8')) {
+                throw new PromptCompilationException(
+                    "Prompt module version {$module->versionId} contains invalid UTF-8.",
+                    'unsupported_prompt_context_value',
                 );
             }
             if (isset($seenVersionIds[$module->versionId])) {
@@ -140,7 +153,8 @@ final class PromptCompiler
         $sections[2][] = $this->resolvedConstraintText($variables);
         $sections[4][] = "CONTENT STRATEGY\n".$this->prettyJson($context->strategy);
         $sections[4][] = "CONTENT BLUEPRINT\n".$this->prettyJson($context->blueprint);
-        $sections[6][] = 'Target language: '.$context->language."\nTarget market: ".$context->market;
+        $sections[6][] = 'Target language: '.$this->dataJson($context->language)
+            ."\nTarget market: ".$this->dataJson($context->market);
         $sections[7][] = "KEYWORDS\n".$this->prettyJson($context->keywords);
         $sections[7][] = "PRODUCTS\n".$this->prettyJson($context->products);
         $sections[7][] = "EVIDENCE\n".$this->prettyJson($evidence);
@@ -165,7 +179,16 @@ final class PromptCompiler
             $rendered[] = $number.'. '.$heading."\n\n".implode("\n\n", $content);
         }
 
-        return implode("\n\n---\n\n", $rendered);
+        $text = implode("\n\n---\n\n", $rendered);
+        if (preg_match('/{{[^{}]*}}/u', $text, $unresolved) === 1) {
+            throw new PromptCompilationException(
+                'Compiled prompt contains an unresolved placeholder.',
+                'unresolved_prompt_placeholder',
+                ['compiled_prompt.placeholder.unresolved' => [$unresolved[0]]],
+            );
+        }
+
+        return $text;
     }
 
     private function sectionFor(ResolvedPromptModule $module): int
@@ -194,17 +217,7 @@ final class PromptCompiler
 
     private function renderValue(mixed $value): string
     {
-        if (is_bool($value)) {
-            return $value ? 'true' : 'false';
-        }
-        if (is_string($value) || is_int($value) || is_float($value)) {
-            return (string) $value;
-        }
-        if ($value === null) {
-            return '';
-        }
-
-        return json_encode($value, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
+        return $this->dataJson($value);
     }
 
     /** @param array<string, mixed> $variables */
@@ -228,18 +241,98 @@ final class PromptCompiler
 
     private function prettyJson(mixed $value): string
     {
-        return json_encode(
-            $value,
-            JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR,
+        return $this->dataJson($value, true);
+    }
+
+    private function normalizedContext(PromptContext $context): PromptContext
+    {
+        /** @var array<string, mixed> $snapshot */
+        $snapshot = $this->canonicalize($context->snapshot());
+
+        return new PromptContext(
+            strategy: $snapshot['strategy'],
+            blueprint: $snapshot['blueprint'],
+            keywords: $snapshot['keywords'],
+            evidence: $snapshot['evidence'],
+            products: $snapshot['products'],
+            language: $snapshot['language'],
+            market: $snapshot['market'],
+            variables: $snapshot['variables'],
+            modelTokenBudget: $snapshot['model_token_budget'],
         );
     }
 
+    private function dataJson(mixed $value, bool $pretty = false): string
+    {
+        return json_encode(
+            $this->escapeStructuralData($this->canonicalize($value)),
+            ($pretty ? JSON_PRETTY_PRINT : 0)
+                | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR,
+        );
+    }
+
+    private function escapeStructuralData(mixed $value): mixed
+    {
+        if (is_string($value)) {
+            return str_replace(['{', '}'], ['\\u007B', '\\u007D'], $value);
+        }
+        if (! is_array($value)) {
+            return $value;
+        }
+
+        $escaped = [];
+        foreach ($value as $key => $item) {
+            $safeKey = is_string($key)
+                ? str_replace(['{', '}'], ['\\u007B', '\\u007D'], $key)
+                : $key;
+            $escaped[$safeKey] = $this->escapeStructuralData($item);
+        }
+
+        return $escaped;
+    }
+
+    /* A byte fallback tokenizer cannot emit more tokens than input bytes. */
     private function estimateTokens(string $text): int
     {
-        return max(
-            (int) ceil(mb_strlen($text, 'UTF-8')),
-            (int) ceil(strlen($text) / 4),
-        );
+        return strlen($text);
+    }
+
+    /**
+     * @param list<array{code: string, winner: string, loser: string, reason: string, affected_module_version_ids: list<int>}> $decisions
+     * @param list<string> $sensitiveVariables
+     * @return list<array{code: string, winner: string, loser: string, reason: string, affected_module_version_ids: list<int>}>
+     */
+    private function redactDecisions(array $decisions, array $sensitiveVariables): array
+    {
+        $sensitiveValues = [];
+        foreach ($decisions as $decision) {
+            foreach (['winner', 'loser'] as $field) {
+                foreach ($sensitiveVariables as $name) {
+                    if (preg_match('/'.preg_quote($name, '/').'=(.*)$/u', $decision[$field], $match) === 1
+                        && $match[1] !== '') {
+                        $sensitiveValues[$match[1]] = true;
+                    }
+                }
+            }
+        }
+        $sensitiveValues = array_keys($sensitiveValues);
+        usort($sensitiveValues, fn (string $left, string $right): int => strlen($right) <=> strlen($left));
+
+        foreach ($decisions as &$decision) {
+            foreach (['winner', 'loser', 'reason'] as $field) {
+                $decision[$field] = str_replace($sensitiveValues, '[REDACTED]', $decision[$field]);
+                foreach ($sensitiveVariables as $name) {
+                    $decision[$field] = preg_replace(
+                        '/('.preg_quote($name, '/').'=).*$/u',
+                        '$1[REDACTED]',
+                        $decision[$field],
+                    ) ?? $decision[$field];
+                }
+            }
+        }
+        unset($decision);
+
+        return $decisions;
     }
 
     /**
@@ -405,8 +498,25 @@ final class PromptCompiler
 
     private function canonicalize(mixed $value): mixed
     {
-        if (is_object($value)) {
-            $value = get_object_vars($value);
+        if ($value instanceof \JsonSerializable) {
+            $value = $value->jsonSerialize();
+        } elseif (is_object($value) || is_resource($value)) {
+            throw new PromptCompilationException(
+                'Prompt context contains an unsupported object or resource.',
+                'unsupported_prompt_context_value',
+            );
+        }
+        if (is_float($value) && ! is_finite($value)) {
+            throw new PromptCompilationException(
+                'Prompt context contains a non-finite number.',
+                'unsupported_prompt_context_value',
+            );
+        }
+        if (is_string($value) && ! mb_check_encoding($value, 'UTF-8')) {
+            throw new PromptCompilationException(
+                'Prompt context contains invalid UTF-8.',
+                'unsupported_prompt_context_value',
+            );
         }
         if (! is_array($value)) {
             return $value;

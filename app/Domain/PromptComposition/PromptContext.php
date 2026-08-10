@@ -34,9 +34,9 @@ final readonly class PromptContext
     public function variableValues(): array
     {
         return array_merge(
-            $this->blueprint,
-            $this->strategy,
             $this->variables,
+            $this->strategy,
+            $this->blueprint,
             [
                 'strategy' => $this->strategy,
                 'blueprint' => $this->blueprint,
