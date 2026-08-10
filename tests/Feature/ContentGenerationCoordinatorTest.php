@@ -70,6 +70,10 @@ class ContentGenerationCoordinatorTest extends TestCase
     {
         parent::setUp();
 
+        config()->set('geoflow.content_strategy_enabled', true);
+        config()->set('geoflow.modular_prompts_enabled', true);
+        config()->set('geoflow.generation_quality_gate_enabled', true);
+
         $this->fakeGenerator = new FakeArticleContentGenerationService;
         $this->app->instance(ArticleContentGenerationService::class, $this->fakeGenerator);
         $this->coordinator = $this->app->make(ContentGenerationCoordinator::class);

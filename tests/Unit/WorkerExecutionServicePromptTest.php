@@ -57,6 +57,10 @@ class WorkerExecutionServicePromptTest extends TestCase
 
     public function test_worker_prompt_with_knowledge_context_requires_evidence_ids(): void
     {
+        config()->set('geoflow.content_strategy_enabled', false);
+        config()->set('geoflow.modular_prompts_enabled', false);
+        config()->set('geoflow.generation_quality_gate_enabled', false);
+
         $prompt = $this->renderContentPrompt(
             'GEO 诊断怎么做？',
             'GEO 诊断',

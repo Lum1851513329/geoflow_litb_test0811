@@ -37,6 +37,10 @@ final class GenerateStrategyContent implements ShouldBeUnique, ShouldQueue
 
     public function handle(ContentGenerationCoordinator $coordinator): void
     {
+        if (! $this->isPipelineEnabled()) {
+            return;
+        }
+
         $run = ContentGenerationRun::query()->find($this->runId);
         if ($run === null) {
             return;
@@ -55,5 +59,12 @@ final class GenerateStrategyContent implements ShouldBeUnique, ShouldQueue
         if ($result->status === ContentGenerationRun::STATUS_FAILED) {
             throw new \RuntimeException('Content generation failed and is eligible for a queue retry.');
         }
+    }
+
+    private function isPipelineEnabled(): bool
+    {
+        return (bool) config('geoflow.content_strategy_enabled', false)
+            && (bool) config('geoflow.modular_prompts_enabled', false)
+            && (bool) config('geoflow.generation_quality_gate_enabled', false);
     }
 }
