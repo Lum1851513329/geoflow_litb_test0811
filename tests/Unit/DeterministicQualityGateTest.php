@@ -129,6 +129,19 @@ class DeterministicQualityGateTest extends TestCase
         $this->assertNotContains('unresolved_variable', array_column($result->issuesAsArray(), 'code'));
     }
 
+    public function test_unterminated_html_comments_hide_markdown_through_eof_without_hiding_prior_prose(): void
+    {
+        $markdown = "## Sizing\n".$this->words(80)."\n<!-- How should running shoes fit? {{hidden_variable}} ".trim(str_repeat('running shoes ', 20))."\n## Care\n".$this->words(80);
+
+        $result = $this->gate->inspect($markdown, $this->blueprint(), ['primary_keyword' => 'running shoes']);
+
+        $this->assertNotContains('section_too_thin', array_column(array_filter($result->issuesAsArray(), fn (array $issue): bool => $issue['section_key'] === 'sizing'), 'code'));
+        $this->assertContains('missing_section', array_column($result->issuesAsArray(), 'code'));
+        $this->assertContains('missing_question_coverage', array_column($result->issuesAsArray(), 'code'));
+        $this->assertNotContains('unresolved_variable', array_column($result->issuesAsArray(), 'code'));
+        $this->assertNotContains('keyword_stuffing', array_column($result->issuesAsArray(), 'code'));
+    }
+
     public function test_visible_prose_placeholders_still_fail_after_non_rendered_markdown_is_removed(): void
     {
         $markdown = "## Sizing\n".$this->words(80)."\n\n## Care\n".$this->words(80)."\n{{visible_variable}}\n~~~\n{{fenced_variable}}\n~~~\n<!-- {{comment_variable}} -->";
@@ -155,6 +168,26 @@ class DeterministicQualityGateTest extends TestCase
         $this->assertContains('section_too_thin', array_column($thin->issuesAsArray(), 'code'));
         $this->assertContains('duplicate_paragraph', array_column($duplicate->issuesAsArray(), 'code'));
         $this->assertContains('keyword_stuffing', array_column($stuffed->issuesAsArray(), 'code'));
+    }
+
+    public function test_default_ignorable_characters_cannot_hide_keywords_or_duplicate_paragraphs(): void
+    {
+        $paragraph = 'Measure the heel and toe room before choosing a pair for a stable stride.';
+        $invisibleParagraph = "Meas\u{034F}ure the heel\u{200B} and toe\u{FE0F} room before cho\u{2060}osing a pair for a sta\u{FEFF}ble stride.";
+        $duplicate = $this->gate->inspect("## Sizing\n".$this->words(80)."\n\n{$invisibleParagraph}\n\n## Care\nAlternate ".$this->words(80)."\n\n{$paragraph}", $this->blueprint(), []);
+        $stuffed = $this->gate->inspect("## Sizing\n".trim(str_repeat("run\u{034F}ning shoes ", 20)).' '.$this->words(80)."\n\n## Care\n".$this->words(80), $this->blueprint(), ['primary_keyword' => 'running shoes']);
+
+        $this->assertContains('duplicate_paragraph', array_column($duplicate->issuesAsArray(), 'code'));
+        $this->assertContains('keyword_stuffing', array_column($stuffed->issuesAsArray(), 'code'));
+    }
+
+    public function test_canonical_accent_normalization_preserves_visible_accented_words(): void
+    {
+        $markdown = "## Sizing\n".trim(str_repeat("cafe\u{0301} fit ", 20)).' '.$this->words(80)."\n\n## Care\n".$this->words(80);
+
+        $result = $this->gate->inspect($markdown, $this->blueprint(), ['primary_keyword' => 'café fit']);
+
+        $this->assertContains('keyword_stuffing', array_column($result->issuesAsArray(), 'code'));
     }
 
     public function test_chinese_content_uses_han_characters_as_content_units_for_section_minimums(): void

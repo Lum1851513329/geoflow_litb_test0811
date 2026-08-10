@@ -258,7 +258,7 @@ final class DeterministicQualityGate
 
     private function renderedMarkdown(string $markdown): string
     {
-        $markdown = preg_replace('/<!--.*?-->/su', '', $markdown) ?? $markdown;
+        $markdown = preg_replace('/<!--.*?(?:-->|\z)/su', '', $markdown) ?? $markdown;
         $visibleLines = [];
         $fence = null;
 
@@ -506,7 +506,14 @@ final class DeterministicQualityGate
 
     private function withoutFormatCharacters(string $value): string
     {
-        return preg_replace('/\p{Cf}+/u', '', $value) ?? $value;
+        if (class_exists(\Normalizer::class)) {
+            $normalized = \Normalizer::normalize($value, \Normalizer::FORM_C);
+            if ($normalized !== false) {
+                $value = $normalized;
+            }
+        }
+
+        return preg_replace('/[\p{Cf}\x{034F}\x{FE00}-\x{FE0F}\x{E0100}-\x{E01EF}]+/u', '', $value) ?? $value;
     }
 
     private function contentUnitCount(string $text, ?string $language): int
