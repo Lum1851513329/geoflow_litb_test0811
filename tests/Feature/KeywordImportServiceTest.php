@@ -115,6 +115,37 @@ class KeywordImportServiceTest extends TestCase
         $this->assertSame(1, $batch->fresh()->rejected_count);
     }
 
+    public function test_same_raw_keyword_can_be_imported_for_distinct_markets(): void
+    {
+        Storage::fake('local');
+        $library = $this->library();
+        $source = $this->workbook([
+            ['Keyword', 'Country', 'Language', 'Clicks'],
+            ['dresses for women', 'US', 'en', 10],
+            ['dresses for women', 'GB', 'en', 12],
+        ]);
+        $service = new KeywordImportService;
+        $batch = $service->createBatch($this->metadata($library, $source, [
+            'country' => 'country',
+            'language' => 'language',
+        ]));
+
+        $service->import($batch);
+
+        $this->assertSame(
+            ['GB', 'US'],
+            Keyword::query()
+                ->where('library_id', $library->id)
+                ->where('normalized_keyword', 'dresses for women')
+                ->orderBy('market_scope')
+                ->pluck('market_scope')
+                ->all(),
+        );
+        $this->assertDatabaseCount('keywords', 2);
+        $this->assertDatabaseCount('keyword_metrics', 2);
+        $this->assertSame(2, $batch->fresh()->imported_count);
+    }
+
     public function test_a_failed_chunk_rolls_back_and_a_retry_does_not_duplicate_rows_or_metrics(): void
     {
         Storage::fake('local');

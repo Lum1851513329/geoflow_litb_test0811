@@ -24,6 +24,57 @@ class KeywordIntelligenceSchemaTest extends TestCase
 {
     use RefreshDatabase;
 
+    public function test_corrective_migration_removes_an_already_applied_legacy_raw_keyword_constraint(): void
+    {
+        DB::statement('DROP INDEX IF EXISTS keywords_legacy_raw_unique');
+        DB::statement('CREATE UNIQUE INDEX keywords_library_id_keyword_key ON keywords (library_id, keyword)');
+
+        $migration = require database_path('migrations/2026_08_10_000006_remove_stale_keyword_raw_unique_constraint.php');
+        $migration->up();
+
+        $library = KeywordLibrary::query()->create([
+            'name' => 'Market keywords',
+            'description' => '',
+            'keyword_count' => 0,
+        ]);
+        foreach (['US', 'GB'] as $marketScope) {
+            Keyword::query()->create([
+                'library_id' => $library->id,
+                'keyword' => 'dresses for women',
+                'normalized_keyword' => 'dresses for women',
+                'language_code' => 'en',
+                'market_scope' => $marketScope,
+                'used_count' => 0,
+                'usage_count' => 0,
+            ]);
+        }
+
+        $this->assertSame(2, Keyword::query()->where('library_id', $library->id)->count());
+    }
+
+    public function test_legacy_null_normalized_keywords_remain_unique_within_a_library(): void
+    {
+        $library = KeywordLibrary::query()->create([
+            'name' => 'Legacy keywords',
+            'description' => '',
+            'keyword_count' => 0,
+        ]);
+        Keyword::query()->create([
+            'library_id' => $library->id,
+            'keyword' => 'legacy dresses',
+            'used_count' => 0,
+            'usage_count' => 0,
+        ]);
+
+        $this->expectException(QueryException::class);
+        Keyword::query()->create([
+            'library_id' => $library->id,
+            'keyword' => 'legacy dresses',
+            'used_count' => 0,
+            'usage_count' => 0,
+        ]);
+    }
+
     public function test_legacy_keywords_and_new_intelligence_relations_coexist(): void
     {
         $library = KeywordLibrary::query()->create([
