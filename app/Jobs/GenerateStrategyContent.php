@@ -14,7 +14,11 @@ final class GenerateStrategyContent implements ShouldBeUnique, ShouldQueue
 
     private const FRESH_CLAIM_RELEASE_SECONDS = 1205;
 
-    public int $tries = 3;
+    private const PIPELINE_DISABLED_RELEASE_SECONDS = 300;
+
+    public int $tries = 0;
+
+    public int $maxExceptions = 3;
 
     public int $timeout = 900;
 
@@ -38,6 +42,8 @@ final class GenerateStrategyContent implements ShouldBeUnique, ShouldQueue
     public function handle(ContentGenerationCoordinator $coordinator): void
     {
         if (! $this->isPipelineEnabled()) {
+            $this->release(self::PIPELINE_DISABLED_RELEASE_SECONDS);
+
             return;
         }
 

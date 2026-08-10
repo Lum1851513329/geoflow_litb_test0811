@@ -137,7 +137,43 @@ class ContentGenerationCoordinatorTest extends TestCase
         $this->assertSame(ContentGenerationRun::STATUS_READY_FOR_REVIEW, $run->fresh()->status);
         $this->assertCount(2, $this->fakeGenerator->prompts);
         $this->assertSame($run->idempotency_key, $job->uniqueId());
-        $this->assertSame(3, $job->tries);
+        $this->assertSame(0, $job->tries);
+        $this->assertSame(3, $job->maxExceptions);
+    }
+
+    public function test_disabled_pipeline_releases_are_not_subject_to_a_retry_deadline(): void
+    {
+        app('queue')->connection('database')->push(new GenerateStrategyContent(123));
+        $payload = json_decode(
+            (string) DB::table('jobs')->latest('id')->value('payload'),
+            true,
+            512,
+            JSON_THROW_ON_ERROR,
+        );
+
+        $this->assertNull($payload['retryUntil']);
+    }
+
+    public function test_disabled_pipeline_job_releases_a_queued_run_until_flags_are_reenabled(): void
+    {
+        $run = $this->pendingRun(withEvidence: true);
+        $run->forceFill(['status' => ContentGenerationRun::STATUS_QUEUED])->save();
+        $job = (new GenerateStrategyContent($run->id))->withFakeQueueInteractions();
+        config()->set('geoflow.content_strategy_enabled', false);
+
+        $job->handle($this->coordinator);
+
+        $job->assertReleased(300)->assertNotDeleted();
+        $this->assertSame(ContentGenerationRun::STATUS_QUEUED, $run->fresh()->status);
+        $this->assertSame([], $this->fakeGenerator->prompts);
+
+        config()->set('geoflow.content_strategy_enabled', true);
+        $this->fakeGenerator->queue($this->substantiveArticle(), $this->semanticPass());
+
+        $job->handle($this->coordinator);
+
+        $this->assertSame(ContentGenerationRun::STATUS_READY_FOR_REVIEW, $run->fresh()->status);
+        $this->assertCount(2, $this->fakeGenerator->prompts);
     }
 
     public function test_claim_database_failures_propagate_so_the_queue_can_retry(): void
