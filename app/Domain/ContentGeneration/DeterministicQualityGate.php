@@ -258,16 +258,34 @@ final class DeterministicQualityGate
 
     private function renderedMarkdown(string $markdown): string
     {
-        $markdown = preg_replace('/<!--.*?(?:-->|\z)/su', '', $markdown) ?? $markdown;
         $visibleLines = [];
         $fence = null;
+        $inHtmlComment = false;
 
         foreach (preg_split('/\R/u', $markdown) ?: [] as $line) {
             if ($fence !== null) {
                 $closingPattern = '/^\s*'.preg_quote($fence['character'], '/').'{'.$fence['length'].',}\s*$/u';
                 if (preg_match($closingPattern, $line) === 1) {
                     $fence = null;
+                    $visibleLines[] = '';
                 }
+
+                continue;
+            }
+
+            if (! $inHtmlComment && preg_match('/^\s*(`{3,}|~{3,})[^\r\n]*$/u', $line, $matches) === 1) {
+                $fence = [
+                    'character' => $matches[1][0],
+                    'length' => strlen($matches[1]),
+                ];
+                $visibleLines[] = '';
+
+                continue;
+            }
+
+            $line = $this->withoutHtmlComments($line, $inHtmlComment);
+            if ($line === '') {
+                $visibleLines[] = '';
 
                 continue;
             }
@@ -277,6 +295,7 @@ final class DeterministicQualityGate
                     'character' => $matches[1][0],
                     'length' => strlen($matches[1]),
                 ];
+                $visibleLines[] = '';
 
                 continue;
             }
@@ -285,6 +304,35 @@ final class DeterministicQualityGate
         }
 
         return implode("\n", $visibleLines);
+    }
+
+    private function withoutHtmlComments(string $line, bool &$inHtmlComment): string
+    {
+        while (true) {
+            if ($inHtmlComment) {
+                $closing = strpos($line, '-->');
+                if ($closing === false) {
+                    return '';
+                }
+
+                $line = substr($line, $closing + 3);
+                $inHtmlComment = false;
+            }
+
+            $opening = strpos($line, '<!--');
+            if ($opening === false) {
+                return $line;
+            }
+
+            $closing = strpos($line, '-->', $opening + 4);
+            if ($closing === false) {
+                $inHtmlComment = true;
+
+                return substr($line, 0, $opening);
+            }
+
+            $line = substr($line, 0, $opening).substr($line, $closing + 3);
+        }
     }
 
     /** @return list<string> */
@@ -513,7 +561,12 @@ final class DeterministicQualityGate
             }
         }
 
-        return preg_replace('/[\p{Cf}\x{034F}\x{FE00}-\x{FE0F}\x{E0100}-\x{E01EF}]+/u', '', $value) ?? $value;
+        $normalized = @preg_replace('/\p{Default_Ignorable_Code_Point}+/u', '', $value);
+        if ($normalized !== null) {
+            return $normalized;
+        }
+
+        return preg_replace('/[\p{Cf}\x{034F}\x{180B}-\x{180D}\x{FE00}-\x{FE0F}\x{E0100}-\x{E01EF}]+/u', '', $value) ?? $value;
     }
 
     private function contentUnitCount(string $text, ?string $language): int

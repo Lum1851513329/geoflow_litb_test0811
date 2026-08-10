@@ -119,6 +119,18 @@ class DeterministicQualityGateTest extends TestCase
         $this->assertNotContains('unresolved_variable', array_column($result->issuesAsArray(), 'code'));
     }
 
+    public function test_unfinished_html_literals_inside_fenced_code_do_not_hide_later_rendered_sections(): void
+    {
+        $blueprint = $this->blueprint();
+        $blueprint['required_entities'] = ['Acme Run Lab'];
+        $markdown = str_replace("\n\n## Care", "\n\n```html\n<!-- unfinished HTML literal\n```\n\n## Care", $this->substantiveArticle('Acme Run Lab'));
+
+        $result = $this->gate->inspect($markdown, $blueprint, ['language_code' => 'en']);
+
+        $this->assertTrue($result->passed);
+        $this->assertSame([], $result->issuesAsArray());
+    }
+
     public function test_html_comment_only_sections_do_not_supply_prose_or_placeholder_values(): void
     {
         $markdown = "## Sizing\n<!-- {{sizing_variable}} ".$this->words(80)." -->\n\n## Care\n<!-- {{care_variable}} ".$this->words(80).' -->';
@@ -173,9 +185,9 @@ class DeterministicQualityGateTest extends TestCase
     public function test_default_ignorable_characters_cannot_hide_keywords_or_duplicate_paragraphs(): void
     {
         $paragraph = 'Measure the heel and toe room before choosing a pair for a stable stride.';
-        $invisibleParagraph = "Meas\u{034F}ure the heel\u{200B} and toe\u{FE0F} room before cho\u{2060}osing a pair for a sta\u{FEFF}ble stride.";
+        $invisibleParagraph = "Meas\u{034F}ure the heel\u{200B} and toe\u{180B}\u{FE0F} room before cho\u{2060}osing a pair for a sta\u{FEFF}ble stride.";
         $duplicate = $this->gate->inspect("## Sizing\n".$this->words(80)."\n\n{$invisibleParagraph}\n\n## Care\nAlternate ".$this->words(80)."\n\n{$paragraph}", $this->blueprint(), []);
-        $stuffed = $this->gate->inspect("## Sizing\n".trim(str_repeat("run\u{034F}ning shoes ", 20)).' '.$this->words(80)."\n\n## Care\n".$this->words(80), $this->blueprint(), ['primary_keyword' => 'running shoes']);
+        $stuffed = $this->gate->inspect("## Sizing\n".trim(str_repeat("run\u{180B}\u{034F}ning shoes ", 20)).' '.$this->words(80)."\n\n## Care\n".$this->words(80), $this->blueprint(), ['primary_keyword' => 'running shoes']);
 
         $this->assertContains('duplicate_paragraph', array_column($duplicate->issuesAsArray(), 'code'));
         $this->assertContains('keyword_stuffing', array_column($stuffed->issuesAsArray(), 'code'));
