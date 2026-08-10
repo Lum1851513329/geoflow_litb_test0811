@@ -109,13 +109,18 @@ final class KeywordClusterSuggestionService
                 : ($leftPrimary ? -1 : 1);
         });
 
-        $requiresNonBrandPrimary = collect($group)->contains(
+        $hasNonBrandCategory = collect($group)->contains(
             static fn (array $item): bool => $item['keyword']->brand_relation === 'non_brand'
                 && $item['keyword']->keyword_type === 'category',
-        ) && collect($group)->contains(
+        );
+        $hasBrandCategory = collect($group)->contains(
             static fn (array $item): bool => $item['keyword']->brand_relation === 'brand_category'
                 && $item['keyword']->keyword_type === 'category',
         );
+        if ($hasBrandCategory && ! $hasNonBrandCategory) {
+            return null;
+        }
+        $requiresNonBrandPrimary = $hasBrandCategory;
         $primaryIndex = null;
         foreach ($group as $index => $item) {
             $keyword = $item['keyword'];

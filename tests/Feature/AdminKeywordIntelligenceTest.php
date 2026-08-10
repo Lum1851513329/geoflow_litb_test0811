@@ -325,11 +325,14 @@ class AdminKeywordIntelligenceTest extends TestCase
             $node->keywords()->attach($keyword->id, ['is_primary' => true]);
             KeywordCluster::query()->create(['name' => "Existing {$index}", 'slug' => "existing-{$index}", 'taxonomy_node_id' => $node->id, 'primary_keyword_id' => $keyword->id, 'primary_scope_key' => hash('sha256', "{$keyword->id}|en|GLOBAL"), 'language_code' => 'en', 'market_scope' => 'GLOBAL', 'search_intent' => 'commercial', 'status' => 'active', 'confirmed_at' => now()]);
         }
+        $brandSupporting = Keyword::query()->create(['library_id' => $library->id, 'keyword' => 'LightInTheBox blocked term 501', 'normalized_keyword' => 'lightinthebox blocked term 501', 'language_code' => 'en', 'market_scope' => 'GLOBAL', 'keyword_type' => 'category', 'search_intent' => 'commercial', 'brand_relation' => 'brand_category', 'status' => 'active']);
+        $node->keywords()->attach($brandSupporting->id, ['is_primary' => false]);
         $eligible = Keyword::query()->create(['library_id' => $library->id, 'keyword' => 'later eligible candidate', 'normalized_keyword' => 'later eligible candidate', 'language_code' => 'en', 'market_scope' => 'GLOBAL', 'keyword_type' => 'category', 'search_intent' => 'commercial', 'brand_relation' => 'non_brand', 'status' => 'active']);
         $node->keywords()->attach($eligible->id, ['is_primary' => true]);
 
         $response = $this->actingAs($this->admin(), 'admin')->get(route('admin.keyword-intelligence.clusters'))->assertOk();
         $this->assertTrue(collect($response->viewData('suggestions'))->contains(fn (array $item): bool => $item['data']['primary_keyword_id'] === $eligible->id));
+        $this->assertFalse(collect($response->viewData('suggestions'))->contains(fn (array $item): bool => $item['data']['primary_keyword_id'] === $brandSupporting->id));
     }
 
     public function test_preview_session_rejects_expired_scope_hash_and_path_tampering_and_deletes_expired_file(): void
