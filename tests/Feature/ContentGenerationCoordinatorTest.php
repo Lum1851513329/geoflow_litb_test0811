@@ -20,6 +20,7 @@ use App\Models\PromptPreset;
 use App\Models\PromptPresetModuleVersion;
 use App\Models\PromptPresetVersion;
 use App\Services\GeoFlow\ArticleContentGenerationService;
+use Closure;
 use Illuminate\Database\QueryException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
@@ -80,6 +81,10 @@ class ContentGenerationCoordinatorTest extends TestCase
             ContentGenerationRunStep::TYPE_INITIAL_GENERATION,
             ContentGenerationRunStep::TYPE_TARGETED_REVISION,
         ])->get());
+        $this->assertSame($this->substantiveArticle(), $fresh->raw_output);
+        $this->assertSame('## Fit\nToo thin.', $fresh->steps()
+            ->where('step_type', ContentGenerationRunStep::TYPE_INITIAL_GENERATION)
+            ->sole()->output);
         $this->assertSame(array_fill(0, 3, $ambientTransactionLevel), $this->fakeGenerator->transactionLevels);
 
         $revisionPrompt = $fresh->steps()
@@ -108,6 +113,24 @@ class ContentGenerationCoordinatorTest extends TestCase
         $this->assertCount(2, $this->fakeGenerator->prompts);
         $this->assertSame($run->idempotency_key, $job->uniqueId());
         $this->assertSame(3, $job->tries);
+    }
+
+    public function test_claim_database_failures_propagate_so_the_queue_can_retry(): void
+    {
+        $run = $this->pendingRun(withEvidence: true);
+        $injected = false;
+        DB::listen(function () use (&$injected): void {
+            if (! $injected) {
+                $injected = true;
+
+                throw new RuntimeException('transient claim database failure');
+            }
+        });
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('transient claim database failure');
+
+        $this->coordinator->generate($run);
     }
 
     public function test_initial_model_failure_is_sanitized_and_emits_failure_after_commit(): void
@@ -140,6 +163,7 @@ class ContentGenerationCoordinatorTest extends TestCase
 
     public function test_required_evidence_failure_stops_before_any_model_call(): void
     {
+        Event::fake();
         $run = $this->pendingRun(evidenceRequired: true);
 
         $fresh = $this->coordinator->generate($run)->fresh();
@@ -149,6 +173,7 @@ class ContentGenerationCoordinatorTest extends TestCase
         $report = $fresh->qualityReports()->sole();
         $this->assertSame(ContentQualityReport::STATUS_NEEDS_EVIDENCE, $report->status);
         $this->assertSame('needs_evidence', $report->issues[0]['code']);
+        Event::assertNotDispatched(ContentGenerationFailed::class);
     }
 
     public function test_required_evidence_uses_effective_post_budget_evidence(): void
@@ -194,6 +219,64 @@ class ContentGenerationCoordinatorTest extends TestCase
         $this->assertCount(3, $this->fakeGenerator->prompts);
         $this->assertCount(2, $run->steps()->where('step_type', ContentGenerationRunStep::TYPE_SEMANTIC_QUALITY)->get());
         $this->assertSame(ContentQualityReport::STATUS_MODEL_QUALITY_FAILED, $run->qualityReports()->latest('id')->first()->status);
+    }
+
+    public function test_resume_parses_a_durable_semantic_response_without_another_provider_call(): void
+    {
+        [$run, $initialStep] = $this->runInterruptedAfterInitialResponse();
+        $run->steps()->create([
+            'sequence' => 2,
+            'step_type' => ContentGenerationRunStep::TYPE_SEMANTIC_QUALITY,
+            'status' => ContentGenerationRunStep::STATUS_COMPLETED,
+            'prompt' => 'durable semantic prompt',
+            'output' => $this->semanticPass(),
+            'input_snapshot' => ['article_step_id' => $initialStep->id, 'attempt' => 1],
+            'started_at' => now(),
+            'completed_at' => now(),
+        ]);
+        $callsBeforeResume = count($this->fakeGenerator->prompts);
+
+        $resumed = $this->coordinator->generate($run->fresh())->fresh();
+
+        $this->assertSame(ContentGenerationRun::STATUS_READY_FOR_REVIEW, $resumed->status);
+        $this->assertCount($callsBeforeResume, $this->fakeGenerator->prompts);
+        $this->assertSame(1, $resumed->steps()->where('step_type', ContentGenerationRunStep::TYPE_SEMANTIC_QUALITY)->count());
+        $this->assertSame(1, $resumed->qualityReports()->where('report_type', 'semantic')->count());
+    }
+
+    public function test_semantic_retry_budget_is_global_across_resumptions_after_durable_malformed_responses(): void
+    {
+        [$run, $initialStep] = $this->runInterruptedAfterInitialResponse();
+        $run->steps()->createMany([
+            [
+                'sequence' => 2,
+                'step_type' => ContentGenerationRunStep::TYPE_SEMANTIC_QUALITY,
+                'status' => ContentGenerationRunStep::STATUS_FAILED,
+                'prompt' => 'semantic attempt one',
+                'output' => 'not json',
+                'input_snapshot' => ['article_step_id' => $initialStep->id, 'attempt' => 1],
+                'started_at' => now(),
+                'completed_at' => now(),
+            ],
+            [
+                'sequence' => 3,
+                'step_type' => ContentGenerationRunStep::TYPE_SEMANTIC_QUALITY,
+                'status' => ContentGenerationRunStep::STATUS_COMPLETED,
+                'prompt' => 'semantic attempt two',
+                'output' => '```json {"passed":true,"score":100,"issues":[]} ```',
+                'input_snapshot' => ['article_step_id' => $initialStep->id, 'attempt' => 2],
+                'started_at' => now(),
+                'completed_at' => now(),
+            ],
+        ]);
+        $callsBeforeResume = count($this->fakeGenerator->prompts);
+
+        $resumed = $this->coordinator->generate($run->fresh())->fresh();
+
+        $this->assertSame(ContentGenerationRun::STATUS_MANUAL_REVIEW_REQUIRED, $resumed->status);
+        $this->assertCount($callsBeforeResume, $this->fakeGenerator->prompts);
+        $this->assertSame(2, $resumed->steps()->where('step_type', ContentGenerationRunStep::TYPE_SEMANTIC_QUALITY)->count());
+        $this->assertSame(ContentQualityReport::STATUS_MODEL_QUALITY_FAILED, $resumed->qualityReports()->where('report_type', 'semantic')->sole()->status);
     }
 
     public function test_second_quality_failure_requires_manual_review_without_second_revision(): void
@@ -311,6 +394,44 @@ class ContentGenerationCoordinatorTest extends TestCase
         $this->assertCount(2, $retried->steps()->where('step_type', ContentGenerationRunStep::TYPE_INITIAL_GENERATION)->get());
     }
 
+    public function test_retry_uses_frozen_requirements_after_the_content_brief_changes(): void
+    {
+        $run = $this->pendingRun(withEvidence: true);
+        $this->fakeGenerator->queue(new RuntimeException('temporary provider outage'));
+        $failed = $this->coordinator->generate($run)->fresh();
+        $this->assertSame('en', $failed->variables_snapshot['requirements']['language_code']);
+        $this->assertSame([], $failed->variables_snapshot['requirements']['required_mentions']);
+        $failed->contentBrief()->update([
+            'language_code' => 'zh',
+            'required_mentions' => ['必须出现'],
+        ]);
+        $this->fakeGenerator->queue($this->substantiveArticle(), $this->semanticPass());
+
+        $retried = $this->coordinator->generate($failed)->fresh();
+
+        $this->assertSame(ContentGenerationRun::STATUS_READY_FOR_REVIEW, $retried->status);
+        $this->assertSame('en', $retried->variables_snapshot['requirements']['language_code']);
+        $this->assertSame([], $retried->variables_snapshot['requirements']['required_mentions']);
+        $this->assertCount(3, $this->fakeGenerator->prompts);
+    }
+
+    public function test_model_configuration_is_revalidated_before_every_provider_call(): void
+    {
+        $run = $this->pendingRun(withEvidence: true);
+        $this->fakeGenerator->onCall(1, function () use ($run): void {
+            $run->aiModel()->update(['api_url' => 'https://changed-model.example.test/v1']);
+        });
+        $this->fakeGenerator->queue($this->substantiveArticle(), $this->semanticPass());
+
+        $failed = $this->coordinator->generate($run)->fresh();
+
+        $this->assertSame(ContentGenerationRun::STATUS_FAILED, $failed->status);
+        $this->assertSame('Selected AI model configuration changed after run preparation.', $failed->error_message);
+        $this->assertCount(1, $this->fakeGenerator->prompts);
+        $this->assertSame(64, strlen((string) $failed->model_snapshot['configuration_fingerprint']));
+        $this->assertStringNotContainsString('secret-never-snapshot', json_encode($failed->model_snapshot, JSON_THROW_ON_ERROR));
+    }
+
     public function test_fresh_generating_claim_is_not_stolen_but_stale_claim_is_recovered(): void
     {
         $run = $this->pendingRun(withEvidence: true);
@@ -358,17 +479,97 @@ class ContentGenerationCoordinatorTest extends TestCase
 
         $migration->down();
         $downColumns = collect(DB::select("PRAGMA table_info('content_generation_runs')"))->keyBy('name');
-        $this->assertSame(1, (int) $downColumns['compiled_prompt']->notnull);
+        $this->assertSame(0, (int) $downColumns['compiled_prompt']->notnull);
         $this->assertSame("'queued'", $downColumns['status']->dflt_value);
+        $this->assertNull($run->fresh()->compiled_prompt);
         $this->assertDatabaseRejects(fn () => ContentGenerationRun::query()->whereKey($run->id)->delete());
 
         $migration->up();
         $upColumns = collect(DB::select("PRAGMA table_info('content_generation_runs')"))->keyBy('name');
         $this->assertSame(0, (int) $upColumns['compiled_prompt']->notnull);
         $this->assertSame("'pending'", $upColumns['status']->dflt_value);
-        $run->fresh()->forceFill(['variables_snapshot' => ['initialized' => true]])->save();
-        $this->assertSame(['initialized' => true], $run->fresh()->variables_snapshot);
+        $this->assertNull($run->fresh()->compiled_prompt);
+        $run->fresh()->forceFill([
+            'compiled_prompt' => 'initialized exactly once',
+            'variables_snapshot' => ['initialized' => true],
+            'model_snapshot' => ['model_id' => 'frozen-model'],
+            'generation_parameters' => ['temperature' => 0.2],
+        ])->save();
+        $this->assertSame('initialized exactly once', $run->fresh()->compiled_prompt);
+        $this->assertDatabaseRejects(fn () => $run->fresh()->forceFill([
+            'compiled_prompt' => 'initialized twice',
+        ])->save());
         $this->assertDatabaseRejects(fn () => ContentGenerationRun::query()->whereKey($run->id)->delete());
+    }
+
+    public function test_generation_schema_fences_claims_and_allows_only_one_targeted_revision(): void
+    {
+        $columns = collect(DB::select("PRAGMA table_info('content_generation_runs')"))->keyBy('name');
+        $this->assertTrue($columns->has('claim_token'));
+        $this->assertTrue($columns->has('lease_version'));
+        $this->assertTrue($columns->has('lease_expires_at'));
+
+        $run = $this->pendingRun();
+        $run->steps()->create([
+            'sequence' => 1,
+            'step_type' => ContentGenerationRunStep::TYPE_TARGETED_REVISION,
+            'status' => ContentGenerationRunStep::STATUS_QUEUED,
+        ]);
+
+        $this->assertDatabaseRejects(fn () => $run->steps()->create([
+            'sequence' => 2,
+            'step_type' => ContentGenerationRunStep::TYPE_TARGETED_REVISION,
+            'status' => ContentGenerationRunStep::STATUS_QUEUED,
+        ]));
+    }
+
+    public function test_reclaimed_worker_fences_stale_success_from_overwriting_or_revising(): void
+    {
+        Event::fake();
+        $run = $this->pendingRun(withEvidence: true);
+        $winnerOutput = $this->substantiveArticle('winner');
+        $winner = new FakeArticleContentGenerationService;
+        $winner->queue($winnerOutput, $this->semanticPass());
+        $this->fakeGenerator->onCall(1, function () use ($run, $winner): void {
+            $this->expireClaim($run);
+            $this->coordinatorFor($winner)->generate($run->fresh());
+        });
+        $this->fakeGenerator->queue('## Fit\nToo thin.');
+
+        $result = $this->coordinator->generate($run)->fresh();
+
+        $this->assertSame(ContentGenerationRun::STATUS_READY_FOR_REVIEW, $result->status);
+        $this->assertSame($winnerOutput, $result->raw_output);
+        $this->assertSame(0, $result->steps()->where('step_type', ContentGenerationRunStep::TYPE_TARGETED_REVISION)->count());
+        $initialSteps = $result->steps()->where('step_type', ContentGenerationRunStep::TYPE_INITIAL_GENERATION)->get();
+        $this->assertCount(2, $initialSteps);
+        $this->assertSame(1, $initialSteps->where('status', ContentGenerationRunStep::STATUS_RUNNING)->count());
+        Event::assertNotDispatched(ContentGenerationFailed::class);
+    }
+
+    public function test_reclaimed_worker_fences_stale_failure_and_emits_no_failure_event(): void
+    {
+        Event::fake();
+        $run = $this->pendingRun(withEvidence: true);
+        $winnerOutput = $this->substantiveArticle('winner');
+        $winner = new FakeArticleContentGenerationService;
+        $winner->queue($winnerOutput, $this->semanticPass());
+        $this->fakeGenerator->onCall(1, function () use ($run, $winner): void {
+            $this->expireClaim($run);
+            $this->coordinatorFor($winner)->generate($run->fresh());
+        });
+        $this->fakeGenerator->queue(new RuntimeException('stale provider failure'));
+
+        $result = $this->coordinator->generate($run)->fresh();
+
+        $this->assertSame(ContentGenerationRun::STATUS_READY_FOR_REVIEW, $result->status);
+        $this->assertSame($winnerOutput, $result->raw_output);
+        $staleStep = $result->steps()
+            ->where('step_type', ContentGenerationRunStep::TYPE_INITIAL_GENERATION)
+            ->oldest('sequence')
+            ->firstOrFail();
+        $this->assertSame(ContentGenerationRunStep::STATUS_RUNNING, $staleStep->status);
+        Event::assertNotDispatched(ContentGenerationFailed::class);
     }
 
     private function pendingRun(bool $withEvidence = false, bool $evidenceRequired = false): ContentGenerationRun
@@ -464,6 +665,46 @@ class ContentGenerationCoordinatorTest extends TestCase
         return $run;
     }
 
+    private function coordinatorFor(FakeArticleContentGenerationService $generator): ContentGenerationCoordinator
+    {
+        $this->app->instance(ArticleContentGenerationService::class, $generator);
+
+        return $this->app->make(ContentGenerationCoordinator::class);
+    }
+
+    /** @return array{ContentGenerationRun, ContentGenerationRunStep} */
+    private function runInterruptedAfterInitialResponse(): array
+    {
+        $run = $this->pendingRun(withEvidence: true);
+        $this->fakeGenerator->queue(new RuntimeException('interrupted before initial response persisted'));
+        $failed = $this->coordinator->generate($run)->fresh();
+        $initialStep = $failed->steps()->where('step_type', ContentGenerationRunStep::TYPE_INITIAL_GENERATION)->sole();
+        $article = $this->substantiveArticle();
+        $initialStep->forceFill([
+            'status' => ContentGenerationRunStep::STATUS_COMPLETED,
+            'output' => $article,
+            'error_message' => null,
+            'completed_at' => now(),
+        ])->save();
+        $failed->forceFill([
+            'status' => ContentGenerationRun::STATUS_GENERATING,
+            'raw_output' => $article,
+            'error_message' => null,
+            'completed_at' => null,
+            'lease_expires_at' => now()->subMinute(),
+        ])->save();
+
+        return [$failed->fresh(), $initialStep->fresh()];
+    }
+
+    private function expireClaim(ContentGenerationRun $run): void
+    {
+        DB::table('content_generation_runs')->where('id', $run->id)->update([
+            'lease_expires_at' => now()->subMinute(),
+            'updated_at' => now()->subMinutes(30),
+        ]);
+    }
+
     /** @return array<string, mixed> */
     private function blueprint(): array
     {
@@ -517,11 +758,19 @@ class FakeArticleContentGenerationService extends ArticleContentGenerationServic
     /** @var list<bool> */
     public array $snapshotsPrepared = [];
 
+    /** @var array<int, Closure> */
+    private array $callHooks = [];
+
     public function __construct() {}
 
     public function queue(string|Throwable ...$outputs): void
     {
         array_push($this->outputs, ...$outputs);
+    }
+
+    public function onCall(int $call, Closure $hook): void
+    {
+        $this->callHooks[$call] = $hook;
     }
 
     public function generate(AiModel $aiModel, string $prompt): AgentResponse
@@ -534,6 +783,9 @@ class FakeArticleContentGenerationService extends ArticleContentGenerationServic
             && $run->variables_snapshot !== null
             && $run->model_snapshot !== null
             && $run->modules()->exists();
+        if (isset($this->callHooks[count($this->prompts)])) {
+            ($this->callHooks[count($this->prompts)])();
+        }
         $output = array_shift($this->outputs);
         if ($output instanceof Throwable) {
             throw $output;

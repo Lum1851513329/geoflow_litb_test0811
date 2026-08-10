@@ -45,3 +45,19 @@
 
 - The existing `ArticleContentGenerationService` has no provider-side idempotency token. A hard process death after the provider accepted an initial request but before its step is completed can therefore repeat that initial call after lease expiry. Database state remains idempotent, and targeted revisions remain capped at one, but provider-level exactly-once delivery is not claimable without extending the upstream service contract.
 - The unrelated local `docker-compose.yml` modification was preserved and excluded from both commits.
+
+## Root review repair round 1
+
+- Added atomic claim fencing with an opaque `claim_token`, monotonic `lease_version`, and expiring lease. Step completion/failure, reports, run output, terminal transitions, and events now require the same current claim; reclaimed stale workers cannot overwrite output, append a revision, fail the winner, or emit a failure event.
+- Added a partial unique index enforcing at most one `targeted_revision` step per run. Two interleaving-worker tests cover both a stale provider response and a stale provider exception after a second worker reclaims and completes the run.
+- Semantic attempt ordinals are persisted in step input snapshots and recovered from the ledger. Completed durable semantic responses are parsed without another provider call, and the two-attempt lifetime cap survives crashes and resumptions.
+- Snapshot migration rollback keeps `compiled_prompt` nullable. A down/up round trip retains `NULL`, permits one complete snapshot initialization, then rejects later mutation.
+- Model snapshots now contain a secret-safe configuration fingerprint, revalidated immediately before every provider call. A configuration mutation between initial generation and semantic review fails before a second provider call. Complete generation requirements are stored in the immutable variables snapshot; retry behavior is unchanged by later brief locale/mention edits.
+- A successful targeted revision becomes the run's current `raw_output`; the original model response remains on the initial-generation step.
+- `ContentGenerationFailed` is emitted only when the current claim actually transitions the run to `failed`; evidence and manual-review terminal outcomes use completion signaling.
+- Claim-acquisition database failures propagate to the queue instead of returning a pending run as apparent success; a one-shot query-failure regression covers this retry boundary.
+- Focused coordinator suite: `25 passed, 126 assertions`.
+- Task 1-6 compatibility plus legacy worker prompt suite: `110 passed, 324 assertions` (`135 passed, 450 assertions` combined with the focused suite).
+- Pint: 5 scoped files clean. `git diff --check`: clean.
+- PostgreSQL disposable database: full migration, rollback of `010310` and `010300`, and reapply all succeeded. The disposable `geoflow_task7_round1` database was dropped afterward.
+- Independent repair re-review: `Ready: yes`; focused suite independently confirmed at `25 passed, 126 assertions`.
