@@ -8,11 +8,23 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 
 final class ContentGenerationRun extends Model
 {
+    public const STATUS_PENDING = 'pending';
+
     public const STATUS_QUEUED = 'queued';
+
+    public const STATUS_COMPILING = 'compiling';
+
+    public const STATUS_GENERATING = 'generating';
 
     public const STATUS_RUNNING = 'running';
 
     public const STATUS_COMPLETED = 'completed';
+
+    public const STATUS_READY_FOR_REVIEW = 'ready_for_review';
+
+    public const STATUS_NEEDS_EVIDENCE = 'needs_evidence';
+
+    public const STATUS_MODEL_QUALITY_FAILED = 'model_quality_failed';
 
     public const STATUS_FAILED = 'failed';
 

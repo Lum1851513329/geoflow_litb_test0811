@@ -16,6 +16,8 @@ final class ContentGenerationRunStep extends Model
 
     public const TYPE_REVISION = 'revision';
 
+    public const TYPE_TARGETED_REVISION = 'targeted_revision';
+
     public const TYPE_ADOPTION = 'adoption';
 
     public const STATUS_QUEUED = 'queued';
