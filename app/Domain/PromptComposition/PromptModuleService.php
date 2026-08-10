@@ -58,8 +58,7 @@ final class PromptModuleService
     public function publish(PromptModuleVersion $version, Admin $actor, string $reason): PromptModuleVersion
     {
         $published = DB::transaction(function () use ($version, $reason): PromptModuleVersion {
-            $lockedVersion = PromptModuleVersion::query()->whereKey($version->getKey())->lockForUpdate()->firstOrFail();
-            $module = PromptModule::query()->whereKey($lockedVersion->prompt_module_id)->lockForUpdate()->firstOrFail();
+            [$module, $lockedVersion] = $this->lockModuleAndVersion($version);
             if ($lockedVersion->lifecycle_status === PromptModuleVersion::STATUS_ARCHIVED) {
                 throw ImmutablePromptVersionException::cannotPublishArchived((int) $lockedVersion->id);
             }
@@ -92,8 +91,7 @@ final class PromptModuleService
     public function archive(PromptModuleVersion $version, Admin $actor, string $reason): PromptModuleVersion
     {
         $archived = DB::transaction(function () use ($version, $reason): PromptModuleVersion {
-            $lockedVersion = PromptModuleVersion::query()->whereKey($version->getKey())->lockForUpdate()->firstOrFail();
-            $module = PromptModule::query()->whereKey($lockedVersion->prompt_module_id)->lockForUpdate()->firstOrFail();
+            [$module, $lockedVersion] = $this->lockModuleAndVersion($version);
 
             $hasActivePresetDependency = $lockedVersion->presetBindings()
                 ->whereHas('presetVersion', fn ($query) => $query->where(
@@ -141,6 +139,19 @@ final class PromptModuleService
         ]);
     }
 
+    /** @return array{0: PromptModule, 1: PromptModuleVersion} */
+    private function lockModuleAndVersion(PromptModuleVersion $version): array
+    {
+        $module = PromptModule::query()->whereKey($version->prompt_module_id)->lockForUpdate()->firstOrFail();
+        $lockedVersion = PromptModuleVersion::query()
+            ->whereKey($version->getKey())
+            ->where('prompt_module_id', $module->id)
+            ->lockForUpdate()
+            ->firstOrFail();
+
+        return [$module, $lockedVersion];
+    }
+
     private function log(
         Admin $actor,
         string $action,
@@ -155,9 +166,9 @@ final class PromptModuleService
                 'module_key' => $module->module_key,
                 'version' => $version?->version,
                 'lifecycle_status' => $version?->lifecycle_status,
-                'content_sha256' => $version?->content_sha256,
-                'content_length' => $version === null ? null : mb_strlen($version->content),
-                'reason_sha256' => $reason === null ? null : hash('sha256', $reason),
+                'snapshot_digest' => $version?->content_sha256,
+                'snapshot_length' => $version === null ? null : mb_strlen($version->content),
+                'reason_digest' => $reason === null ? null : hash('sha256', $reason),
                 'reason_length' => $reason === null ? null : mb_strlen($reason),
             ], static fn (mixed $value): bool => $value !== null),
         ]);

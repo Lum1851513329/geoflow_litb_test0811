@@ -11,9 +11,11 @@ use App\Models\PromptModuleVersion;
 use App\Models\PromptPreset;
 use App\Models\PromptPresetModuleVersion;
 use App\Models\PromptPresetVersion;
+use Illuminate\Database\Events\QueryExecuted;
 use Illuminate\Database\QueryException;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Tests\TestCase;
 
@@ -134,16 +136,43 @@ class PromptModuleServiceTest extends TestCase
         app(PromptModuleService::class)->publish($version, $this->admin, 'Restore archived version');
     }
 
-    public function test_lifecycle_activity_logs_do_not_include_prompt_text(): void
+    public function test_publish_and_archive_query_the_parent_module_before_relevant_versions(): void
+    {
+        $module = $this->moduleWithVersions(['production', 'draft']);
+        $draft = $module->versions()->where('version', 2)->sole();
+        $publishQueries = [];
+        DB::listen(function (QueryExecuted $query) use (&$publishQueries): void {
+            $publishQueries[] = $query->sql;
+        });
+
+        $published = app(PromptModuleService::class)->publish($draft, $this->admin, 'Promote draft');
+
+        $this->assertSame(PromptModuleVersion::STATUS_PRODUCTION, $published->lifecycle_status);
+        $this->assertModuleQueryPrecedesVersionQuery($publishQueries);
+
+        $deprecated = $module->versions()->where('version', 1)->sole();
+        $archiveQueries = [];
+        DB::listen(function (QueryExecuted $query) use (&$archiveQueries): void {
+            $archiveQueries[] = $query->sql;
+        });
+
+        $archived = app(PromptModuleService::class)->archive($deprecated, $this->admin, 'Retire old snapshot');
+
+        $this->assertSame(PromptModuleVersion::STATUS_ARCHIVED, $archived->lifecycle_status);
+        $this->assertModuleQueryPrecedesVersionQuery($archiveQueries);
+    }
+
+    public function test_lifecycle_activity_logs_exclude_prompt_text_and_retain_snapshot_digest(): void
     {
         $module = $this->moduleWithVersions(['draft']);
         $draft = $module->versions()->sole();
 
-        app(PromptModuleService::class)->publish($draft, $this->admin, $draft->content);
+        app(PromptModuleService::class)->publish($draft, $this->admin, 'Approved after review');
 
         $details = (string) AdminActivityLog::query()->where('action', 'prompt_module_version:published')->sole()->details;
         $this->assertStringNotContainsString($draft->content, $details);
-        $this->assertStringContainsString(hash('sha256', $draft->content), $details);
+        $this->assertStringContainsString('"snapshot_digest":"'.hash('sha256', $draft->content).'"', $details);
+        $this->assertStringContainsString('"reason_digest":"'.hash('sha256', 'Approved after review').'"', $details);
     }
 
     /** @param list<string> $statuses */
@@ -221,5 +250,26 @@ class PromptModuleServiceTest extends TestCase
             'lifecycle_status' => PromptModuleVersion::STATUS_DRAFT,
             'change_note' => 'Initial snapshot',
         ];
+    }
+
+    /** @param list<string> $queries */
+    private function assertModuleQueryPrecedesVersionQuery(array $queries): void
+    {
+        $moduleQueryIndex = $this->queryIndexForTable($queries, 'prompt_modules');
+        $versionQueryIndex = $this->queryIndexForTable($queries, 'prompt_module_versions');
+
+        $this->assertLessThan($versionQueryIndex, $moduleQueryIndex);
+    }
+
+    /** @param list<string> $queries */
+    private function queryIndexForTable(array $queries, string $table): int
+    {
+        foreach ($queries as $index => $sql) {
+            if (str_contains($sql, 'from "'.$table.'"')) {
+                return $index;
+            }
+        }
+
+        $this->fail("Expected a query for {$table}.");
     }
 }
