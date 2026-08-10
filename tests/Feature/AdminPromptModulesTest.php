@@ -3,7 +3,10 @@
 namespace Tests\Feature;
 
 use App\Http\Controllers\Admin\PromptPresetController;
+use App\Http\Requests\Admin\PublishPromptModuleVersionRequest;
+use App\Http\Requests\Admin\StorePromptModuleVersionRequest;
 use App\Http\Requests\Admin\StorePromptPresetRequest;
+use App\Http\Requests\Admin\UpdatePromptModuleRequest;
 use App\Models\Admin;
 use App\Models\AdminActivityLog;
 use App\Models\AiModel;
@@ -384,6 +387,77 @@ class AdminPromptModulesTest extends TestCase
         app(PromptPresetController::class)->publish($request, $stalePreset, $version);
     }
 
+    public function test_operator_cannot_create_a_version_from_a_stale_custom_module_promoted_to_system(): void
+    {
+        [$module] = $this->customModuleWithDraftVersion('stale-module-create');
+        $this->app->afterResolving(StorePromptModuleVersionRequest::class, function () use ($module): void {
+            PromptModule::query()->whereKey($module->id)->update(['is_system' => true]);
+        });
+
+        $this->actingAs($this->contentOperator, 'admin')->post(
+            route('admin.prompt-modules.versions.store', $module),
+            $this->moduleVersionPayload(),
+        )->assertForbidden();
+
+        $this->assertSame(1, $module->versions()->count());
+    }
+
+    public function test_operator_cannot_publish_a_version_from_a_stale_custom_module_promoted_to_system(): void
+    {
+        [$module, $version] = $this->customModuleWithDraftVersion('stale-module-publish');
+        $this->app->afterResolving(PublishPromptModuleVersionRequest::class, function () use ($module): void {
+            PromptModule::query()->whereKey($module->id)->update(['is_system' => true]);
+        });
+
+        $this->actingAs($this->contentOperator, 'admin')->post(
+            route('admin.prompt-modules.versions.publish', [$module, $version]),
+            ['reason' => 'Stale route model'],
+        )->assertForbidden();
+
+        $this->assertSame(PromptModuleVersion::STATUS_DRAFT, $version->fresh()->lifecycle_status);
+    }
+
+    public function test_operator_cannot_deprecate_a_version_from_a_stale_custom_module_promoted_to_system(): void
+    {
+        [$module, $version] = $this->customModuleWithDraftVersion('stale-module-deprecate');
+        $this->promoteModuleDuringRouteBinding($module);
+
+        $this->actingAs($this->contentOperator, 'admin')->post(
+            route('admin.prompt-modules.versions.deprecate', [$module, $version]),
+            ['reason' => 'Stale route model'],
+        )->assertForbidden();
+
+        $this->assertSame(PromptModuleVersion::STATUS_DRAFT, $version->fresh()->lifecycle_status);
+    }
+
+    public function test_operator_cannot_archive_a_version_from_a_stale_custom_module_promoted_to_system(): void
+    {
+        [$module, $version] = $this->customModuleWithDraftVersion('stale-module-archive');
+        $this->promoteModuleDuringRouteBinding($module);
+
+        $this->actingAs($this->contentOperator, 'admin')->post(
+            route('admin.prompt-modules.versions.archive', [$module, $version]),
+            ['reason' => 'Stale route model'],
+        )->assertForbidden();
+
+        $this->assertSame(PromptModuleVersion::STATUS_DRAFT, $version->fresh()->lifecycle_status);
+    }
+
+    public function test_operator_cannot_update_a_stale_custom_module_promoted_to_system(): void
+    {
+        [$module] = $this->customModuleWithDraftVersion('stale-module-update');
+        $this->app->afterResolving(UpdatePromptModuleRequest::class, function () use ($module): void {
+            PromptModule::query()->whereKey($module->id)->update(['is_system' => true]);
+        });
+
+        $this->actingAs($this->contentOperator, 'admin')->patch(
+            route('admin.prompt-modules.update', $module),
+            $this->moduleUpdatePayload('Unauthorized stale update'),
+        )->assertForbidden();
+
+        $this->assertNotSame('Unauthorized stale update', $module->fresh()->display_name);
+    }
+
     public function test_operator_cannot_write_protected_system_fields(): void
     {
         [$preset] = $this->presetWithDraftVersion('protected-fields');
@@ -583,6 +657,91 @@ class AdminPromptModulesTest extends TestCase
             ->assertSee('data-move-binding-down', false);
     }
 
+    public function test_preset_editor_keeps_an_exact_binding_outside_the_first_fifty_choices(): void
+    {
+        $farVersion = null;
+        foreach (range(1, 55) as $number) {
+            [, $farVersion] = $this->customModuleWithDraftVersion("far-choice-{$number}");
+        }
+        [$preset, $presetVersion] = $this->presetWithDraftVersion('far-selected-choice');
+        PromptPresetModuleVersion::query()->create([
+            'prompt_preset_version_id' => $presetVersion->id,
+            'prompt_module_version_id' => $farVersion->id,
+            'sort_order' => 1,
+            'is_required' => true,
+        ]);
+
+        $response = $this->actingAs($this->superAdmin, 'admin')->get(route('admin.prompt-presets.edit', $preset));
+
+        $response->assertOk()
+            ->assertSee('value="'.$farVersion->id.'" selected', false)
+            ->assertViewHas('moduleVersions', fn (mixed $versions): bool => $versions->contains('id', $farVersion->id)
+                && $versions->every(fn (PromptModuleVersion $version): bool => ! array_key_exists('content', $version->getAttributes())));
+    }
+
+    public function test_preset_editor_keeps_an_archived_exact_binding_selectable_when_unchanged(): void
+    {
+        [, $archivedVersion] = $this->customModuleWithDraftVersion('archived-selected-choice');
+        $archivedVersion->update(['lifecycle_status' => PromptModuleVersion::STATUS_ARCHIVED]);
+        [$preset, $presetVersion] = $this->presetWithDraftVersion('archived-binding');
+        PromptPresetModuleVersion::query()->create([
+            'prompt_preset_version_id' => $presetVersion->id,
+            'prompt_module_version_id' => $archivedVersion->id,
+            'sort_order' => 1,
+            'is_required' => false,
+        ]);
+
+        $this->actingAs($this->superAdmin, 'admin')->get(route('admin.prompt-presets.edit', $preset))
+            ->assertOk()
+            ->assertSee('value="'.$archivedVersion->id.'" selected', false);
+    }
+
+    public function test_preset_selector_wires_paginated_search_results_into_the_editor(): void
+    {
+        [$preset] = $this->presetWithDraftVersion('search-selector', bind: true);
+        [$searchModule, $searchVersion] = $this->customModuleWithDraftVersion('arbitrary-search-selection');
+
+        $this->actingAs($this->superAdmin, 'admin')->get(route('admin.prompt-presets.edit', $preset))
+            ->assertOk()
+            ->assertSee('data-module-version-search', false)
+            ->assertSee('data-module-version-options-url="'.route('admin.prompt-module-version-options').'"', false)
+            ->assertSee('fetch(', false)
+            ->assertSee('select.add(new Option', false);
+        $this->getJson(route('admin.prompt-module-version-options', ['q' => $searchModule->module_key]))
+            ->assertOk()
+            ->assertJsonPath('data.0.id', $searchVersion->id);
+    }
+
+    public function test_cloned_required_binding_keeps_boolean_value_and_validates(): void
+    {
+        [, $secondVersion] = $this->customModuleWithDraftVersion('cloned-required');
+        [$preset] = $this->presetWithDraftVersion('cloned-required-edit', bind: true);
+
+        $this->actingAs($this->superAdmin, 'admin')->get(route('admin.prompt-presets.index'))
+            ->assertOk()
+            ->assertSee('data-binding-required', false)
+            ->assertSee("input.value = '1'", false);
+        $this->get(route('admin.prompt-presets.edit', $preset))
+            ->assertOk()
+            ->assertSee('data-binding-required', false)
+            ->assertSee("input.value = '1'", false);
+
+        $this->actingAs($this->superAdmin, 'admin')->post(route('admin.prompt-presets.store'), [
+            'preset_key' => 'cloned-required',
+            'display_name' => 'Cloned required',
+            'matching_rules' => '{}',
+            'generation_policy' => '{}',
+            'conflict_policy' => '{}',
+            'module_versions' => [
+                ['prompt_module_version_id' => $this->draftVersion->id, 'sort_order' => 1, 'is_required' => '1'],
+                ['prompt_module_version_id' => $secondVersion->id, 'sort_order' => 2, 'is_required' => '1'],
+            ],
+        ])->assertRedirect()->assertSessionDoesntHaveErrors();
+
+        $stored = PromptPreset::query()->where('preset_key', 'cloned-required')->sole()->versions()->sole();
+        $this->assertSame(2, $stored->moduleVersions()->where('is_required', true)->count());
+    }
+
     public function test_explicit_binding_order_indices_control_persisted_exact_version_order(): void
     {
         $module = PromptModule::query()->create([
@@ -630,6 +789,68 @@ class AdminPromptModulesTest extends TestCase
             'lifecycle_status' => $status,
             'created_by_admin_id' => $this->superAdmin->id,
         ]);
+    }
+
+    /** @return array{PromptModule, PromptModuleVersion} */
+    private function customModuleWithDraftVersion(string $key): array
+    {
+        $module = PromptModule::query()->create([
+            'module_key' => $key,
+            'display_name' => str($key)->headline(),
+            'module_type' => PromptModule::TYPE_GEO,
+            'default_priority' => 10,
+            'owned_by_admin_id' => $this->contentOperator->id,
+        ]);
+        $content = "Custom module {$key}";
+        $version = PromptModuleVersion::forceCreate([
+            'prompt_module_id' => $module->id,
+            'version' => 1,
+            'content' => $content,
+            'variable_contract' => [],
+            'content_sha256' => hash('sha256', $content),
+            'lifecycle_status' => PromptModuleVersion::STATUS_DRAFT,
+            'created_by_admin_id' => $this->contentOperator->id,
+        ]);
+
+        return [$module, $version];
+    }
+
+    /** @return array<string, mixed> */
+    private function moduleVersionPayload(): array
+    {
+        return [
+            'content' => 'New custom module version',
+            'variable_contract' => '{}',
+            'output_contract' => '{}',
+            'parameter_defaults' => '{}',
+            'change_note' => 'Stale create attempt',
+        ];
+    }
+
+    /** @return array<string, mixed> */
+    private function moduleUpdatePayload(string $displayName): array
+    {
+        return [
+            'display_name' => $displayName,
+            'module_type' => PromptModule::TYPE_GEO,
+            'description' => 'Stale update attempt',
+            'applicability' => '{}',
+            'default_priority' => 10,
+            'is_mandatory' => '0',
+            'is_enabled' => '1',
+        ];
+    }
+
+    private function promoteModuleDuringRouteBinding(PromptModule $module): void
+    {
+        $promoted = false;
+        PromptModule::retrieved(function (PromptModule $retrieved) use ($module, &$promoted): void {
+            if ($promoted || (int) $retrieved->id !== (int) $module->id) {
+                return;
+            }
+            $promoted = true;
+            DB::table('prompt_modules')->where('id', $module->id)->update(['is_system' => true]);
+        });
     }
 
     private function admin(string $username, string $role): Admin

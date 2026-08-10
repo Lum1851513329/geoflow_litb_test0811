@@ -8,6 +8,7 @@ use App\Models\PromptModule;
 use App\Models\PromptModuleVersion;
 use App\Models\PromptPresetVersion;
 use App\Support\AdminActivityLogger;
+use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\DB;
 
 final class PromptModuleService
@@ -53,6 +54,34 @@ final class PromptModuleService
         $this->log($actor, 'prompt_module_version:created', $module, $version);
 
         return $version;
+    }
+
+    /** @param array<string, mixed> $data */
+    public function updateIdentity(PromptModule $module, array $data, Admin $actor): PromptModule
+    {
+        $updates = Arr::only($data, [
+            'display_name',
+            'module_type',
+            'description',
+            'is_system',
+            'applicability',
+            'is_mandatory',
+            'default_priority',
+            'is_enabled',
+        ]);
+        $updated = DB::transaction(function () use ($module, $updates): PromptModule {
+            $lockedModule = PromptModule::query()->whereKey($module->id)->lockForUpdate()->firstOrFail();
+            $lockedModule->update($updates);
+
+            return $lockedModule->fresh();
+        });
+        AdminActivityLogger::log($actor, 'prompt_module:updated', [
+            'target_type' => 'prompt_module',
+            'target_id' => $updated->id,
+            'details' => ['updated_fields' => array_keys($updates)],
+        ]);
+
+        return $updated;
     }
 
     public function publish(PromptModuleVersion $version, Admin $actor, string $reason): PromptModuleVersion

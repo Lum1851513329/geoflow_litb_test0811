@@ -94,6 +94,16 @@ final class PromptPresetController extends Controller
                 'id', 'module_key', 'display_name', 'module_type',
             ]),
         ]);
+        $moduleVersions = $this->moduleVersionChoices();
+        if ($selected !== null) {
+            $selectedChoices = $selected->moduleVersions
+                ->pluck('promptModuleVersion')
+                ->filter(fn (mixed $version): bool => $version instanceof PromptModuleVersion);
+            $moduleVersions = $selectedChoices
+                ->concat($moduleVersions)
+                ->unique(fn (PromptModuleVersion $version): int => (int) $version->id)
+                ->values();
+        }
         $usages = ContentGenerationRun::query()
             ->when($selected !== null, fn ($query) => $query->where('preset_version_id', $selected->id))
             ->when($selected === null, fn ($query) => $query->whereRaw('1 = 0'))
@@ -109,7 +119,7 @@ final class PromptPresetController extends Controller
             'versions' => $versions,
             'selectedVersion' => $selected,
             'usages' => $usages,
-            'moduleVersions' => $this->moduleVersionChoices(),
+            'moduleVersions' => $moduleVersions,
         ]);
     }
 

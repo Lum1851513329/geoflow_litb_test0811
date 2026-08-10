@@ -16,10 +16,10 @@
     @endif
 
     @if(\Illuminate\Support\Facades\Gate::forUser(auth('admin')->user())->allows('update', $preset))
-        <section class="rounded-lg bg-white p-6 shadow"><h2 class="text-lg font-semibold">{{ __('admin.prompt_presets.version_create_title') }}</h2><p class="mt-1 text-sm text-gray-500">{{ __('admin.prompt_presets.version_create_hint') }}</p><form method="POST" action="{{ route('admin.prompt-presets.versions.store', $preset) }}" class="mt-5 grid gap-4 lg:grid-cols-2" data-preset-form>@csrf
+        <section class="rounded-lg bg-white p-6 shadow"><h2 class="text-lg font-semibold">{{ __('admin.prompt_presets.version_create_title') }}</h2><p class="mt-1 text-sm text-gray-500">{{ __('admin.prompt_presets.version_create_hint') }}</p><form method="POST" action="{{ route('admin.prompt-presets.versions.store', $preset) }}" class="mt-5 grid gap-4 lg:grid-cols-2" data-preset-form data-module-version-options-url="{{ route('admin.prompt-module-version-options') }}">@csrf
             <label class="text-sm font-medium">{{ __('admin.prompt_presets.fields.preset_key') }}<input name="preset_key" value="{{ old('preset_key', $preset->preset_key) }}" required class="mt-1 w-full rounded-md border-gray-300"></label><label class="text-sm font-medium">{{ __('admin.prompt_presets.fields.display_name') }}<input name="display_name" value="{{ old('display_name', $preset->display_name) }}" required class="mt-1 w-full rounded-md border-gray-300"></label><label class="lg:col-span-2 text-sm font-medium">{{ __('admin.prompt_presets.fields.description') }}<textarea name="description" rows="2" class="mt-1 w-full rounded-md border-gray-300">{{ old('description', $preset->description) }}</textarea></label>
             @foreach(['matching_rules', 'generation_policy', 'conflict_policy'] as $field)<label class="text-sm font-medium">{{ __('admin.prompt_presets.fields.'.$field) }}<textarea name="{{ $field }}" rows="6" {{ $field !== 'conflict_policy' ? 'required' : '' }} class="mt-1 w-full rounded-md border-gray-300 font-mono text-xs">{{ old($field, json_encode($selectedVersion?->{$field} ?? [], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)) }}</textarea></label>@endforeach<label class="text-sm font-medium">{{ __('admin.prompt_presets.fields.change_note') }}<textarea name="change_note" rows="6" class="mt-1 w-full rounded-md border-gray-300">{{ old('change_note') }}</textarea></label>
-            <div class="lg:col-span-2"><div class="flex items-center justify-between"><h3 class="font-semibold">{{ __('admin.prompt_presets.fields.ordered_modules') }}</h3><button type="button" data-add-binding class="rounded-md border px-3 py-2 text-sm">{{ __('admin.prompt_presets.actions.add_module') }}</button></div><div data-bindings class="mt-3 space-y-2">@foreach($selectedVersion?->moduleVersions ?? [] as $index => $binding)<div data-binding-row class="grid gap-2 sm:grid-cols-[1fr_auto_auto]"><input type="hidden" name="module_versions[{{ $index }}][sort_order]" value="{{ $index + 1 }}"><select name="module_versions[{{ $index }}][prompt_module_version_id]" required class="rounded-md border-gray-300 text-sm">@foreach($moduleVersions as $version)<option value="{{ $version->id }}" @selected($binding->prompt_module_version_id === $version->id)>{{ $version->module?->display_name }} · v{{ $version->version }} · #{{ $version->id }}</option>@endforeach</select><span><input type="hidden" name="module_versions[{{ $index }}][is_required]" value="0"><label class="inline-flex items-center gap-2 text-sm"><input type="checkbox" name="module_versions[{{ $index }}][is_required]" value="1" @checked($binding->is_required)>{{ __('admin.prompt_presets.fields.required') }}</label></span><div class="flex items-center gap-2"><button type="button" data-move-binding-up class="text-sm text-gray-600">{{ __('admin.prompt_presets.actions.move_up') }}</button><button type="button" data-move-binding-down class="text-sm text-gray-600">{{ __('admin.prompt_presets.actions.move_down') }}</button><button type="button" data-remove-binding class="text-sm text-red-600">{{ __('admin.prompt_presets.actions.remove') }}</button></div></div>@endforeach</div></div>
+            <div class="lg:col-span-2"><div class="flex flex-wrap items-end justify-between gap-3"><div><h3 class="font-semibold">{{ __('admin.prompt_presets.fields.ordered_modules') }}</h3><input type="search" data-module-version-search class="mt-2 rounded-md border-gray-300 text-sm" placeholder="{{ __('admin.prompt_presets.fields.search_versions') }}"></div><button type="button" data-add-binding class="rounded-md border px-3 py-2 text-sm">{{ __('admin.prompt_presets.actions.add_module') }}</button></div><div data-bindings class="mt-3 space-y-2">@foreach($selectedVersion?->moduleVersions ?? [] as $index => $binding)<div data-binding-row class="grid gap-2 sm:grid-cols-[1fr_auto_auto]"><input type="hidden" name="module_versions[{{ $index }}][sort_order]" value="{{ $index + 1 }}"><select name="module_versions[{{ $index }}][prompt_module_version_id]" required class="rounded-md border-gray-300 text-sm">@foreach($moduleVersions as $version)<option value="{{ $version->id }}" @selected($binding->prompt_module_version_id === $version->id)>{{ $version->module?->display_name }} · v{{ $version->version }} · {{ $version->lifecycle_status }} · #{{ $version->id }}</option>@endforeach</select><span><input type="hidden" name="module_versions[{{ $index }}][is_required]" value="0"><label class="inline-flex items-center gap-2 text-sm"><input type="checkbox" data-binding-required name="module_versions[{{ $index }}][is_required]" value="1" @checked($binding->is_required)>{{ __('admin.prompt_presets.fields.required') }}</label></span><div class="flex items-center gap-2"><button type="button" data-move-binding-up class="text-sm text-gray-600">{{ __('admin.prompt_presets.actions.move_up') }}</button><button type="button" data-move-binding-down class="text-sm text-gray-600">{{ __('admin.prompt_presets.actions.move_down') }}</button><button type="button" data-remove-binding class="text-sm text-red-600">{{ __('admin.prompt_presets.actions.remove') }}</button></div></div>@endforeach</div></div>
             <div class="flex gap-5 lg:col-span-2"><input type="hidden" name="is_enabled" value="0"><label class="inline-flex items-center gap-2"><input type="checkbox" name="is_enabled" value="1" @checked($preset->is_enabled)>{{ __('admin.prompt_presets.fields.enabled') }}</label>@if(auth('admin')->user()?->isSuperAdmin())<input type="hidden" name="is_system" value="0"><label class="inline-flex items-center gap-2"><input type="checkbox" name="is_system" value="1" @checked($preset->is_system)>{{ __('admin.prompt_presets.fields.system') }}</label>@endif</div>
             <div class="lg:col-span-2"><button class="rounded-md bg-blue-600 px-4 py-2 text-sm font-semibold text-white">{{ __('admin.prompt_presets.actions.create_version') }}</button></div>
         </form></section>
@@ -33,7 +33,10 @@ document.querySelectorAll('[data-preset-form]').forEach((form) => {
     const bindings = form.querySelector('[data-bindings]');
     form.querySelector('[data-add-binding]')?.addEventListener('click', () => {
         const row = bindings.querySelector('[data-binding-row]').cloneNode(true);
-        row.querySelectorAll('select,input').forEach((input) => { input.value = input.type === 'hidden' ? '0' : ''; if (input.type === 'checkbox') input.checked = false; });
+        row.querySelectorAll('select,input').forEach((input) => {
+            if (input.type === 'checkbox') { input.checked = false; input.value = '1'; return; }
+            input.value = input.type === 'hidden' ? '0' : '';
+        });
         bindings.appendChild(row);
         renumber();
     });
@@ -51,6 +54,26 @@ document.querySelectorAll('[data-preset-form]').forEach((form) => {
             row.querySelector('[name$="[sort_order]"]').value = index + 1;
         });
     }
+    let searchTimer;
+    form.querySelector('[data-module-version-search]')?.addEventListener('input', (event) => {
+        clearTimeout(searchTimer);
+        const query = event.target.value.trim();
+        if (query.length < 1) return;
+        searchTimer = setTimeout(async () => {
+            const url = new URL(form.dataset.moduleVersionOptionsUrl, window.location.origin);
+            url.searchParams.set('q', query);
+            const response = await fetch(url, { headers: { Accept: 'application/json' } });
+            if (! response.ok) return;
+            const payload = await response.json();
+            bindings.querySelectorAll('select[name$="[prompt_module_version_id]"]').forEach((select) => {
+                payload.data.forEach((version) => {
+                    if ([...select.options].some((option) => option.value === String(version.id))) return;
+                    const label = `${version.display_name} · v${version.version} · ${version.lifecycle_status} · #${version.id}`;
+                    select.add(new Option(label, version.id));
+                });
+            });
+        }, 200);
+    });
     renumber();
 });
 </script>

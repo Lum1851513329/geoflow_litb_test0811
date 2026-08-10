@@ -13,7 +13,7 @@ use App\Models\Admin;
 use App\Models\ContentGenerationRunModule;
 use App\Models\PromptModule;
 use App\Models\PromptModuleVersion;
-use App\Support\AdminActivityLogger;
+use Closure;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -83,14 +83,8 @@ final class PromptModuleController extends Controller
             if (array_key_exists('is_system', $data) && $actor->isSuperAdmin()) {
                 $updates['is_system'] = (bool) $data['is_system'];
             }
-            $locked->update($updates);
+            $this->modules->updateIdentity($locked, $updates, $actor);
         });
-
-        AdminActivityLogger::log($actor, 'prompt_module:updated', [
-            'target_type' => 'prompt_module',
-            'target_id' => $module->id,
-            'details' => ['updated_fields' => array_keys($request->validated())],
-        ]);
 
         return redirect()->route('admin.prompt-modules.show', $module)
             ->with('message', __('admin.prompt_modules.messages.updated'));
@@ -143,7 +137,14 @@ final class PromptModuleController extends Controller
 
     public function storeVersion(StorePromptModuleVersionRequest $request, PromptModule $module): RedirectResponse
     {
-        $version = $this->modules->createVersion($module, $this->versionData($request->validated()), $this->actor($request));
+        $actor = $this->actor($request);
+        $data = $this->versionData($request->validated());
+        $version = DB::transaction(function () use ($module, $data, $actor): PromptModuleVersion {
+            $lockedModule = PromptModule::query()->whereKey($module->id)->lockForUpdate()->firstOrFail();
+            Gate::forUser($actor)->authorize('createVersion', $lockedModule);
+
+            return $this->modules->createVersion($lockedModule, $data, $actor);
+        });
 
         return redirect()->route('admin.prompt-modules.show', [$module, 'version_id' => $version->id])
             ->with('message', __('admin.prompt_modules.messages.version_created'));
@@ -154,46 +155,70 @@ final class PromptModuleController extends Controller
         PromptModule $module,
         PromptModuleVersion $version,
     ): RedirectResponse {
-        try {
-            $this->modules->publish($version, $this->actor($request), $request->string('reason')->toString());
-        } catch (ImmutablePromptVersionException $exception) {
-            throw ValidationException::withMessages(['reason' => $exception->getMessage()]);
-        }
-
-        return redirect()->route('admin.prompt-modules.show', $module)
-            ->with('message', __('admin.prompt_modules.messages.published'));
+        return $this->mutateVersionLifecycle(
+            $request,
+            $module,
+            $version,
+            'publishVersion',
+            __('admin.prompt_modules.messages.published'),
+            fn (PromptModuleVersion $lockedVersion, Admin $actor, string $reason): PromptModuleVersion => $this->modules->publish($lockedVersion, $actor, $reason),
+        );
     }
 
     public function archive(Request $request, PromptModule $module, PromptModuleVersion $version): RedirectResponse
     {
-        $actor = $this->actor($request);
-        Gate::forUser($actor)->authorize('archiveVersion', [$module, $version]);
-        $validated = $request->validate(['reason' => ['required', 'string', 'max:2000']]);
-
-        try {
-            $this->modules->archive($version, $actor, (string) $validated['reason']);
-        } catch (ImmutablePromptVersionException $exception) {
-            throw ValidationException::withMessages(['reason' => $exception->getMessage()]);
-        }
-
-        return redirect()->route('admin.prompt-modules.show', $module)
-            ->with('message', __('admin.prompt_modules.messages.archived'));
+        return $this->mutateVersionLifecycle(
+            $request,
+            $module,
+            $version,
+            'archiveVersion',
+            __('admin.prompt_modules.messages.archived'),
+            fn (PromptModuleVersion $lockedVersion, Admin $actor, string $reason): PromptModuleVersion => $this->modules->archive($lockedVersion, $actor, $reason),
+        );
     }
 
     public function deprecate(Request $request, PromptModule $module, PromptModuleVersion $version): RedirectResponse
     {
+        return $this->mutateVersionLifecycle(
+            $request,
+            $module,
+            $version,
+            'deprecateVersion',
+            __('admin.prompt_modules.messages.deprecated'),
+            fn (PromptModuleVersion $lockedVersion, Admin $actor, string $reason): PromptModuleVersion => $this->modules->deprecate($lockedVersion, $actor, $reason),
+        );
+    }
+
+    /** @param Closure(PromptModuleVersion, Admin, string): PromptModuleVersion $mutation */
+    private function mutateVersionLifecycle(
+        Request $request,
+        PromptModule $module,
+        PromptModuleVersion $version,
+        string $ability,
+        string $message,
+        Closure $mutation,
+    ): RedirectResponse {
         $actor = $this->actor($request);
-        Gate::forUser($actor)->authorize('deprecateVersion', [$module, $version]);
         $validated = $request->validate(['reason' => ['required', 'string', 'max:2000']]);
+        $reason = (string) $validated['reason'];
 
         try {
-            $this->modules->deprecate($version, $actor, (string) $validated['reason']);
+            DB::transaction(function () use ($module, $version, $actor, $ability, $mutation, $reason): void {
+                $lockedModule = PromptModule::query()->whereKey($module->id)->lockForUpdate()->firstOrFail();
+                $lockedVersion = PromptModuleVersion::query()
+                    ->whereKey($version->id)
+                    ->where('prompt_module_id', $lockedModule->id)
+                    ->lockForUpdate()
+                    ->firstOrFail();
+                Gate::forUser($actor)->authorize($ability, [$lockedModule, $lockedVersion]);
+                $mutation($lockedVersion, $actor, $reason);
+            });
         } catch (ImmutablePromptVersionException $exception) {
             throw ValidationException::withMessages(['reason' => $exception->getMessage()]);
         }
 
         return redirect()->route('admin.prompt-modules.show', $module)
-            ->with('message', __('admin.prompt_modules.messages.deprecated'));
+            ->with('message', $message);
     }
 
     public function destroyVersion(Request $request, PromptModule $module, PromptModuleVersion $version): RedirectResponse

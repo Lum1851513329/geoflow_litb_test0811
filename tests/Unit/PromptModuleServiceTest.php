@@ -78,6 +78,28 @@ class PromptModuleServiceTest extends TestCase
         $this->assertSame('module-lifecycle', $module->fresh()->module_key);
     }
 
+    public function test_identity_update_uses_the_service_without_mutating_stable_key_or_snapshot(): void
+    {
+        $module = $this->moduleWithVersions(['draft']);
+        $version = $module->versions()->sole();
+
+        $updated = app(PromptModuleService::class)->updateIdentity($module, [
+            'display_name' => 'Updated module identity',
+            'description' => 'Updated description',
+            'default_priority' => 80,
+            'is_enabled' => false,
+        ], $this->admin);
+
+        $this->assertSame('Updated module identity', $updated->display_name);
+        $this->assertSame('module-lifecycle', $updated->module_key);
+        $this->assertSame($version->content, $version->fresh()->content);
+        $this->assertDatabaseHas('admin_activity_logs', [
+            'action' => 'prompt_module:updated',
+            'target_type' => 'prompt_module',
+            'target_id' => $module->id,
+        ]);
+    }
+
     public function test_creating_versions_allocates_the_next_version_number(): void
     {
         $module = app(PromptModuleService::class)->createModule(
