@@ -24,6 +24,7 @@
         'tasks' => ['route' => 'admin.tasks.index', 'name' => __('admin.nav.tasks')],
         'distribution' => ['route' => 'admin.distribution.index', 'name' => __('admin.nav.distribution')],
         'articles' => ['route' => 'admin.articles.index', 'name' => __('admin.nav.articles')],
+        'content_strategy' => ['route' => 'admin.content-briefs.index', 'name' => __('admin.nav.content_strategy')],
         'materials' => ['route' => 'admin.materials.index', 'name' => __('admin.nav.materials')],
         'keyword_intelligence' => ['route' => 'admin.keyword-intelligence.index', 'name' => __('admin.keyword_intelligence.nav.overview')],
         'ai_config' => ['route' => 'admin.ai.configurator', 'name' => __('admin.nav.ai_config')],
@@ -31,6 +32,11 @@
     ];
     if (!$isSuperAdmin) {
         unset($menu['distribution']);
+    }
+    if (!(bool) config('geoflow.content_strategy_enabled', false)
+        || !(bool) config('geoflow.modular_prompts_enabled', false)
+        || !(bool) config('geoflow.generation_quality_gate_enabled', false)) {
+        unset($menu['content_strategy']);
     }
     if ($isSuperAdmin) {
         $menu['admin_users'] = ['route' => 'admin.admin-users.index', 'name' => __('admin.nav.admin_users')];
@@ -62,6 +68,17 @@
         'admin.distribution.rotate-secret' => 'distribution',
         'admin.articles.create' => 'articles',
         'admin.articles.edit' => 'articles',
+        'admin.content-briefs.index' => 'content_strategy',
+        'admin.content-briefs.create' => 'content_strategy',
+        'admin.content-briefs.store' => 'content_strategy',
+        'admin.content-briefs.strategy' => 'content_strategy',
+        'admin.content-briefs.strategy.confirm' => 'content_strategy',
+        'admin.content-briefs.blueprint' => 'content_strategy',
+        'admin.content-briefs.blueprint.confirm' => 'content_strategy',
+        'admin.content-briefs.generations.store' => 'content_strategy',
+        'admin.content-briefs.show' => 'content_strategy',
+        'admin.content-generations.show' => 'content_strategy',
+        'admin.content-generations.adopt' => 'content_strategy',
         'admin.manual-publications.index' => 'articles',
         'admin.manual-publications.create' => 'articles',
         'admin.manual-publications.show' => 'articles',

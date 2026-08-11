@@ -21,6 +21,8 @@ use App\Http\Controllers\Admin\ArticleEditorAssistantController;
 use App\Http\Controllers\Admin\AuthorController;
 use App\Http\Controllers\Admin\CategoryController;
 use App\Http\Controllers\Admin\ContentAnalyticsController;
+use App\Http\Controllers\Admin\ContentBriefController;
+use App\Http\Controllers\Admin\ContentGenerationController;
 use App\Http\Controllers\Admin\DashboardController;
 use App\Http\Controllers\Admin\DistributionAnalyticsController;
 use App\Http\Controllers\Admin\DistributionController;
@@ -117,6 +119,31 @@ Route::prefix($adminPrefix)->name('admin.')->middleware(['admin.locale'])->group
         });
         Route::get('prompt-module-version-options', [PromptPresetController::class, 'moduleVersionOptions'])
             ->name('prompt-module-version-options');
+    });
+
+    // Feature checks intentionally precede authentication so the incremental content pipeline stays undiscoverable.
+    Route::middleware([
+        'geoflow.feature:content_strategy_enabled',
+        'geoflow.feature:modular_prompts_enabled',
+        'geoflow.feature:generation_quality_gate_enabled',
+        'admin.auth',
+        'admin.activity',
+    ])->scopeBindings()->group(function (): void {
+        Route::prefix('content-briefs')->name('content-briefs.')->group(function (): void {
+            Route::get('/', [ContentBriefController::class, 'index'])->name('index');
+            Route::get('create', [ContentBriefController::class, 'create'])->name('create');
+            Route::post('/', [ContentBriefController::class, 'store'])->name('store');
+            Route::get('{brief}/strategy', [ContentBriefController::class, 'strategy'])->name('strategy');
+            Route::post('{brief}/strategy', [ContentBriefController::class, 'confirmStrategy'])->name('strategy.confirm');
+            Route::get('{brief}/blueprint', [ContentBriefController::class, 'blueprint'])->name('blueprint');
+            Route::post('{brief}/blueprint', [ContentBriefController::class, 'confirmBlueprint'])->name('blueprint.confirm');
+            Route::post('{brief}/generations', [ContentGenerationController::class, 'store'])->name('generations.store');
+            Route::get('{brief}', [ContentBriefController::class, 'show'])->name('show');
+        });
+        Route::prefix('content-generations')->name('content-generations.')->group(function (): void {
+            Route::get('{run}', [ContentGenerationController::class, 'show'])->name('show');
+            Route::post('{run}/adopt', [ContentGenerationController::class, 'adopt'])->name('adopt');
+        });
     });
 
     // 后台受保护路由
