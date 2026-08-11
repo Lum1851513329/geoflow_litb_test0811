@@ -29,7 +29,8 @@ class ContentStrategySchemaTest extends TestCase
             'business_goal', 'content_type', 'planned_publish_at', 'status',
         ]));
         $this->assertTrue(Schema::hasColumns('prompt_module_versions', [
-            'prompt_module_id', 'version', 'content', 'variable_contract', 'lifecycle_status',
+            'prompt_module_id', 'version', 'content', 'variable_contract', 'content_sha256',
+            'snapshot_sha256', 'lifecycle_status',
         ]));
         $this->assertTrue(Schema::hasColumns('content_generation_runs', [
             'content_brief_id', 'strategy_version_id', 'blueprint_version_id',
@@ -138,7 +139,9 @@ class ContentStrategySchemaTest extends TestCase
         $strategyMigration = require database_path('migrations/2026_08_10_010000_create_content_strategy_tables.php');
         $promptMigration = require database_path('migrations/2026_08_10_010100_create_prompt_composition_tables.php');
         $generationMigration = require database_path('migrations/2026_08_10_010200_create_content_generation_trace_tables.php');
+        $snapshotMigration = require database_path('migrations/2026_08_10_010320_add_prompt_module_snapshot_identity.php');
 
+        $snapshotMigration->down();
         $generationMigration->down();
         $promptMigration->down();
         $strategyMigration->down();
@@ -150,8 +153,53 @@ class ContentStrategySchemaTest extends TestCase
         $strategyMigration->up();
         $promptMigration->up();
         $generationMigration->up();
+        $snapshotMigration->up();
 
         $this->assertTrue(Schema::hasTable('content_generation_runs'));
+        $this->assertTrue(Schema::hasColumn('prompt_module_versions', 'snapshot_sha256'));
+    }
+
+    public function test_snapshot_identity_migration_backfills_legacy_rows_and_allows_contract_evolution(): void
+    {
+        $migration = require database_path('migrations/2026_08_10_010320_add_prompt_module_snapshot_identity.php');
+        $migration->down();
+        $this->assertFalse(Schema::hasColumn('prompt_module_versions', 'snapshot_sha256'));
+
+        $module = $this->createModule('snapshot-upgrade');
+        $content = 'Stable body with an evolving contract.';
+        $legacy = PromptModuleVersion::forceCreate([
+            'prompt_module_id' => $module->id,
+            'version' => 1,
+            'content' => $content,
+            'variable_contract' => ['variables' => []],
+            'output_contract' => ['format' => 'markdown'],
+            'parameter_defaults' => ['tone' => 'legacy'],
+            'content_sha256' => hash('sha256', $content),
+            'lifecycle_status' => PromptModuleVersion::STATUS_PRODUCTION,
+        ]);
+
+        $migration->up();
+
+        $legacy->refresh();
+        $this->assertTrue(Schema::hasColumn('prompt_module_versions', 'snapshot_sha256'));
+        $this->assertSame(hash('sha256', $content), $legacy->content_sha256);
+        $this->assertMatchesRegularExpression('/^[a-f0-9]{64}$/', $legacy->snapshot_sha256);
+        $evolved = PromptModuleVersion::forceCreate([
+            'prompt_module_id' => $module->id,
+            'version' => 2,
+            'content' => $content,
+            'variable_contract' => ['variables' => [
+                'audience' => ['type' => 'string', 'required' => true],
+            ]],
+            'output_contract' => ['format' => 'markdown'],
+            'parameter_defaults' => ['tone' => 'current'],
+            'lifecycle_status' => PromptModuleVersion::STATUS_PRODUCTION,
+        ]);
+        $this->assertSame($legacy->content_sha256, $evolved->content_sha256);
+        $this->assertNotSame($legacy->snapshot_sha256, $evolved->snapshot_sha256);
+        $this->assertDatabaseRejects(fn () => PromptModuleVersion::query()->whereKey($evolved)->update([
+            'snapshot_sha256' => str_repeat('a', 64),
+        ]));
     }
 
     public function test_version_tables_require_contiguous_per_parent_numbers(): void
@@ -212,6 +260,9 @@ class ContentStrategySchemaTest extends TestCase
         ]));
         $this->assertDatabaseRejects(fn () => PromptModuleVersion::query()->whereKey($pipeline['module_version'])->update([
             'content' => 'Replacement content',
+        ]));
+        $this->assertDatabaseRejects(fn () => PromptModuleVersion::query()->whereKey($pipeline['module_version'])->update([
+            'snapshot_sha256' => str_repeat('f', 64),
         ]));
         $this->assertDatabaseRejects(fn () => PromptPresetVersion::query()->whereKey($pipeline['preset_version'])->update([
             'matching_rules' => ['market_code' => 'GB'],
@@ -368,7 +419,7 @@ class ContentStrategySchemaTest extends TestCase
         return PromptModuleVersion::forceCreate([
             'prompt_module_id' => $module->id,
             'version' => $version,
-            'content' => 'Write for {{ audience }}.',
+            'content' => "Write version {$version} for {{ audience }}.",
             'variable_contract' => ['required' => ['audience']],
             'lifecycle_status' => PromptModuleVersion::STATUS_PRODUCTION,
         ]);

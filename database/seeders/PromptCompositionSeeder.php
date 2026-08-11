@@ -2,6 +2,7 @@
 
 namespace Database\Seeders;
 
+use App\Domain\PromptComposition\PromptModuleSnapshotIdentity;
 use App\Models\Prompt;
 use App\Models\PromptModule;
 use App\Models\PromptModuleVersion;
@@ -154,11 +155,7 @@ PROMPT,
                 );
             }
 
-            $lastLegacyVersion = end($legacyVersions);
-            if ($lastLegacyVersion instanceof PromptModuleVersion
-                && (int) $legacyModule->current_version_id !== (int) $lastLegacyVersion->id) {
-                $legacyModule->forceFill(['current_version_id' => $lastLegacyVersion->id])->save();
-            }
+            $this->advanceLegacyModuleCurrent($legacyModule, $legacyVersions);
 
             foreach (self::LEGACY_SCENARIOS as $scenario) {
                 $bindings = array_values($sharedVersions);
@@ -343,7 +340,7 @@ PROMPT,
         array $parameterDefaults,
         bool $makeCurrent = true,
     ): PromptModuleVersion {
-        $digest = $this->moduleVersionDigest(
+        $snapshotDigest = PromptModuleSnapshotIdentity::digest(
             $content,
             $variableContract,
             $outputContract,
@@ -351,7 +348,7 @@ PROMPT,
         );
         $locked = PromptModule::query()->whereKey($module->id)->lockForUpdate()->firstOrFail();
         $existing = $locked->versions()
-            ->where('content_sha256', $digest)
+            ->where('snapshot_sha256', $snapshotDigest)
             ->get()
             ->first(fn (PromptModuleVersion $version): bool => $this->moduleVersionMatches(
                 $version,
@@ -359,23 +356,28 @@ PROMPT,
                 $variableContract,
                 $outputContract,
                 $parameterDefaults,
-                $digest,
+                $snapshotDigest,
             ));
-        $version = $existing ?? PromptModuleVersion::forceCreate([
+        if ($existing !== null) {
+            return $existing;
+        }
+
+        $version = PromptModuleVersion::forceCreate([
             'prompt_module_id' => $locked->id,
             'version' => (int) $locked->versions()->max('version') + 1,
             'content' => $content,
             'variable_contract' => $variableContract,
             'output_contract' => $outputContract,
             'parameter_defaults' => $parameterDefaults,
-            'content_sha256' => $digest,
+            'content_sha256' => hash('sha256', $content),
+            'snapshot_sha256' => $snapshotDigest,
             'lifecycle_status' => PromptModuleVersion::STATUS_PRODUCTION,
             'change_note' => 'Prompt composition system seed.',
             'created_by_admin_id' => null,
             'published_at' => now(),
         ]);
 
-        if ($makeCurrent && (int) $locked->current_version_id !== (int) $version->id) {
+        if ($makeCurrent && $this->canAdvanceModuleCurrent($locked, $version)) {
             $locked->forceFill(['current_version_id' => $version->id])->save();
         }
 
@@ -389,13 +391,14 @@ PROMPT,
         array $variableContract,
         array $outputContract,
         array $parameterDefaults,
-        string $digest,
+        string $snapshotDigest,
     ): bool {
         return $version->content === $content
             && $this->sameSnapshot($version->variable_contract, $variableContract)
             && $this->sameSnapshot($version->output_contract, $outputContract)
             && $this->sameSnapshot($version->parameter_defaults, $parameterDefaults)
-            && hash_equals((string) $version->content_sha256, $digest);
+            && hash_equals((string) $version->content_sha256, hash('sha256', $content))
+            && hash_equals((string) $version->snapshot_sha256, $snapshotDigest);
     }
 
     /** @param array<string, mixed> $scenario @param list<PromptModuleVersion> $versions */
@@ -464,10 +467,9 @@ PROMPT,
                     'configuration' => null,
                 ]);
             }
-        }
-
-        if ((int) $preset->current_version_id !== (int) $existing->id) {
-            $preset->forceFill(['current_version_id' => $existing->id])->save();
+            if ($this->canAdvancePresetCurrent($preset, $existing)) {
+                $preset->forceFill(['current_version_id' => $existing->id])->save();
+            }
         }
     }
 
@@ -606,20 +608,89 @@ PROMPT,
         ];
     }
 
-    /** @param array<string, mixed> $variableContract @param array<string, mixed> $outputContract @param array<string, mixed> $parameterDefaults */
-    private function moduleVersionDigest(
-        string $content,
-        array $variableContract,
-        array $outputContract,
-        array $parameterDefaults,
-    ): string {
-        return hash('sha256', $this->canonicalJson([
-            'content' => $content,
-            'variable_contract' => $variableContract,
-            'output_contract' => $outputContract,
-            'parameter_defaults' => $parameterDefaults,
-            'seed_provenance_sha256' => $parameterDefaults['seed_provenance_sha256'],
-        ]));
+    /** @param array<string, PromptModuleVersion> $legacyVersions */
+    private function advanceLegacyModuleCurrent(PromptModule $module, array $legacyVersions): void
+    {
+        $locked = PromptModule::query()->whereKey($module->id)->lockForUpdate()->firstOrFail();
+        foreach (array_reverse($legacyVersions) as $version) {
+            if ($version->wasRecentlyCreated && $this->canAdvanceModuleCurrent($locked, $version)) {
+                $locked->forceFill(['current_version_id' => $version->id])->save();
+
+                return;
+            }
+        }
+    }
+
+    private function canAdvanceModuleCurrent(PromptModule $module, PromptModuleVersion $newSeedVersion): bool
+    {
+        if ($module->current_version_id === null) {
+            return true;
+        }
+
+        $current = $module->versions()->whereKey($module->current_version_id)->lockForUpdate()->first();
+        if ($current === null
+            || $current->created_by_admin_id !== null
+            || $current->lifecycle_status !== PromptModuleVersion::STATUS_PRODUCTION) {
+            return false;
+        }
+
+        $currentKey = $this->moduleVersionSeedKey($current);
+        $newKey = $this->moduleVersionSeedKey($newSeedVersion);
+
+        return $currentKey !== null && $currentKey === $newKey;
+    }
+
+    private function moduleVersionSeedKey(PromptModuleVersion $version): ?string
+    {
+        $defaults = $version->parameter_defaults ?? [];
+        if (($defaults['seed_namespace'] ?? null) === self::SEED_NAMESPACE
+            && is_string($defaults['seed_key'] ?? null)) {
+            return $defaults['seed_key'];
+        }
+        if (is_string($defaults['seed_key'] ?? null)) {
+            return $defaults['seed_key'];
+        }
+
+        $legacyName = $defaults['legacy_prompt_name'] ?? null;
+        if (is_string($legacyName) && isset(self::LEGACY_SCENARIOS[$legacyName])) {
+            return self::LEGACY_SCENARIOS[$legacyName]['preset_key'];
+        }
+
+        return null;
+    }
+
+    private function canAdvancePresetCurrent(PromptPreset $preset, PromptPresetVersion $newSeedVersion): bool
+    {
+        if ($preset->current_version_id === null) {
+            return true;
+        }
+
+        $current = $preset->versions()->whereKey($preset->current_version_id)->lockForUpdate()->first();
+        if ($current === null
+            || $current->created_by_admin_id !== null
+            || $current->lifecycle_status !== PromptPresetVersion::STATUS_PRODUCTION) {
+            return false;
+        }
+
+        $currentKey = $this->presetVersionSeedKey($current, $preset);
+
+        return $currentKey !== null && $currentKey === $this->presetVersionSeedKey($newSeedVersion, $preset);
+    }
+
+    private function presetVersionSeedKey(PromptPresetVersion $version, PromptPreset $preset): ?string
+    {
+        $policy = $version->conflict_policy ?? [];
+        if (($policy['seed_namespace'] ?? null) === self::SEED_NAMESPACE
+            && ($policy['seed_key'] ?? null) === $preset->preset_key
+            && ($policy['seed_provenance_sha256'] ?? null)
+                === $this->seedDefaults('preset_version', $preset->preset_key)['seed_provenance_sha256']) {
+            return $preset->preset_key;
+        }
+        if ($version->change_note === 'Initial legacy migration seed.') {
+            return $preset->preset_key;
+        }
+
+        return null;
     }
 
     private function sameSnapshot(mixed $left, mixed $right): bool

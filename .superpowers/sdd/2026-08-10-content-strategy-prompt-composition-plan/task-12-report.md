@@ -64,3 +64,26 @@
 - Disposable PostgreSQL: after supplying the repository's documented one-time `GEOFLOW_SECURITY_FRESH_INSTALL_CONFIRMED=true` gate, two consecutive `migrate:fresh --seed --force` runs and two consecutive standalone composition-seeder runs passed. Final counts remained 7 modules, 10 module versions, 4 presets, 4 preset versions, and 28 bindings; the disposable database was dropped.
 - Targeted Pint `--test`, `git diff --check`, and `npm run build` passed; Vite transformed 64 modules.
 - The unrelated `docker-compose.yml` edit remains unchanged and excluded.
+
+## Fix round 2 — current-pointer ownership and snapshot digest semantics
+
+- Unchanged reseeds no longer write `current_version_id`. Seed current pointers advance only when a new seed version was created and the locked current is either empty or an active production version from the same seed lineage.
+- Administrator-created module and preset versions, plus deprecated/archived/non-production seed selections, are never replaced by reseeding. This applies both to ordinary unchanged reruns and to runs that create a newer seed snapshot.
+- Restored `content_sha256` to the strict SHA-256 of Prompt body content. Added immutable `snapshot_sha256` as the canonical identity of content, variable contract, output contract, parameter defaults, and embedded seed provenance.
+- Added an upgrade migration that removes the old content-only uniqueness constraint, retains a non-unique content-digest index, backfills/corrects both digests, adds per-module snapshot uniqueness, and recreates PostgreSQL/SQLite sequence, immutability, and delete guards with snapshot protection. Rollback fails closed if same-content evolved versions make the former constraint impossible to restore.
+- The Eloquent model and module service now derive snapshot identity consistently; lifecycle activity logs use the full snapshot digest while the administration UI can continue showing the strict content digest.
+
+### Fix-round 2 TDD evidence
+
+- Current-pointer RED: administrator-published module and preset currents were reset from IDs 11/5 to existing seed IDs during unchanged reseed; a changed source likewise replaced the administrator module current with the new seed version.
+- Digest/schema RED: seeded `content_sha256` differed from `hash(content)`, `snapshot_sha256` was absent, and lifecycle logging had no independent snapshot digest.
+- Final Task 12/schema/service aggregate: 39 passed / 240 assertions.
+- Pipeline focus: 168 passed / 639 assertions.
+- Portuguese locale coverage: 3 passed / 332 assertions.
+
+### Fix-round 2 PostgreSQL and build verification
+
+- Upgrade database: migrated through the new snapshot migration, rolled that migration back, inserted a pre-upgrade row with a round-1 composite value in `content_sha256`, and migrated forward. The migration restored the strict content digest, backfilled snapshot identity, and accepted a second immutable version with identical content and a distinct contract/snapshot.
+- Fresh database: two consecutive `migrate:fresh --seed --force` runs and two standalone composition reseeds passed. Final counts remained 7 modules, 10 module versions, 4 presets, 4 preset versions, and 28 bindings; every content digest matched the row content and every snapshot digest was populated. Both disposable databases were dropped.
+- Targeted Pint `--test`, `git diff --check`, and `npm run build` passed; Vite transformed 64 modules.
+- The unrelated `docker-compose.yml` edit remains unchanged and excluded.

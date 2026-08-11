@@ -5,6 +5,8 @@ namespace Tests\Feature;
 use App\Domain\PromptComposition\PromptCompiler;
 use App\Domain\PromptComposition\PromptContext;
 use App\Domain\PromptComposition\PromptModuleResolver;
+use App\Domain\PromptComposition\PromptModuleService;
+use App\Domain\PromptComposition\PromptPresetService;
 use App\Models\Admin;
 use App\Models\Prompt;
 use App\Models\PromptModule;
@@ -94,8 +96,9 @@ final class PromptCompositionSeederTest extends TestCase
             $this->assertSame((int) $prompt->id, $copiedVersion->parameter_defaults['legacy_prompt_id']);
             $this->assertSame($prompt->name, $copiedVersion->parameter_defaults['legacy_prompt_name']);
             $this->assertSame(hash('sha256', $prompt->content), $copiedVersion->parameter_defaults['legacy_prompt_sha256']);
-            $this->assertMatchesRegularExpression('/^[a-f0-9]{64}$/', $copiedVersion->content_sha256);
-            $this->assertNotSame(hash('sha256', $copiedVersion->content), $copiedVersion->content_sha256);
+            $this->assertSame(hash('sha256', $copiedVersion->content), $copiedVersion->content_sha256);
+            $this->assertMatchesRegularExpression('/^[a-f0-9]{64}$/', $copiedVersion->snapshot_sha256);
+            $this->assertNotSame($copiedVersion->content_sha256, $copiedVersion->snapshot_sha256);
             $this->assertTrue($legacyBinding->is_required);
             $this->assertSame(7, $presetVersion->moduleVersions()->count());
         }
@@ -392,6 +395,9 @@ PROMPT;
         $this->assertNotSame($stale->id, $current->id);
         $this->assertSame(2, $module->versions()->count());
         $this->assertSame(['variables' => []], $current->variable_contract);
+        $this->assertSame(hash('sha256', $content), $stale->fresh()->content_sha256);
+        $this->assertSame(hash('sha256', $content), $current->content_sha256);
+        $this->assertNotSame($stale->fresh()->snapshot_sha256, $current->snapshot_sha256);
         $this->assertSame('foundation_truth', $current->parameter_defaults['seed_key']);
         $this->assertMatchesRegularExpression(
             '/^[a-f0-9]{64}$/',
@@ -420,6 +426,82 @@ PROMPT;
         $this->assertSame(7, $current->moduleVersions()->where('is_required', true)->count());
     }
 
+    public function test_unchanged_rerun_preserves_admin_published_module_and_preset_currents(): void
+    {
+        $this->seed(PromptCompositionSeeder::class);
+        $admin = $this->admin('seed-current-publisher');
+        $module = PromptModule::query()->where('module_key', 'foundation_truth')->sole();
+        $adminModuleVersion = app(PromptModuleService::class)->createVersion($module, [
+            'content' => 'Administrator-selected truth contract.',
+            'variable_contract' => ['variables' => []],
+            'output_contract' => ['format' => 'markdown'],
+            'parameter_defaults' => ['publisher' => 'administrator'],
+            'change_note' => 'Administrator candidate.',
+        ], $admin);
+        app(PromptModuleService::class)->publish($adminModuleVersion, $admin, 'Administrator published module.');
+
+        $preset = PromptPreset::query()->where('preset_key', 'legacy_geo_trust_en')->sole();
+        $adminPresetVersion = app(PromptPresetService::class)->createVersion(
+            $preset,
+            [
+                'matching_rules' => ['language_code' => ['en']],
+                'generation_policy' => ['mode' => 'expert'],
+                'conflict_policy' => ['precedence' => 'administrator'],
+                'change_note' => 'Administrator candidate.',
+            ],
+            $this->bindingData($preset->currentVersion()->sole()),
+            $admin,
+        );
+        app(PromptPresetService::class)->publish($adminPresetVersion, $admin, 'Administrator published preset.');
+
+        $this->seed(PromptCompositionSeeder::class);
+
+        $this->assertSame($adminModuleVersion->id, $module->fresh()->current_version_id);
+        $this->assertSame($adminPresetVersion->id, $preset->fresh()->current_version_id);
+        $this->assertSame(PromptModuleVersion::STATUS_PRODUCTION, $adminModuleVersion->fresh()->lifecycle_status);
+        $this->assertSame(PromptPresetVersion::STATUS_PRODUCTION, $adminPresetVersion->fresh()->lifecycle_status);
+    }
+
+    public function test_new_seed_snapshots_do_not_replace_admin_published_currents(): void
+    {
+        $this->seed(PromptCompositionSeeder::class);
+        $admin = $this->admin('seed-evolution-publisher');
+        $module = PromptModule::query()->where('module_key', 'legacy_content')->sole();
+        $adminModuleVersion = app(PromptModuleService::class)->createVersion($module, [
+            'content' => 'Administrator-selected legacy content.',
+            'variable_contract' => ['variables' => []],
+            'output_contract' => ['format' => 'markdown'],
+            'parameter_defaults' => ['publisher' => 'administrator'],
+        ], $admin);
+        app(PromptModuleService::class)->publish($adminModuleVersion, $admin, 'Administrator published module.');
+
+        $preset = PromptPreset::query()->where('preset_key', 'legacy_geo_trust_en')->sole();
+        $adminPresetVersion = app(PromptPresetService::class)->createVersion(
+            $preset,
+            [
+                'matching_rules' => ['language_code' => ['en']],
+                'generation_policy' => ['mode' => 'expert'],
+                'conflict_policy' => ['precedence' => 'administrator'],
+            ],
+            $this->bindingData($preset->currentVersion()->sole()),
+            $admin,
+        );
+        app(PromptPresetService::class)->publish($adminPresetVersion, $admin, 'Administrator published preset.');
+        $prompt = Prompt::query()
+            ->where('name', 'GEO Marketing · Trust-Based Article Generation (English)')
+            ->sole();
+        $prompt->update(['content' => $prompt->content."\n\nEvolved legacy seed content."]);
+        $moduleVersionCount = $module->versions()->count();
+        $presetVersionCount = $preset->versions()->count();
+
+        $this->seed(PromptCompositionSeeder::class);
+
+        $this->assertSame($moduleVersionCount + 1, $module->versions()->count());
+        $this->assertSame($presetVersionCount + 1, $preset->versions()->count());
+        $this->assertSame($adminModuleVersion->id, $module->fresh()->current_version_id);
+        $this->assertSame($adminPresetVersion->id, $preset->fresh()->current_version_id);
+    }
+
     private function legacyBinding(string $presetKey): PromptPresetModuleVersion
     {
         return PromptPreset::query()
@@ -430,6 +512,20 @@ PROMPT;
             ->moduleVersions()
             ->whereHas('promptModuleVersion.module', fn ($query) => $query->where('module_key', 'legacy_content'))
             ->sole();
+    }
+
+    /** @return list<array<string, mixed>> */
+    private function bindingData(PromptPresetVersion $version): array
+    {
+        return $version->moduleVersions()->get()->map(
+            fn (PromptPresetModuleVersion $binding): array => [
+                'prompt_module_version_id' => $binding->prompt_module_version_id,
+                'sort_order' => $binding->sort_order,
+                'is_required' => $binding->is_required,
+                'selection_source' => $binding->selection_source,
+                'configuration' => $binding->configuration,
+            ],
+        )->all();
     }
 
     private function admin(string $username): Admin

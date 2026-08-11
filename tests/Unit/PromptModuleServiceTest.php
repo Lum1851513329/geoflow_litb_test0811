@@ -208,7 +208,7 @@ class PromptModuleServiceTest extends TestCase
 
         $details = (string) AdminActivityLog::query()->where('action', 'prompt_module_version:published')->sole()->details;
         $this->assertStringNotContainsString($draft->content, $details);
-        $this->assertStringContainsString('"snapshot_digest":"'.hash('sha256', $draft->content).'"', $details);
+        $this->assertStringContainsString('"snapshot_digest":"'.$draft->snapshot_sha256.'"', $details);
         $this->assertStringContainsString('"reason_digest":"'.hash('sha256', 'Approved after review').'"', $details);
     }
 
