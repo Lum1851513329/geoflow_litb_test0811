@@ -42,3 +42,25 @@
 
 - The pre-existing `docker-compose.yml` `--no-reload` edit was preserved byte-for-byte and excluded from this task's commit.
 - No remaining Task 12 implementation concern was identified. The repository-wide suite is not fully green only because of the four reproduced baseline/environment failures listed above.
+
+## Fix round 1 — provenance, reserved keys, and snapshot identity
+
+- Legacy scenarios now use the installed preset binding's stored `legacy_prompt_id` after first installation. Renaming a source Prompt therefore does not create a new snapshot, and deleting it preserves the already-installed legacy module version without aborting. A fresh installation missing any required source aborts during the locked preflight before seed mutation.
+- The whole seed remains one transaction and now preflights every reserved module and preset key before writes. Existing rows must be system-owned, match the stable seed identity, and carry either the current provenance digest or the exact Task 12 schema-1 provenance. Administrator-owned and provenance-free system lookalikes fail atomically without acquiring versions or current pointers.
+- Seeded module-version identity is a canonical digest of content, variable contract, output contract, parameter defaults, and the versioned seed-provenance digest. This permits content, contract, and defaults evolution to allocate a new immutable version instead of reusing content alone.
+- Preset-version identity now includes matching rules, generation policy, seed provenance, and the exact ordered list of bound module-version IDs, positions, and required flags. Any binding evolution creates a coherent new preset version and advances its current pointer.
+- A changed legacy Prompt creates the corresponding new legacy module version and preset version in the same transaction. The new legacy version is immediately bound by the new current preset, while the prior immutable module/preset pair remains linked as history.
+
+### Fix-round TDD evidence
+
+- Review RED: `docker compose exec app php artisan test tests/Feature/PromptCompositionSeederTest.php` — 7 expected failures across renamed/deleted source lookup, administrator-owned reserved collisions, changed legacy content, module contract/default identity, and preset binding identity; 5 existing tests passed.
+- Provenance RED: `docker compose exec app php artisan test tests/Feature/PromptCompositionSeederTest.php --filter='system_looking_reserved'` — 2 expected failures because system-looking rows without seed provenance were initially accepted.
+- Fix-round Task 12 tests: `docker compose exec app php artisan test tests/Feature/PromptCompositionSeederTest.php tests/Feature/ContentPipelineSecurityTest.php` — 19 passed / 137 assertions.
+
+### Fix-round verification
+
+- Pipeline focus: 167 passed / 630 assertions.
+- Portuguese locale coverage: 3 passed / 332 assertions.
+- Disposable PostgreSQL: after supplying the repository's documented one-time `GEOFLOW_SECURITY_FRESH_INSTALL_CONFIRMED=true` gate, two consecutive `migrate:fresh --seed --force` runs and two consecutive standalone composition-seeder runs passed. Final counts remained 7 modules, 10 module versions, 4 presets, 4 preset versions, and 28 bindings; the disposable database was dropped.
+- Targeted Pint `--test`, `git diff --check`, and `npm run build` passed; Vite transformed 64 modules.
+- The unrelated `docker-compose.yml` edit remains unchanged and excluded.
