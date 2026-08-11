@@ -20,6 +20,10 @@ return new class extends Migration
             });
             $this->backfillDigests();
             Schema::table('prompt_module_versions', function (Blueprint $table): void {
+                $table->string('content_sha256', 64)->nullable(false)->change();
+                $table->string('snapshot_sha256', 64)->nullable(false)->change();
+            });
+            Schema::table('prompt_module_versions', function (Blueprint $table): void {
                 $table->unique(['prompt_module_id', 'snapshot_sha256']);
             });
             $this->createModuleVersionGuards(true);
@@ -53,6 +57,11 @@ return new class extends Migration
             Schema::table('prompt_module_versions', function (Blueprint $table): void {
                 $table->dropUnique(['prompt_module_id', 'snapshot_sha256']);
                 $table->dropIndex(['prompt_module_id', 'content_sha256']);
+            });
+            Schema::table('prompt_module_versions', function (Blueprint $table): void {
+                $table->string('content_sha256', 64)->nullable()->change();
+            });
+            Schema::table('prompt_module_versions', function (Blueprint $table): void {
                 $table->unique(['prompt_module_id', 'content_sha256']);
             });
             Schema::table('prompt_module_versions', function (Blueprint $table): void {

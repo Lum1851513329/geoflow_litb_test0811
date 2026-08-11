@@ -124,6 +124,7 @@ PROMPT,
             }
 
             $legacyModule = $this->module('legacy_content', $this->legacyModuleDefinition());
+            $legacyModuleWasRecentlyCreated = $legacyModule->wasRecentlyCreated;
             $legacyVersions = [];
             foreach (self::LEGACY_SCENARIOS as $sourceName => $scenario) {
                 $presetKey = $scenario['preset_key'];
@@ -155,7 +156,11 @@ PROMPT,
                 );
             }
 
-            $this->advanceLegacyModuleCurrent($legacyModule, $legacyVersions);
+            $this->advanceLegacyModuleCurrent(
+                $legacyModule,
+                $legacyVersions,
+                $legacyModuleWasRecentlyCreated,
+            );
 
             foreach (self::LEGACY_SCENARIOS as $scenario) {
                 $bindings = array_values($sharedVersions);
@@ -340,6 +345,7 @@ PROMPT,
         array $parameterDefaults,
         bool $makeCurrent = true,
     ): PromptModuleVersion {
+        $moduleWasRecentlyCreated = $module->wasRecentlyCreated;
         $snapshotDigest = PromptModuleSnapshotIdentity::digest(
             $content,
             $variableContract,
@@ -377,7 +383,7 @@ PROMPT,
             'published_at' => now(),
         ]);
 
-        if ($makeCurrent && $this->canAdvanceModuleCurrent($locked, $version)) {
+        if ($makeCurrent && $this->canAdvanceModuleCurrent($locked, $version, $moduleWasRecentlyCreated)) {
             $locked->forceFill(['current_version_id' => $version->id])->save();
         }
 
@@ -418,6 +424,7 @@ PROMPT,
         } else {
             $this->assertReservedPreset($preset, $scenario);
         }
+        $presetWasRecentlyCreated = $preset->wasRecentlyCreated;
 
         $matchingRules = $scenario['matching_rules'];
         $generationPolicy = $this->generationPolicy();
@@ -467,7 +474,7 @@ PROMPT,
                     'configuration' => null,
                 ]);
             }
-            if ($this->canAdvancePresetCurrent($preset, $existing)) {
+            if ($this->canAdvancePresetCurrent($preset, $existing, $presetWasRecentlyCreated)) {
                 $preset->forceFill(['current_version_id' => $existing->id])->save();
             }
         }
@@ -609,11 +616,15 @@ PROMPT,
     }
 
     /** @param array<string, PromptModuleVersion> $legacyVersions */
-    private function advanceLegacyModuleCurrent(PromptModule $module, array $legacyVersions): void
-    {
+    private function advanceLegacyModuleCurrent(
+        PromptModule $module,
+        array $legacyVersions,
+        bool $moduleWasRecentlyCreated,
+    ): void {
         $locked = PromptModule::query()->whereKey($module->id)->lockForUpdate()->firstOrFail();
         foreach (array_reverse($legacyVersions) as $version) {
-            if ($version->wasRecentlyCreated && $this->canAdvanceModuleCurrent($locked, $version)) {
+            if ($version->wasRecentlyCreated
+                && $this->canAdvanceModuleCurrent($locked, $version, $moduleWasRecentlyCreated)) {
                 $locked->forceFill(['current_version_id' => $version->id])->save();
 
                 return;
@@ -621,10 +632,13 @@ PROMPT,
         }
     }
 
-    private function canAdvanceModuleCurrent(PromptModule $module, PromptModuleVersion $newSeedVersion): bool
-    {
+    private function canAdvanceModuleCurrent(
+        PromptModule $module,
+        PromptModuleVersion $newSeedVersion,
+        bool $allowNullInitialization,
+    ): bool {
         if ($module->current_version_id === null) {
-            return true;
+            return $allowNullInitialization;
         }
 
         $current = $module->versions()->whereKey($module->current_version_id)->lockForUpdate()->first();
@@ -659,10 +673,13 @@ PROMPT,
         return null;
     }
 
-    private function canAdvancePresetCurrent(PromptPreset $preset, PromptPresetVersion $newSeedVersion): bool
-    {
+    private function canAdvancePresetCurrent(
+        PromptPreset $preset,
+        PromptPresetVersion $newSeedVersion,
+        bool $allowNullInitialization,
+    ): bool {
         if ($preset->current_version_id === null) {
-            return true;
+            return $allowNullInitialization;
         }
 
         $current = $preset->versions()->whereKey($preset->current_version_id)->lockForUpdate()->first();

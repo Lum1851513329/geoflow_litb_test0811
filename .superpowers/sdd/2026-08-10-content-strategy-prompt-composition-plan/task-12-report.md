@@ -87,3 +87,26 @@
 - Fresh database: two consecutive `migrate:fresh --seed --force` runs and two standalone composition reseeds passed. Final counts remained 7 modules, 10 module versions, 4 presets, 4 preset versions, and 28 bindings; every content digest matched the row content and every snapshot digest was populated. Both disposable databases were dropped.
 - Targeted Pint `--test`, `git diff --check`, and `npm run build` passed; Vite transformed 64 modules.
 - The unrelated `docker-compose.yml` edit remains unchanged and excluded.
+
+## Fix round 3 — disabled release selections and database digest contract
+
+- A null `current_version_id` on an existing seeded module or preset is now treated as an administrator-owned disabled selection. Seed evolution still creates the immutable module/preset version pair, but it does not reactivate either current pointer after explicit deprecation or archival. Null-current initialization is allowed only for the module or preset row created by that same seeder run.
+- The snapshot migration now backfills both digests before changing `content_sha256` and `snapshot_sha256` to database-level `NOT NULL`, then creates the snapshot uniqueness constraint. Rollback restores the original nullable content-digest schema before recreating its former unique constraint.
+- Model insertion derives both digests before the database insert rather than depending on a `creating` event. This preserves the non-null contract even when application events are faked or silenced, while raw SQL remains protected by the database constraints.
+- Upgrade coverage begins from a real old-schema row with a null content digest, proves the migration repairs it, and tests that raw inserts cannot bypass either non-null digest.
+
+### Fix-round 3 TDD evidence
+
+- Disabled-selection RED: both deprecation and archive scenarios evolved the seed and incorrectly repopulated the `legacy_content` module current with version ID 11; the new preset current was likewise eligible for reactivation.
+- Digest-contract RED: a raw insert with null `content_sha256` succeeded under the nullable schema.
+- Event-faking RED: after enforcing database non-nullability, five coordinator tests exposed that `Event::fake()` suppresses Eloquent `creating` listeners; moving digest derivation into the insert path restored those writes without relaxing the database contract.
+- Final Task 12 aggregate: 187 passed / 776 assertions.
+- Pipeline focus: 169 passed / 641 assertions.
+- Portuguese locale coverage: 3 passed / 80 assertions.
+
+### Fix-round 3 PostgreSQL and build verification
+
+- Upgrade database: migrated fresh, rolled back only the snapshot migration, inserted a pre-upgrade module version with null `content_sha256`, and migrated forward. Both digest columns reported `is_nullable = NO`; the repaired content digest matched PostgreSQL SHA-256, both digests were 64 characters, raw null inserts for either column were rejected, and the recreated snapshot immutability trigger rejected an update.
+- Fresh database: `migrate:fresh --seed --force` plus two standalone composition reseeds passed. Counts remained 7 modules, 10 module versions, 4 presets, 4 preset versions, and 28 bindings; null and incorrect content digest counts were all zero. Both disposable databases were dropped.
+- Targeted Pint `--test`, `git diff --check`, and host `npm run build` passed; Vite transformed 64 modules. The app container does not include an `npm` executable, so the identical repository build was run on the host.
+- The unrelated `docker-compose.yml` edit remains unchanged and excluded.

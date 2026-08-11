@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use App\Domain\PromptComposition\PromptModuleSnapshotIdentity;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
@@ -26,19 +27,19 @@ final class PromptModuleVersion extends Model
         'lifecycle_status', 'change_note', 'published_at',
     ];
 
-    protected static function booted(): void
+    protected function performInsert(Builder $query)
     {
-        self::creating(function (PromptModuleVersion $version): void {
-            $version->content_sha256 = hash('sha256', (string) $version->content);
-            if (Schema::hasColumn($version->getTable(), 'snapshot_sha256')) {
-                $version->snapshot_sha256 = PromptModuleSnapshotIdentity::digest(
-                    (string) $version->content,
-                    $version->variable_contract,
-                    $version->output_contract,
-                    $version->parameter_defaults,
-                );
-            }
-        });
+        $this->content_sha256 = hash('sha256', (string) $this->content);
+        if (Schema::hasColumn($this->getTable(), 'snapshot_sha256')) {
+            $this->snapshot_sha256 = PromptModuleSnapshotIdentity::digest(
+                (string) $this->content,
+                $this->variable_contract,
+                $this->output_contract,
+                $this->parameter_defaults,
+            );
+        }
+
+        return parent::performInsert($query);
     }
 
     protected function casts(): array

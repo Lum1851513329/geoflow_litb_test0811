@@ -502,6 +502,16 @@ PROMPT;
         $this->assertSame($adminPresetVersion->id, $preset->fresh()->current_version_id);
     }
 
+    public function test_seed_evolution_does_not_reactivate_deprecated_module_or_preset_currents(): void
+    {
+        $this->assertSeedEvolutionPreservesClearedCurrents('deprecate');
+    }
+
+    public function test_seed_evolution_does_not_reactivate_archived_module_or_preset_currents(): void
+    {
+        $this->assertSeedEvolutionPreservesClearedCurrents('archive');
+    }
+
     private function legacyBinding(string $presetKey): PromptPresetModuleVersion
     {
         return PromptPreset::query()
@@ -538,6 +548,36 @@ PROMPT;
             'role' => 'content_operator',
             'status' => 'active',
         ]);
+    }
+
+    private function assertSeedEvolutionPreservesClearedCurrents(string $transition): void
+    {
+        $this->seed(PromptCompositionSeeder::class);
+        $admin = $this->admin("seed-{$transition}-publisher");
+        $preset = PromptPreset::query()->where('preset_key', 'legacy_geo_ranking_zh')->sole();
+        $presetVersion = $preset->currentVersion()->sole();
+        $moduleVersion = $presetVersion->moduleVersions()
+            ->whereHas('promptModuleVersion.module', fn ($query) => $query->where('module_key', 'legacy_content'))
+            ->sole()
+            ->promptModuleVersion;
+        $module = $moduleVersion->module;
+
+        app(PromptPresetService::class)->{$transition}($presetVersion, $admin, "Administrator {$transition}d preset.");
+        app(PromptModuleService::class)->{$transition}($moduleVersion, $admin, "Administrator {$transition}d module.");
+        $this->assertNull($preset->fresh()->current_version_id);
+        $this->assertNull($module->fresh()->current_version_id);
+
+        $prompt = Prompt::query()->where('name', 'GEO榜单型正文生成')->sole();
+        $prompt->update(['content' => $prompt->content."\n\nEvolved after an administrator {$transition}d the seed selection."]);
+        $moduleVersionCount = $module->versions()->count();
+        $presetVersionCount = $preset->versions()->count();
+
+        $this->seed(PromptCompositionSeeder::class);
+
+        $this->assertSame($moduleVersionCount + 1, $module->versions()->count());
+        $this->assertSame($presetVersionCount + 1, $preset->versions()->count());
+        $this->assertNull($module->fresh()->current_version_id);
+        $this->assertNull($preset->fresh()->current_version_id);
     }
 
     /** @return array{modules: int, module_versions: int, presets: int, preset_versions: int, bindings: int} */

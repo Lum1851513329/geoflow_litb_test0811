@@ -15,6 +15,7 @@ use App\Models\PromptPresetModuleVersion;
 use App\Models\PromptPresetVersion;
 use Illuminate\Database\QueryException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Tests\TestCase;
 
@@ -167,16 +168,19 @@ class ContentStrategySchemaTest extends TestCase
 
         $module = $this->createModule('snapshot-upgrade');
         $content = 'Stable body with an evolving contract.';
-        $legacy = PromptModuleVersion::forceCreate([
+        $legacyId = DB::table('prompt_module_versions')->insertGetId([
             'prompt_module_id' => $module->id,
             'version' => 1,
             'content' => $content,
-            'variable_contract' => ['variables' => []],
-            'output_contract' => ['format' => 'markdown'],
-            'parameter_defaults' => ['tone' => 'legacy'],
-            'content_sha256' => hash('sha256', $content),
+            'variable_contract' => json_encode(['variables' => []], JSON_THROW_ON_ERROR),
+            'output_contract' => json_encode(['format' => 'markdown'], JSON_THROW_ON_ERROR),
+            'parameter_defaults' => json_encode(['tone' => 'legacy'], JSON_THROW_ON_ERROR),
+            'content_sha256' => null,
             'lifecycle_status' => PromptModuleVersion::STATUS_PRODUCTION,
+            'created_at' => now(),
+            'updated_at' => now(),
         ]);
+        $legacy = PromptModuleVersion::query()->findOrFail($legacyId);
 
         $migration->up();
 
@@ -199,6 +203,31 @@ class ContentStrategySchemaTest extends TestCase
         $this->assertNotSame($legacy->snapshot_sha256, $evolved->snapshot_sha256);
         $this->assertDatabaseRejects(fn () => PromptModuleVersion::query()->whereKey($evolved)->update([
             'snapshot_sha256' => str_repeat('a', 64),
+        ]));
+    }
+
+    public function test_module_version_digest_columns_reject_null_raw_inserts(): void
+    {
+        $module = $this->createModule('null-digests');
+        $attributes = [
+            'prompt_module_id' => $module->id,
+            'version' => 1,
+            'content' => 'Raw module snapshot.',
+            'variable_contract' => json_encode(['variables' => []], JSON_THROW_ON_ERROR),
+            'lifecycle_status' => PromptModuleVersion::STATUS_PRODUCTION,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ];
+
+        $this->assertDatabaseRejects(fn () => DB::table('prompt_module_versions')->insert([
+            ...$attributes,
+            'content_sha256' => null,
+            'snapshot_sha256' => str_repeat('a', 64),
+        ]));
+        $this->assertDatabaseRejects(fn () => DB::table('prompt_module_versions')->insert([
+            ...$attributes,
+            'content_sha256' => hash('sha256', $attributes['content']),
+            'snapshot_sha256' => null,
         ]));
     }
 
