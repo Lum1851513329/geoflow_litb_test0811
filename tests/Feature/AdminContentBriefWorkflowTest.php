@@ -870,9 +870,7 @@ final class AdminContentBriefWorkflowTest extends TestCase
             'model_snapshot' => ['name' => 'Editorial model', 'version' => '2026-08', 'model_id' => 'editorial-model'],
             'generation_parameters' => ['max_tokens' => 4096],
             'raw_output' => "## Fit\nChoose shoes with enough toe room.",
-            'status' => ContentGenerationRun::STATUS_READY_FOR_REVIEW,
             'started_at' => now()->subMinute(),
-            'completed_at' => now(),
         ])->save();
         ContentGenerationRunModule::query()->create([
             'content_generation_run_id' => $run->id,
@@ -943,6 +941,10 @@ final class AdminContentBriefWorkflowTest extends TestCase
             'passed' => false,
             'issues' => [],
         ]);
+        $run->forceFill([
+            'status' => ContentGenerationRun::STATUS_READY_FOR_REVIEW,
+            'completed_at' => now(),
+        ])->save();
 
         $operatorView = $this->actingAs($this->operator, 'admin')
             ->withSession(['locale' => 'en'])
