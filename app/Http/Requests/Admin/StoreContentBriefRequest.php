@@ -3,7 +3,9 @@
 namespace App\Http\Requests\Admin;
 
 use App\Models\Admin;
+use App\Models\ContentBrief;
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Support\Facades\Gate;
 use Illuminate\Validation\Rule;
 
 final class StoreContentBriefRequest extends FormRequest
@@ -12,7 +14,8 @@ final class StoreContentBriefRequest extends FormRequest
     {
         $admin = $this->user('admin');
 
-        return $admin instanceof Admin && $admin->status === 'active';
+        return $admin instanceof Admin
+            && Gate::forUser($admin)->allows('create', ContentBrief::class);
     }
 
     /** @return array<string, mixed> */

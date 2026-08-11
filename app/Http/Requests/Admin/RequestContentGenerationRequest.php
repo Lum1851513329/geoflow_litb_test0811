@@ -3,22 +3,28 @@
 namespace App\Http\Requests\Admin;
 
 use App\Domain\PromptComposition\PromptModuleResolver;
+use App\Domain\PromptComposition\PromptPresetSelector;
 use App\Models\Admin;
 use App\Models\AiModel;
 use App\Models\ContentBlueprintVersion;
 use App\Models\ContentBrief;
+use App\Models\ContentGenerationRun;
 use App\Models\ContentStrategyVersion;
-use App\Models\PromptPresetVersion;
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Support\Facades\Gate;
 use Illuminate\Validation\Validator;
-use InvalidArgumentException;
+use Throwable;
 
 final class RequestContentGenerationRequest extends FormRequest
 {
     public function authorize(): bool
     {
-        return $this->user('admin') instanceof Admin
-            && $this->route('brief') instanceof ContentBrief;
+        $admin = $this->user('admin');
+        $brief = $this->route('brief');
+
+        return $admin instanceof Admin
+            && $brief instanceof ContentBrief
+            && Gate::forUser($admin)->allows('update', $brief);
     }
 
     /** @return array<string, mixed> */
@@ -37,6 +43,11 @@ final class RequestContentGenerationRequest extends FormRequest
     {
         $validator->after(function (Validator $validator): void {
             if ($validator->errors()->isNotEmpty()) {
+                return;
+            }
+            $idempotencyKey = trim((string) $this->input('idempotency_key', ''));
+            if ($idempotencyKey !== ''
+                && ContentGenerationRun::query()->where('idempotency_key', $idempotencyKey)->exists()) {
                 return;
             }
             $brief = $this->route('brief');
@@ -59,20 +70,20 @@ final class RequestContentGenerationRequest extends FormRequest
                     $validator->errors()->add('blueprint_version_id', __('admin.content_strategy.validation.blueprint_required'));
                 }
             }
-            $preset = PromptPresetVersion::query()->with('preset')->find($this->integer('preset_version_id'));
-            if ($preset === null
-                || ! $preset->preset?->is_enabled
-                || in_array($preset->lifecycle_status, [PromptPresetVersion::STATUS_DRAFT, PromptPresetVersion::STATUS_ARCHIVED], true)) {
+            $preset = $brief instanceof ContentBrief
+                ? app(PromptPresetSelector::class)->eligibleVersion($brief, $this->integer('preset_version_id'))
+                : null;
+            if ($preset === null) {
                 $validator->errors()->add('preset_version_id', __('admin.content_strategy.validation.preset_unavailable'));
             } else {
                 if ($brief instanceof ContentBrief) {
                     try {
-                        app(PromptModuleResolver::class)->resolve($preset, [
-                            'content_type' => (string) $brief->content_type,
-                            'language_code' => (string) $brief->language_code,
-                            'market_code' => (string) $brief->market_code,
-                        ]);
-                    } catch (InvalidArgumentException) {
+                        app(PromptModuleResolver::class)->resolve(
+                            $preset,
+                            app(PromptPresetSelector::class)->context($brief),
+                        );
+                    } catch (Throwable $exception) {
+                        report($exception);
                         $validator->errors()->add('preset_version_id', __('admin.content_strategy.validation.modules_unavailable'));
                     }
                 }

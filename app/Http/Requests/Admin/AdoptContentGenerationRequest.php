@@ -5,13 +5,18 @@ namespace App\Http\Requests\Admin;
 use App\Models\Admin;
 use App\Models\ContentGenerationRun;
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Support\Facades\Gate;
 
 final class AdoptContentGenerationRequest extends FormRequest
 {
     public function authorize(): bool
     {
-        return $this->user('admin') instanceof Admin
-            && $this->route('run') instanceof ContentGenerationRun;
+        $admin = $this->user('admin');
+        $run = $this->route('run');
+
+        return $admin instanceof Admin
+            && $run instanceof ContentGenerationRun
+            && Gate::forUser($admin)->allows('adopt', $run);
     }
 
     /** @return array<string, mixed> */

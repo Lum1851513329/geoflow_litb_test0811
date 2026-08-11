@@ -35,6 +35,6 @@
         </form>
     </section>
 
-    <section class="rounded-lg bg-white p-6 shadow"><h2 class="text-lg font-semibold text-gray-900">{{ __('admin.content_strategy.generation.previous_runs') }}</h2><div class="mt-4 space-y-2">@forelse($runs as $run)<a href="{{ route('admin.content-generations.show', $run) }}" class="flex items-center justify-between rounded-md border border-gray-200 px-4 py-3 text-sm hover:bg-gray-50"><span class="font-medium text-blue-600">#{{ $run->id }}</span><span class="text-gray-600">{{ $run->status }} · {{ $run->created_at?->format('Y-m-d H:i') }}</span></a>@empty<p class="text-sm text-gray-500">{{ __('admin.content_strategy.generation.no_runs') }}</p>@endforelse</div></section>
+    <section class="rounded-lg bg-white p-6 shadow"><h2 class="text-lg font-semibold text-gray-900">{{ __('admin.content_strategy.generation.previous_runs') }}</h2><div class="mt-4 space-y-2">@forelse($runs as $run)<a href="{{ route('admin.content-generations.show', $run) }}" class="flex items-center justify-between rounded-md border border-gray-200 px-4 py-3 text-sm hover:bg-gray-50"><span class="font-medium text-blue-600">#{{ $run->id }}</span><span class="text-gray-600">{{ data_get(__('admin.content_strategy.statuses'), $run->status, $run->status) }} · {{ $run->created_at?->format('Y-m-d H:i') }}</span></a>@empty<p class="text-sm text-gray-500">{{ __('admin.content_strategy.generation.no_runs') }}</p>@endforelse</div></section>
 </div>
 @endsection

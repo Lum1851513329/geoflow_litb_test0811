@@ -93,6 +93,69 @@ final class AdminContentBriefWorkflowTest extends TestCase
         $this->get($this->adminPath('content-briefs'))->assertRedirect($this->adminPath('login'));
     }
 
+    public function test_ordinary_admins_only_see_and_mutate_their_own_briefs_and_descendant_runs(): void
+    {
+        $brief = $this->createBriefThroughHttp();
+        $this->confirmStrategyThroughHttp($brief);
+        $this->confirmBlueprintThroughHttp($brief);
+        $this->requestGenerationThroughHttp($brief);
+        $run = ContentGenerationRun::query()->where('content_brief_id', $brief->id)->sole();
+        $otherOperator = $this->admin('other-content-operator', 'content_operator');
+        $otherBrief = $this->createBriefThroughHttp($otherOperator, [
+            ...$this->briefPayload(),
+            'topic' => 'Private competitor brief',
+            'core_question' => 'What should only the other operator see?',
+        ]);
+
+        $this->actingAs($this->operator, 'admin')
+            ->withSession(['locale' => 'en'])
+            ->get($this->adminPath('content-briefs'))
+            ->assertOk()
+            ->assertSee($brief->topic)
+            ->assertDontSee($otherBrief->topic);
+
+        foreach ([
+            "content-briefs/{$otherBrief->id}/strategy",
+            "content-briefs/{$otherBrief->id}/blueprint",
+            "content-briefs/{$otherBrief->id}",
+        ] as $path) {
+            $this->actingAs($this->operator, 'admin')->get($this->adminPath($path))->assertForbidden();
+        }
+
+        $this->actingAs($otherOperator, 'admin')->post(
+            $this->adminPath("content-briefs/{$brief->id}/strategy"),
+            ['strategy' => ['primary_intent' => 'informational']],
+        )->assertForbidden();
+        $this->actingAs($otherOperator, 'admin')->post(
+            $this->adminPath("content-briefs/{$brief->id}/blueprint"),
+            ['blueprint' => $this->blueprint()],
+        )->assertForbidden();
+        $this->actingAs($otherOperator, 'admin')->post(
+            $this->adminPath("content-briefs/{$brief->id}/generations"),
+            $this->generationPayload($brief, 'cross-operator-generation'),
+        )->assertForbidden();
+        $this->actingAs($otherOperator, 'admin')->get(
+            $this->adminPath("content-generations/{$run->id}"),
+        )->assertForbidden();
+        $this->actingAs($otherOperator, 'admin')->post(
+            $this->adminPath("content-generations/{$run->id}/adopt"),
+            [],
+        )->assertForbidden();
+
+        $this->actingAs($this->superAdmin, 'admin')->get(
+            $this->adminPath("content-briefs/{$otherBrief->id}/strategy"),
+        )->assertOk();
+        $this->actingAs($this->superAdmin, 'admin')
+            ->withSession(['locale' => 'en'])
+            ->get($this->adminPath('content-briefs'))
+            ->assertOk()
+            ->assertSee($brief->topic)
+            ->assertSee($otherBrief->topic);
+        $this->actingAs($this->superAdmin, 'admin')->get(
+            $this->adminPath("content-generations/{$run->id}"),
+        )->assertOk();
+    }
+
     public function test_brief_validation_preserves_market_and_language_fields(): void
     {
         $this->actingAs($this->operator, 'admin')->post($this->adminPath('content-briefs'), [
@@ -204,6 +267,224 @@ final class AdminContentBriefWorkflowTest extends TestCase
         Queue::assertNothingPushed();
     }
 
+    public function test_generation_request_requires_the_enabled_presets_current_version(): void
+    {
+        $brief = $this->createBriefThroughHttp();
+        $this->confirmStrategyThroughHttp($brief);
+        $this->confirmBlueprintThroughHttp($brief);
+        $oldVersion = $this->presetVersion;
+        $currentVersion = PromptPresetVersion::forceCreate([
+            'prompt_preset_id' => $oldVersion->prompt_preset_id,
+            'version' => 2,
+            'matching_rules' => ['content_type' => 'guide', 'market_code' => 'US'],
+            'generation_policy' => ['max_tokens' => 4096],
+            'conflict_policy' => [],
+            'lifecycle_status' => PromptPresetVersion::STATUS_PRODUCTION,
+            'created_by_admin_id' => $this->superAdmin->id,
+        ]);
+        PromptPresetModuleVersion::query()->create([
+            'prompt_preset_version_id' => $currentVersion->id,
+            'prompt_module_version_id' => $this->moduleVersion->id,
+            'sort_order' => 1,
+            'is_required' => true,
+        ]);
+        $oldVersion->preset->forceFill(['current_version_id' => $currentVersion->id])->save();
+
+        $this->actingAs($this->operator, 'admin')->post(
+            $this->adminPath("content-briefs/{$brief->id}/generations"),
+            [
+                ...$this->generationPayload($brief, 'stale-preset-version'),
+                'preset_version_id' => $oldVersion->id,
+            ],
+        )->assertSessionHasErrors('preset_version_id');
+
+        $this->assertSame(0, ContentGenerationRun::query()->count());
+        Queue::assertNothingPushed();
+    }
+
+    public function test_generation_ui_and_post_use_the_same_exact_preset_context_match(): void
+    {
+        $brief = $this->createBriefThroughHttp();
+        $this->confirmStrategyThroughHttp($brief);
+        $this->confirmBlueprintThroughHttp($brief);
+        $mismatchedVersion = PromptPresetVersion::forceCreate([
+            'prompt_preset_id' => $this->presetVersion->prompt_preset_id,
+            'version' => 2,
+            'matching_rules' => ['content_type' => 'guide', 'market_code' => 'GB'],
+            'generation_policy' => ['max_tokens' => 4096],
+            'conflict_policy' => [],
+            'lifecycle_status' => PromptPresetVersion::STATUS_PRODUCTION,
+            'created_by_admin_id' => $this->superAdmin->id,
+        ]);
+        $this->presetVersion->preset->forceFill(['current_version_id' => $mismatchedVersion->id])->save();
+
+        $this->actingAs($this->operator, 'admin')->get(
+            $this->adminPath("content-briefs/{$brief->id}"),
+        )->assertOk()->assertDontSee('value="'.$mismatchedVersion->id.'"', false);
+
+        $this->actingAs($this->operator, 'admin')->post(
+            $this->adminPath("content-briefs/{$brief->id}/generations"),
+            [
+                ...$this->generationPayload($brief, 'mismatched-preset-context'),
+                'preset_version_id' => $mismatchedVersion->id,
+            ],
+        )->assertSessionHasErrors('preset_version_id');
+
+        $this->assertSame(0, ContentGenerationRun::query()->count());
+        Queue::assertNothingPushed();
+    }
+
+    public function test_generation_rejects_a_current_preset_outside_production_like_lifecycles(): void
+    {
+        $brief = $this->createBriefThroughHttp();
+        $this->confirmStrategyThroughHttp($brief);
+        $this->confirmBlueprintThroughHttp($brief);
+        $testVersion = PromptPresetVersion::forceCreate([
+            'prompt_preset_id' => $this->presetVersion->prompt_preset_id,
+            'version' => 2,
+            'matching_rules' => ['content_type' => 'guide', 'market_code' => 'US'],
+            'generation_policy' => ['max_tokens' => 4096],
+            'conflict_policy' => [],
+            'lifecycle_status' => PromptPresetVersion::STATUS_TEST,
+            'created_by_admin_id' => $this->superAdmin->id,
+        ]);
+        $this->presetVersion->preset->forceFill(['current_version_id' => $testVersion->id])->save();
+
+        $this->actingAs($this->operator, 'admin')->post(
+            $this->adminPath("content-briefs/{$brief->id}/generations"),
+            [
+                ...$this->generationPayload($brief, 'test-lifecycle-preset'),
+                'preset_version_id' => $testVersion->id,
+            ],
+        )->assertSessionHasErrors('preset_version_id');
+
+        $this->assertSame(0, ContentGenerationRun::query()->count());
+        Queue::assertNothingPushed();
+    }
+
+    public function test_exact_idempotent_replay_returns_the_same_run_without_duplicate_dispatch(): void
+    {
+        $brief = $this->createBriefThroughHttp();
+        $this->confirmStrategyThroughHttp($brief);
+        $this->confirmBlueprintThroughHttp($brief);
+        $key = 'exact-replay';
+
+        $first = $this->requestGenerationThroughHttp($brief, $key);
+        $run = ContentGenerationRun::query()->sole();
+        $second = $this->requestGenerationThroughHttp($brief, $key);
+
+        $first->assertRedirect($this->adminPath("content-generations/{$run->id}"));
+        $second->assertRedirect($this->adminPath("content-generations/{$run->id}"));
+        $this->assertSame(1, ContentGenerationRun::query()->count());
+        Queue::assertPushed(GenerateStrategyContent::class, 1);
+    }
+
+    public function test_exact_replay_returns_the_original_run_after_operational_configuration_changes(): void
+    {
+        $brief = $this->createBriefThroughHttp();
+        $this->confirmStrategyThroughHttp($brief);
+        $this->confirmBlueprintThroughHttp($brief);
+        $key = 'exact-replay-after-config-change';
+        $this->requestGenerationThroughHttp($brief, $key);
+        $run = ContentGenerationRun::query()->sole();
+        $replacement = PromptPresetVersion::forceCreate([
+            'prompt_preset_id' => $this->presetVersion->prompt_preset_id,
+            'version' => 2,
+            'matching_rules' => ['content_type' => 'guide', 'market_code' => 'US'],
+            'generation_policy' => ['max_tokens' => 4096],
+            'conflict_policy' => [],
+            'lifecycle_status' => PromptPresetVersion::STATUS_PRODUCTION,
+            'created_by_admin_id' => $this->superAdmin->id,
+        ]);
+        $this->presetVersion->preset->forceFill(['current_version_id' => $replacement->id])->save();
+        $this->model->forceFill(['status' => 'inactive'])->save();
+
+        $this->requestGenerationThroughHttp($brief, $key)
+            ->assertRedirect($this->adminPath("content-generations/{$run->id}"));
+
+        $this->assertSame(1, ContentGenerationRun::query()->count());
+        Queue::assertPushed(GenerateStrategyContent::class, 1);
+    }
+
+    public function test_idempotency_key_reuse_rejects_changed_configuration_on_the_key_field(): void
+    {
+        $brief = $this->createBriefThroughHttp();
+        $this->confirmStrategyThroughHttp($brief);
+        $this->confirmBlueprintThroughHttp($brief);
+        $key = 'changed-configuration';
+        $this->requestGenerationThroughHttp($brief, $key);
+        $otherModel = AiModel::query()->create([
+            'name' => 'Alternative model',
+            'version' => '2026-09',
+            'api_key' => 'test-key',
+            'api_url' => 'https://model.example.test/v1',
+            'model_id' => 'alternative-model',
+            'status' => 'active',
+            'max_tokens' => 4096,
+        ]);
+
+        $this->actingAs($this->operator, 'admin')->post(
+            $this->adminPath("content-briefs/{$brief->id}/generations"),
+            [
+                ...$this->generationPayload($brief, $key),
+                'ai_model_id' => $otherModel->id,
+            ],
+        )->assertSessionHasErrors('idempotency_key');
+
+        $this->assertSame(1, ContentGenerationRun::query()->count());
+        Queue::assertPushed(GenerateStrategyContent::class, 1);
+    }
+
+    public function test_idempotency_key_is_bound_to_the_actor_even_for_a_super_admin(): void
+    {
+        $brief = $this->createBriefThroughHttp();
+        $this->confirmStrategyThroughHttp($brief);
+        $this->confirmBlueprintThroughHttp($brief);
+        $key = 'actor-bound-replay';
+        $this->requestGenerationThroughHttp($brief, $key);
+
+        $this->actingAs($this->superAdmin, 'admin')->post(
+            $this->adminPath("content-briefs/{$brief->id}/generations"),
+            $this->generationPayload($brief, $key),
+        )->assertSessionHasErrors('idempotency_key');
+
+        $this->assertSame(1, ContentGenerationRun::query()->count());
+        Queue::assertPushed(GenerateStrategyContent::class, 1);
+    }
+
+    public function test_global_idempotency_key_reuse_across_briefs_returns_a_validation_error(): void
+    {
+        $firstBrief = $this->createBriefThroughHttp();
+        $this->confirmStrategyThroughHttp($firstBrief);
+        $this->confirmBlueprintThroughHttp($firstBrief);
+        $key = 'global-key-across-briefs';
+        $this->requestGenerationThroughHttp($firstBrief, $key);
+        $secondBrief = $this->createBriefThroughHttp();
+        $this->confirmStrategyThroughHttp($secondBrief);
+        $this->confirmBlueprintThroughHttp($secondBrief);
+
+        $this->requestGenerationThroughHttp($secondBrief, $key)
+            ->assertSessionHasErrors('idempotency_key');
+
+        $this->assertSame(1, ContentGenerationRun::query()->count());
+        Queue::assertPushed(GenerateStrategyContent::class, 1);
+    }
+
+    public function test_module_resolution_errors_are_reported_internally_but_rendered_generically(): void
+    {
+        $brief = $this->createBriefThroughHttp();
+        $this->confirmStrategyThroughHttp($brief);
+        $this->confirmBlueprintThroughHttp($brief);
+        $this->moduleVersion->module->forceFill(['is_enabled' => false])->save();
+
+        $this->actingAs($this->operator, 'admin')
+            ->withSession(['locale' => 'en'])
+            ->get($this->adminPath("content-briefs/{$brief->id}"))
+            ->assertOk()
+            ->assertSee('One or more required Prompt modules are unavailable for this brief.')
+            ->assertDontSee('Required module safety-foundation is not available for this preset context.');
+    }
+
     public function test_generation_request_uses_the_exact_strategy_and_blueprint_reviewed_by_the_operator(): void
     {
         $brief = $this->createBriefThroughHttp();
@@ -285,6 +566,16 @@ final class AdminContentBriefWorkflowTest extends TestCase
             ],
             'is_required' => true,
         ]);
+        ContentGenerationRunEvidence::query()->create([
+            'content_generation_run_id' => $run->id,
+            'evidence_key' => 'unsafe-research',
+            'evidence_snapshot' => [
+                'title' => '<script>alert("evidence-title")</script>',
+                'content' => 'Unsafe schemes must remain inert.',
+                'source_url' => 'javascript:alert("evidence-url")',
+            ],
+            'is_required' => false,
+        ]);
         $step = ContentGenerationRunStep::query()->create([
             'content_generation_run_id' => $run->id,
             'sequence' => 1,
@@ -308,10 +599,24 @@ final class AdminContentBriefWorkflowTest extends TestCase
                 'repair_instruction' => 'Add a source or remove the claim.',
             ]],
         ]);
+        $futureStep = ContentGenerationRunStep::query()->create([
+            'content_generation_run_id' => $run->id,
+            'sequence' => 2,
+            'step_type' => 'future_revision_type',
+            'status' => 'future_step_status',
+        ]);
+        ContentQualityReport::query()->create([
+            'content_generation_run_id' => $run->id,
+            'content_generation_run_step_id' => $futureStep->id,
+            'report_type' => 'future_report_type',
+            'status' => 'future_report_status',
+            'passed' => false,
+            'issues' => [],
+        ]);
 
-        $operatorView = $this->actingAs($this->operator, 'admin')->get(
-            $this->adminPath("content-generations/{$run->id}"),
-        );
+        $operatorView = $this->actingAs($this->operator, 'admin')
+            ->withSession(['locale' => 'en'])
+            ->get($this->adminPath("content-generations/{$run->id}"));
         $operatorView->assertOk()
             ->assertSee('Safety foundation')
             ->assertSee($digest)
@@ -320,8 +625,34 @@ final class AdminContentBriefWorkflowTest extends TestCase
             ->assertSee('Leave enough space in the toe box.')
             ->assertSee('Support the cushioning claim.')
             ->assertSee('editorial-model')
-            ->assertSee('targeted_revision')
+            ->assertSee('Semantic quality')
+            ->assertSee('Needs revision')
+            ->assertSee('Targeted revision')
+            ->assertSee('Completed')
+            ->assertSee('future_revision_type')
+            ->assertSee('future_step_status')
+            ->assertSee('future_report_type')
+            ->assertSee('future_report_status')
+            ->assertSee('href="https://example.test/fit"', false)
+            ->assertDontSee('href="javascript:', false)
+            ->assertDontSee('<script>alert("evidence-title")</script>', false)
             ->assertDontSee($compiledPrompt);
+
+        $this->actingAs($this->operator, 'admin')
+            ->withSession(['locale' => 'zh_CN'])
+            ->get($this->adminPath("content-generations/{$run->id}"))
+            ->assertOk()
+            ->assertSee('语义质量')
+            ->assertSee('需要修订')
+            ->assertSee('定向修订')
+            ->assertSee('已完成');
+
+        $this->actingAs($this->operator, 'admin')
+            ->withSession(['locale' => 'en'])
+            ->get($this->adminPath("content-briefs/{$brief->id}"))
+            ->assertOk()
+            ->assertSee('Ready for review')
+            ->assertDontSee('ready_for_review');
 
         $this->actingAs($this->superAdmin, 'admin')->get(
             $this->adminPath("content-generations/{$run->id}"),
@@ -370,11 +701,12 @@ final class AdminContentBriefWorkflowTest extends TestCase
         $this->assertSame('pending', $article->fresh()->review_status);
     }
 
-    private function createBriefThroughHttp(): ContentBrief
+    /** @param array<string, mixed>|null $payload */
+    private function createBriefThroughHttp(?Admin $operator = null, ?array $payload = null): ContentBrief
     {
-        $this->actingAs($this->operator, 'admin')->post(
+        $this->actingAs($operator ?? $this->operator, 'admin')->post(
             $this->adminPath('content-briefs'),
-            $this->briefPayload(),
+            $payload ?? $this->briefPayload(),
         )->assertRedirect();
 
         return ContentBrief::query()->latest('id')->firstOrFail();
@@ -401,18 +733,24 @@ final class AdminContentBriefWorkflowTest extends TestCase
         )->assertRedirect($this->adminPath("content-briefs/{$brief->id}"));
     }
 
-    private function requestGenerationThroughHttp(ContentBrief $brief)
+    private function requestGenerationThroughHttp(ContentBrief $brief, ?string $idempotencyKey = null)
     {
         return $this->actingAs($this->operator, 'admin')->post(
             $this->adminPath("content-briefs/{$brief->id}/generations"),
-            [
-                'strategy_version_id' => $brief->strategyVersions()->latest('version')->value('id'),
-                'blueprint_version_id' => $brief->blueprintVersions()->latest('version')->value('id'),
-                'preset_version_id' => $this->presetVersion->id,
-                'ai_model_id' => $this->model->id,
-                'idempotency_key' => 'brief-'.$brief->id.'-'.str()->uuid(),
-            ],
+            $this->generationPayload($brief, $idempotencyKey),
         );
+    }
+
+    /** @return array<string, int|string> */
+    private function generationPayload(ContentBrief $brief, ?string $idempotencyKey = null): array
+    {
+        return [
+            'strategy_version_id' => (int) $brief->strategyVersions()->latest('version')->value('id'),
+            'blueprint_version_id' => (int) $brief->blueprintVersions()->latest('version')->value('id'),
+            'preset_version_id' => $this->presetVersion->id,
+            'ai_model_id' => $this->model->id,
+            'idempotency_key' => $idempotencyKey ?? 'brief-'.$brief->id.'-'.str()->uuid(),
+        ];
     }
 
     /** @return array<string, mixed> */

@@ -20,8 +20,12 @@ return [
         'hints' => ['one_per_line' => '每行一项'],
         'module' => ['required' => '必选', 'optional' => '可选'],
         'statuses' => ['pending' => '待处理', 'queued' => '已排队', 'compiling' => '编译中', 'generating' => '生成中', 'running' => '运行中', 'completed' => '已完成', 'ready_for_review' => '待审核', 'needs_evidence' => '需要证据', 'model_quality_failed' => '模型质量失败', 'failed' => '失败', 'needs_revision' => '需要修订', 'manual_review_required' => '需要人工审核', 'adopted' => '已采纳'],
+        'quality_types' => ['preflight' => '预检质量', 'deterministic' => '确定性质量', 'semantic' => '语义质量'],
+        'quality_statuses' => ['passed' => '已通过', 'needs_revision' => '需要修订', 'needs_evidence' => '需要证据', 'model_quality_failed' => '模型质量失败', 'manual_review_required' => '需要人工审核'],
+        'step_types' => ['initial_generation' => '初次生成', 'deterministic_quality' => '确定性质量检查', 'semantic_quality' => '语义质量检查', 'revision' => '修订', 'targeted_revision' => '定向修订', 'adoption' => '采纳'],
+        'step_statuses' => ['queued' => '已排队', 'running' => '运行中', 'completed' => '已完成', 'failed' => '失败', 'skipped' => '已跳过'],
         'messages' => ['brief_created' => '内容简报已创建。', 'strategy_confirmed' => '内容策略已确认。', 'blueprint_confirmed' => '内容蓝图已确认。', 'generation_queued' => '内容生成已加入队列。', 'generation_adopted' => '生成内容已采纳到文章工作流。'],
-        'validation' => ['low_confidence_correction_reason' => '请说明修正低置信度意图建议的原因。', 'preset_unavailable' => '所选 Prompt 预设版本不可用于生成。', 'modules_unavailable' => '一个或多个必选 Prompt 模块不适用于该简报。', 'model_unavailable' => '所选 AI 模型不可用于生成。', 'strategy_required' => '继续前请先确认内容策略。', 'blueprint_required' => '请求生成前请先确认内容蓝图。', 'preset_required' => '生成前请先发布并启用匹配的 Prompt 预设。', 'idempotency_conflict' => '该生成请求键属于另一个简报。'],
+        'validation' => ['low_confidence_correction_reason' => '请说明修正低置信度意图建议的原因。', 'preset_unavailable' => '所选 Prompt 预设版本不可用于生成。', 'modules_unavailable' => '一个或多个必选 Prompt 模块不适用于该简报。', 'model_unavailable' => '所选 AI 模型不可用于生成。', 'strategy_required' => '继续前请先确认内容策略。', 'blueprint_required' => '请求生成前请先确认内容蓝图。', 'preset_required' => '生成前请先发布并启用匹配的 Prompt 预设。', 'idempotency_conflict' => '该生成请求键属于另一个简报。', 'idempotency_actor_conflict' => '该生成请求键属于另一位管理员。', 'idempotency_configuration_conflict' => '该生成请求键已用于不同的生成设置。'],
     ],
     'prompt_modules' => [
         'title' => 'Prompt 模块',

@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Admin;
 
 use App\Domain\ContentStrategy\ContentStrategyService;
 use App\Domain\PromptComposition\PromptModuleResolver;
+use App\Domain\PromptComposition\PromptPresetSelector;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Admin\ConfirmContentBlueprintRequest;
 use App\Http\Requests\Admin\ConfirmContentStrategyRequest;
@@ -18,11 +19,11 @@ use App\Models\ContentStrategyVersion;
 use App\Models\Keyword;
 use App\Models\KeywordCluster;
 use App\Models\PromptModuleVersion;
-use App\Models\PromptPreset;
 use App\Models\PromptPresetVersion;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Gate;
 use Illuminate\View\View;
 use Throwable;
 
@@ -31,12 +32,16 @@ final class ContentBriefController extends Controller
     public function __construct(
         private readonly ContentStrategyService $strategies,
         private readonly PromptModuleResolver $moduleResolver,
+        private readonly PromptPresetSelector $presetSelector,
     ) {}
 
     public function index(Request $request): View
     {
+        $actor = $this->actor($request);
+        Gate::forUser($actor)->authorize('viewAny', ContentBrief::class);
         $briefs = ContentBrief::query()
             ->withCount(['strategyVersions', 'blueprintVersions'])
+            ->when(! $actor->isSuperAdmin(), fn ($query) => $query->where('created_by_admin_id', $actor->id))
             ->when(trim((string) $request->query('q')) !== '', function ($query) use ($request): void {
                 $search = '%'.trim((string) $request->query('q')).'%';
                 $query->where(fn ($nested) => $nested->where('topic', 'like', $search)->orWhere('core_question', 'like', $search));
@@ -52,8 +57,10 @@ final class ContentBriefController extends Controller
         ]);
     }
 
-    public function create(): View
+    public function create(Request $request): View
     {
+        Gate::forUser($this->actor($request))->authorize('create', ContentBrief::class);
+
         return view('admin.content-briefs.create', [
             'pageTitle' => __('admin.content_strategy.create.title'),
             'activeMenu' => 'content_strategy',
@@ -77,6 +84,7 @@ final class ContentBriefController extends Controller
 
     public function strategy(Request $request, ContentBrief $brief): View
     {
+        Gate::forUser($this->actor($request))->authorize('view', $brief);
         $suggestion = $this->strategies->suggest($brief);
 
         return view('admin.content-briefs.strategy', [
@@ -105,6 +113,7 @@ final class ContentBriefController extends Controller
 
     public function blueprint(Request $request, ContentBrief $brief): RedirectResponse|View
     {
+        Gate::forUser($this->actor($request))->authorize('view', $brief);
         $strategy = $this->selectedStrategy($brief, $request->integer('strategy_version_id'));
         if ($strategy === null) {
             return redirect()->route('admin.content-briefs.strategy', $brief)
@@ -149,6 +158,7 @@ final class ContentBriefController extends Controller
 
     public function show(Request $request, ContentBrief $brief): RedirectResponse|View
     {
+        Gate::forUser($this->actor($request))->authorize('view', $brief);
         $strategy = $this->latestStrategy($brief);
         if ($strategy === null) {
             return redirect()->route('admin.content-briefs.strategy', $brief);
@@ -162,7 +172,7 @@ final class ContentBriefController extends Controller
             return redirect()->route('admin.content-briefs.blueprint', $brief);
         }
 
-        $presets = $this->eligiblePresetVersions($brief);
+        $presets = $this->presetSelector->eligibleVersions($brief);
         $selectedPreset = $presets->firstWhere('id', $request->integer('preset_version_id')) ?? $presets->first();
         [$resolvedModules, $moduleResolutionError] = $this->previewModules($brief, $selectedPreset);
         $models = AiModel::query()
@@ -214,25 +224,6 @@ final class ContentBriefController extends Controller
         return $query->latest('version')->first();
     }
 
-    /** @return Collection<int, PromptPresetVersion> */
-    private function eligiblePresetVersions(ContentBrief $brief): Collection
-    {
-        $context = $this->selectionContext($brief);
-
-        return PromptPreset::query()
-            ->where('is_enabled', true)
-            ->whereNotNull('current_version_id')
-            ->with('currentVersion.preset')
-            ->orderBy('id')
-            ->get()
-            ->map(fn (PromptPreset $preset): ?PromptPresetVersion => $preset->currentVersion)
-            ->filter(fn (?PromptPresetVersion $version): bool => $version !== null
-                && ! in_array($version->lifecycle_status, [PromptPresetVersion::STATUS_DRAFT, PromptPresetVersion::STATUS_ARCHIVED], true))
-            ->filter(fn (PromptPresetVersion $version): bool => $this->matchingScore($version, $context) >= 0)
-            ->sortByDesc(fn (PromptPresetVersion $version): int => $this->matchingScore($version, $context))
-            ->values();
-    }
-
     /** @return array{Collection<int, array<string, mixed>>, string|null} */
     private function previewModules(ContentBrief $brief, ?PromptPresetVersion $preset): array
     {
@@ -240,7 +231,7 @@ final class ContentBriefController extends Controller
             return [collect(), __('admin.content_strategy.validation.preset_required')];
         }
         try {
-            $resolved = $this->moduleResolver->resolve($preset, $this->selectionContext($brief));
+            $resolved = $this->moduleResolver->resolve($preset, $this->presetSelector->context($brief));
             $versions = PromptModuleVersion::query()
                 ->with('module')
                 ->whereIn('id', array_map(static fn ($module): int => $module->versionId, $resolved))
@@ -262,37 +253,8 @@ final class ContentBriefController extends Controller
         } catch (Throwable $exception) {
             report($exception);
 
-            return [collect(), $exception->getMessage()];
+            return [collect(), __('admin.content_strategy.validation.modules_unavailable')];
         }
-    }
-
-    /** @return array<string, string> */
-    private function selectionContext(ContentBrief $brief): array
-    {
-        return [
-            'content_type' => (string) $brief->content_type,
-            'language_code' => (string) $brief->language_code,
-            'market_code' => (string) $brief->market_code,
-        ];
-    }
-
-    /** @param array<string, string> $context */
-    private function matchingScore(PromptPresetVersion $version, array $context): int
-    {
-        $rules = is_array($version->matching_rules) ? $version->matching_rules : [];
-        $score = 0;
-        foreach ($rules as $field => $allowed) {
-            if (! array_key_exists($field, $context)) {
-                return -1;
-            }
-            $allowed = is_array($allowed) ? $allowed : [$allowed];
-            if (! in_array('*', $allowed, true) && ! in_array($context[$field], $allowed, true)) {
-                return -1;
-            }
-            $score++;
-        }
-
-        return $score;
     }
 
     /** @return array<string, mixed> */

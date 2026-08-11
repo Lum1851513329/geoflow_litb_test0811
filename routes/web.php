@@ -133,16 +133,16 @@ Route::prefix($adminPrefix)->name('admin.')->middleware(['admin.locale'])->group
             Route::get('/', [ContentBriefController::class, 'index'])->name('index');
             Route::get('create', [ContentBriefController::class, 'create'])->name('create');
             Route::post('/', [ContentBriefController::class, 'store'])->name('store');
-            Route::get('{brief}/strategy', [ContentBriefController::class, 'strategy'])->name('strategy');
-            Route::post('{brief}/strategy', [ContentBriefController::class, 'confirmStrategy'])->name('strategy.confirm');
-            Route::get('{brief}/blueprint', [ContentBriefController::class, 'blueprint'])->name('blueprint');
-            Route::post('{brief}/blueprint', [ContentBriefController::class, 'confirmBlueprint'])->name('blueprint.confirm');
-            Route::post('{brief}/generations', [ContentGenerationController::class, 'store'])->name('generations.store');
-            Route::get('{brief}', [ContentBriefController::class, 'show'])->name('show');
+            Route::get('{brief}/strategy', [ContentBriefController::class, 'strategy'])->can('view', 'brief')->name('strategy');
+            Route::post('{brief}/strategy', [ContentBriefController::class, 'confirmStrategy'])->can('update', 'brief')->name('strategy.confirm');
+            Route::get('{brief}/blueprint', [ContentBriefController::class, 'blueprint'])->can('view', 'brief')->name('blueprint');
+            Route::post('{brief}/blueprint', [ContentBriefController::class, 'confirmBlueprint'])->can('update', 'brief')->name('blueprint.confirm');
+            Route::post('{brief}/generations', [ContentGenerationController::class, 'store'])->can('update', 'brief')->name('generations.store');
+            Route::get('{brief}', [ContentBriefController::class, 'show'])->can('view', 'brief')->name('show');
         });
         Route::prefix('content-generations')->name('content-generations.')->group(function (): void {
-            Route::get('{run}', [ContentGenerationController::class, 'show'])->name('show');
-            Route::post('{run}/adopt', [ContentGenerationController::class, 'adopt'])->name('adopt');
+            Route::get('{run}', [ContentGenerationController::class, 'show'])->can('view', 'run')->name('show');
+            Route::post('{run}/adopt', [ContentGenerationController::class, 'adopt'])->can('adopt', 'run')->name('adopt');
         });
     });
 

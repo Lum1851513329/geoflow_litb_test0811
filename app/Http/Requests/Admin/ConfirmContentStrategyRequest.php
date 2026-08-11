@@ -6,6 +6,7 @@ use App\Domain\ContentStrategy\ContentStrategyService;
 use App\Models\Admin;
 use App\Models\ContentBrief;
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Support\Facades\Gate;
 use Illuminate\Validation\Validator;
 
 final class ConfirmContentStrategyRequest extends FormRequest
@@ -14,8 +15,12 @@ final class ConfirmContentStrategyRequest extends FormRequest
 
     public function authorize(): bool
     {
-        return $this->user('admin') instanceof Admin
-            && $this->route('brief') instanceof ContentBrief;
+        $admin = $this->user('admin');
+        $brief = $this->route('brief');
+
+        return $admin instanceof Admin
+            && $brief instanceof ContentBrief
+            && Gate::forUser($admin)->allows('update', $brief);
     }
 
     /** @return array<string, mixed> */

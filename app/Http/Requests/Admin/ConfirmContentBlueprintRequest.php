@@ -5,13 +5,18 @@ namespace App\Http\Requests\Admin;
 use App\Models\Admin;
 use App\Models\ContentBrief;
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Support\Facades\Gate;
 
 final class ConfirmContentBlueprintRequest extends FormRequest
 {
     public function authorize(): bool
     {
-        return $this->user('admin') instanceof Admin
-            && $this->route('brief') instanceof ContentBrief;
+        $admin = $this->user('admin');
+        $brief = $this->route('brief');
+
+        return $admin instanceof Admin
+            && $brief instanceof ContentBrief
+            && Gate::forUser($admin)->allows('update', $brief);
     }
 
     /** @return array<string, mixed> */
