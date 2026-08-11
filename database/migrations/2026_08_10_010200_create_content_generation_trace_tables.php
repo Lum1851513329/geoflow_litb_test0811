@@ -124,7 +124,7 @@ return new class extends Migration
     {
         if (DB::getDriverName() === 'pgsql') {
             DB::unprepared(<<<'SQL'
-CREATE FUNCTION guard_content_generation_run_immutable() RETURNS trigger AS $$
+CREATE OR REPLACE FUNCTION guard_content_generation_run_immutable() RETURNS trigger AS $$
 BEGIN
     IF NEW.content_brief_id IS DISTINCT FROM OLD.content_brief_id
         OR NEW.strategy_version_id IS DISTINCT FROM OLD.strategy_version_id
@@ -145,7 +145,7 @@ $$ LANGUAGE plpgsql;
 CREATE TRIGGER content_generation_runs_guard_update
 BEFORE UPDATE ON content_generation_runs
 FOR EACH ROW EXECUTE FUNCTION guard_content_generation_run_immutable();
-CREATE FUNCTION prevent_content_generation_run_delete() RETURNS trigger AS $$
+CREATE OR REPLACE FUNCTION prevent_content_generation_run_delete() RETURNS trigger AS $$
 BEGIN
     RAISE EXCEPTION 'content generation runs cannot be deleted';
 END;

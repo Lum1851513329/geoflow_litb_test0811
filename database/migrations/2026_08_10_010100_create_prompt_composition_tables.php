@@ -115,7 +115,7 @@ return new class extends Migration
     {
         if (DB::getDriverName() === 'pgsql') {
             DB::unprepared(<<<'SQL'
-CREATE FUNCTION enforce_prompt_module_version_sequence() RETURNS trigger AS $$
+CREATE OR REPLACE FUNCTION enforce_prompt_module_version_sequence() RETURNS trigger AS $$
 DECLARE expected_version integer;
 BEGIN
     PERFORM 1 FROM prompt_modules WHERE id = NEW.prompt_module_id FOR UPDATE;
@@ -130,7 +130,7 @@ $$ LANGUAGE plpgsql;
 CREATE TRIGGER prompt_module_versions_enforce_sequence
 BEFORE INSERT ON prompt_module_versions
 FOR EACH ROW EXECUTE FUNCTION enforce_prompt_module_version_sequence();
-CREATE FUNCTION guard_prompt_module_version_immutable() RETURNS trigger AS $$
+CREATE OR REPLACE FUNCTION guard_prompt_module_version_immutable() RETURNS trigger AS $$
 BEGIN
     IF NEW.prompt_module_id IS DISTINCT FROM OLD.prompt_module_id
         OR NEW.version IS DISTINCT FROM OLD.version
@@ -148,7 +148,7 @@ $$ LANGUAGE plpgsql;
 CREATE TRIGGER prompt_module_versions_guard_update
 BEFORE UPDATE ON prompt_module_versions
 FOR EACH ROW EXECUTE FUNCTION guard_prompt_module_version_immutable();
-CREATE FUNCTION prevent_prompt_module_version_delete() RETURNS trigger AS $$
+CREATE OR REPLACE FUNCTION prevent_prompt_module_version_delete() RETURNS trigger AS $$
 BEGIN
     RAISE EXCEPTION 'prompt module versions cannot be deleted';
 END;
@@ -156,7 +156,7 @@ $$ LANGUAGE plpgsql;
 CREATE TRIGGER prompt_module_versions_guard_delete
 BEFORE DELETE ON prompt_module_versions
 FOR EACH ROW EXECUTE FUNCTION prevent_prompt_module_version_delete();
-CREATE FUNCTION enforce_prompt_preset_version_sequence() RETURNS trigger AS $$
+CREATE OR REPLACE FUNCTION enforce_prompt_preset_version_sequence() RETURNS trigger AS $$
 DECLARE expected_version integer;
 BEGIN
     PERFORM 1 FROM prompt_presets WHERE id = NEW.prompt_preset_id FOR UPDATE;
@@ -171,7 +171,7 @@ $$ LANGUAGE plpgsql;
 CREATE TRIGGER prompt_preset_versions_enforce_sequence
 BEFORE INSERT ON prompt_preset_versions
 FOR EACH ROW EXECUTE FUNCTION enforce_prompt_preset_version_sequence();
-CREATE FUNCTION guard_prompt_preset_version_immutable() RETURNS trigger AS $$
+CREATE OR REPLACE FUNCTION guard_prompt_preset_version_immutable() RETURNS trigger AS $$
 BEGIN
     IF NEW.prompt_preset_id IS DISTINCT FROM OLD.prompt_preset_id
         OR NEW.version IS DISTINCT FROM OLD.version
@@ -187,7 +187,7 @@ $$ LANGUAGE plpgsql;
 CREATE TRIGGER prompt_preset_versions_guard_update
 BEFORE UPDATE ON prompt_preset_versions
 FOR EACH ROW EXECUTE FUNCTION guard_prompt_preset_version_immutable();
-CREATE FUNCTION prevent_prompt_preset_version_delete() RETURNS trigger AS $$
+CREATE OR REPLACE FUNCTION prevent_prompt_preset_version_delete() RETURNS trigger AS $$
 BEGIN
     RAISE EXCEPTION 'prompt preset versions cannot be deleted';
 END;

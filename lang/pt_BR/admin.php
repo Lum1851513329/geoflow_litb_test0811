@@ -1,12 +1,21 @@
 <?php
 
 $base = require __DIR__.'/../en/admin.php';
+$featureFallback = $base;
+if (! isset($featureFallback['content_strategy']) && function_exists('lang_path')) {
+    $featureFallback = require lang_path('en/admin.php');
+}
 $manualPublicationsPath = __DIR__.'/manual_publications.php';
 if (! is_file($manualPublicationsPath) && function_exists('lang_path')) {
     $manualPublicationsPath = lang_path('pt_BR/manual_publications.php');
 }
 
 return array_replace_recursive($base, [
+    // These newly introduced administration surfaces intentionally use the
+    // established English fallback until their Portuguese copy is translated.
+    'content_strategy' => $featureFallback['content_strategy'],
+    'prompt_modules' => $featureFallback['prompt_modules'],
+    'prompt_presets' => $featureFallback['prompt_presets'],
     'keyword_intelligence' => [
         'nav' => ['overview' => 'Inteligência de palavras-chave', 'import' => 'Importar planilha', 'taxonomy' => 'Taxonomia', 'clusters' => 'Clusters de tópicos'],
         'legacy_libraries' => 'Bibliotecas de palavras-chave anteriores',
@@ -63,6 +72,7 @@ return array_replace_recursive($base, [
         'api_tokens' => 'Tokens de API',
         'analytics' => 'Análise de Dados',
         'distribution' => 'Distribuição',
+        'content_strategy' => 'Estratégia de conteúdo',
     ],
     'header' => [
         'welcome' => 'Bem-vindo, :name',

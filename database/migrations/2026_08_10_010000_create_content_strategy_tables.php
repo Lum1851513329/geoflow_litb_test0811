@@ -89,7 +89,7 @@ return new class extends Migration
     {
         if (DB::getDriverName() === 'pgsql') {
             DB::unprepared(<<<'SQL'
-CREATE FUNCTION enforce_content_strategy_version_sequence() RETURNS trigger AS $$
+CREATE OR REPLACE FUNCTION enforce_content_strategy_version_sequence() RETURNS trigger AS $$
 DECLARE expected_version integer;
 BEGIN
     PERFORM 1 FROM content_briefs WHERE id = NEW.content_brief_id FOR UPDATE;
@@ -104,7 +104,7 @@ $$ LANGUAGE plpgsql;
 CREATE TRIGGER content_strategy_versions_enforce_sequence
 BEFORE INSERT ON content_strategy_versions
 FOR EACH ROW EXECUTE FUNCTION enforce_content_strategy_version_sequence();
-CREATE FUNCTION guard_content_strategy_version_immutable() RETURNS trigger AS $$
+CREATE OR REPLACE FUNCTION guard_content_strategy_version_immutable() RETURNS trigger AS $$
 BEGIN
     IF NEW.content_brief_id IS DISTINCT FROM OLD.content_brief_id
         OR NEW.version IS DISTINCT FROM OLD.version
@@ -119,7 +119,7 @@ $$ LANGUAGE plpgsql;
 CREATE TRIGGER content_strategy_versions_guard_update
 BEFORE UPDATE ON content_strategy_versions
 FOR EACH ROW EXECUTE FUNCTION guard_content_strategy_version_immutable();
-CREATE FUNCTION prevent_content_strategy_version_delete() RETURNS trigger AS $$
+CREATE OR REPLACE FUNCTION prevent_content_strategy_version_delete() RETURNS trigger AS $$
 BEGIN
     RAISE EXCEPTION 'content strategy versions cannot be deleted';
 END;
@@ -127,7 +127,7 @@ $$ LANGUAGE plpgsql;
 CREATE TRIGGER content_strategy_versions_guard_delete
 BEFORE DELETE ON content_strategy_versions
 FOR EACH ROW EXECUTE FUNCTION prevent_content_strategy_version_delete();
-CREATE FUNCTION enforce_content_blueprint_version_sequence() RETURNS trigger AS $$
+CREATE OR REPLACE FUNCTION enforce_content_blueprint_version_sequence() RETURNS trigger AS $$
 DECLARE expected_version integer;
 BEGIN
     PERFORM 1 FROM content_briefs WHERE id = NEW.content_brief_id FOR UPDATE;
@@ -142,7 +142,7 @@ $$ LANGUAGE plpgsql;
 CREATE TRIGGER content_blueprint_versions_enforce_sequence
 BEFORE INSERT ON content_blueprint_versions
 FOR EACH ROW EXECUTE FUNCTION enforce_content_blueprint_version_sequence();
-CREATE FUNCTION guard_content_blueprint_version_immutable() RETURNS trigger AS $$
+CREATE OR REPLACE FUNCTION guard_content_blueprint_version_immutable() RETURNS trigger AS $$
 BEGIN
     IF NEW.content_brief_id IS DISTINCT FROM OLD.content_brief_id
         OR NEW.content_strategy_version_id IS DISTINCT FROM OLD.content_strategy_version_id
@@ -158,7 +158,7 @@ $$ LANGUAGE plpgsql;
 CREATE TRIGGER content_blueprint_versions_guard_update
 BEFORE UPDATE ON content_blueprint_versions
 FOR EACH ROW EXECUTE FUNCTION guard_content_blueprint_version_immutable();
-CREATE FUNCTION prevent_content_blueprint_version_delete() RETURNS trigger AS $$
+CREATE OR REPLACE FUNCTION prevent_content_blueprint_version_delete() RETURNS trigger AS $$
 BEGIN
     RAISE EXCEPTION 'content blueprint versions cannot be deleted';
 END;
