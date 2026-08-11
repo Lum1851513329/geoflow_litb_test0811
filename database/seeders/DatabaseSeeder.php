@@ -24,6 +24,7 @@ class DatabaseSeeder extends Seeder
         // 后台默认管理员（账号与密码由 GEOFLOW_ADMIN_* 环境变量控制，见 AdminUserSeeder）
         $this->call(AdminUserSeeder::class);
         $this->call(PromptCompositionSeeder::class);
+        $this->call(LitbPromptLibrarySeeder::class);
 
         if ((bool) config('geoflow.seed_frontend_demo', false)) {
             $this->call(FrontendDemoSeeder::class);
