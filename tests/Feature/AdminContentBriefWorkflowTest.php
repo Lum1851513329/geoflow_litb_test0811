@@ -3,6 +3,8 @@
 namespace Tests\Feature;
 
 use App\Jobs\GenerateStrategyContent;
+use App\Http\Controllers\Admin\ContentGenerationController;
+use App\Http\Requests\Admin\RequestContentGenerationRequest;
 use App\Models\Admin;
 use App\Models\AiModel;
 use App\Models\Article;
@@ -23,8 +25,10 @@ use App\Models\PromptPresetVersion;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Foundation\Http\Middleware\ValidateCsrfToken;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Routing\Route;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Validation\ValidationException;
 use Tests\TestCase;
 
 final class AdminContentBriefWorkflowTest extends TestCase
@@ -262,6 +266,44 @@ final class AdminContentBriefWorkflowTest extends TestCase
 
         $this->requestGenerationThroughHttp($brief)
             ->assertSessionHasErrors('preset_version_id');
+
+        $this->assertSame(0, ContentGenerationRun::query()->count());
+        Queue::assertNothingPushed();
+    }
+
+    public function test_reservation_rejects_a_model_disabled_after_request_validation(): void
+    {
+        $brief = $this->createBriefThroughHttp();
+        $this->confirmStrategyThroughHttp($brief);
+        $this->confirmBlueprintThroughHttp($brief);
+        $request = $this->validatedGenerationRequest($brief, 'model-disabled-after-validation');
+        $this->model->forceFill(['status' => 'inactive'])->save();
+
+        try {
+            app(ContentGenerationController::class)->store($request, $brief);
+            $this->fail('Reservation accepted a model that became inactive after request validation.');
+        } catch (ValidationException $exception) {
+            $this->assertArrayHasKey('ai_model_id', $exception->errors());
+        }
+
+        $this->assertSame(0, ContentGenerationRun::query()->count());
+        Queue::assertNothingPushed();
+    }
+
+    public function test_reservation_rejects_a_required_module_disabled_after_request_validation(): void
+    {
+        $brief = $this->createBriefThroughHttp();
+        $this->confirmStrategyThroughHttp($brief);
+        $this->confirmBlueprintThroughHttp($brief);
+        $request = $this->validatedGenerationRequest($brief, 'module-disabled-after-validation');
+        $this->moduleVersion->module->forceFill(['is_enabled' => false])->save();
+
+        try {
+            app(ContentGenerationController::class)->store($request, $brief);
+            $this->fail('Reservation accepted a required module that became unavailable after request validation.');
+        } catch (ValidationException $exception) {
+            $this->assertArrayHasKey('preset_version_id', $exception->errors());
+        }
 
         $this->assertSame(0, ContentGenerationRun::query()->count());
         Queue::assertNothingPushed();
@@ -739,6 +781,29 @@ final class AdminContentBriefWorkflowTest extends TestCase
             $this->adminPath("content-briefs/{$brief->id}/generations"),
             $this->generationPayload($brief, $idempotencyKey),
         );
+    }
+
+    private function validatedGenerationRequest(
+        ContentBrief $brief,
+        string $idempotencyKey,
+    ): RequestContentGenerationRequest {
+        $request = RequestContentGenerationRequest::create(
+            $this->adminPath("content-briefs/{$brief->id}/generations"),
+            'POST',
+            $this->generationPayload($brief, $idempotencyKey),
+        );
+        $route = new Route('POST', 'content-briefs/{brief}/generations', static fn (): null => null);
+        $route->bind($request);
+        $route->setParameter('brief', $brief);
+        $request->setContainer($this->app);
+        $request->setRedirector($this->app->make('redirect'));
+        $request->setRouteResolver(static fn (): Route => $route);
+        $request->setUserResolver(fn (?string $guard = null): ?Admin => $guard === null || $guard === 'admin'
+            ? $this->operator
+            : null);
+        $request->validateResolved();
+
+        return $request;
     }
 
     /** @return array<string, int|string> */
