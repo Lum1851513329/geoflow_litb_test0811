@@ -13,12 +13,15 @@ class KeywordLibrary extends Model
         'name',
         'description',
         'keyword_count',
+        'asset_key',
+        'asset_provenance',
     ];
 
     protected function casts(): array
     {
         return [
             'keyword_count' => 'integer',
+            'asset_provenance' => 'array',
         ];
     }
 

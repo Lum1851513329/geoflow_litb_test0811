@@ -39,6 +39,8 @@ class KnowledgeBase extends Model
         'chunk_sync_error',
         'chunk_sync_require_real_embedding',
         'chunk_synced_at',
+        'asset_key',
+        'asset_provenance',
     ];
 
     protected function casts(): array
@@ -51,6 +53,7 @@ class KnowledgeBase extends Model
             'effective_date' => 'date',
             'chunk_sync_require_real_embedding' => 'boolean',
             'chunk_synced_at' => 'datetime',
+            'asset_provenance' => 'array',
         ];
     }
 

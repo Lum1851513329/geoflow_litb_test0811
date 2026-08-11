@@ -21,6 +21,7 @@ final class ContentBrief extends Model
         'content_type', 'planned_publish_at', 'keyword_cluster_id', 'primary_keyword_id',
         'category_id', 'target_url', 'required_mentions', 'prohibited_information',
         'campaign_window', 'reference_urls', 'cta_strength', 'status', 'created_by_admin_id',
+        'asset_key', 'asset_provenance',
     ];
 
     protected function casts(): array
@@ -35,6 +36,7 @@ final class ContentBrief extends Model
             'campaign_window' => 'array',
             'reference_urls' => 'array',
             'created_by_admin_id' => 'integer',
+            'asset_provenance' => 'array',
         ];
     }
 
