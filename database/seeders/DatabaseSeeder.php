@@ -25,6 +25,7 @@ class DatabaseSeeder extends Seeder
         $this->call(AdminUserSeeder::class);
         $this->call(PromptCompositionSeeder::class);
         $this->call(LitbPromptLibrarySeeder::class);
+        $this->call(LitbQuarterlyBriefSeeder::class);
 
         if ((bool) config('geoflow.seed_frontend_demo', false)) {
             $this->call(FrontendDemoSeeder::class);
