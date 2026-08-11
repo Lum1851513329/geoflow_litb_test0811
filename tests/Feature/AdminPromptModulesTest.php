@@ -107,6 +107,74 @@ class AdminPromptModulesTest extends TestCase
         $this->assertSame(PromptModuleVersion::STATUS_DRAFT, $this->draftVersion->fresh()->lifecycle_status);
     }
 
+    public function test_non_super_admin_cannot_manage_another_owners_user_module_or_preset(): void
+    {
+        $other = $this->admin('other-prompt-owner', 'content_operator');
+        $module = PromptModule::query()->create([
+            'module_key' => 'other-owner-module',
+            'display_name' => 'Other owner module',
+            'module_type' => PromptModule::TYPE_GEO,
+            'owned_by_admin_id' => $other->id,
+        ]);
+        $preset = PromptPreset::query()->create([
+            'preset_key' => 'other-owner-preset',
+            'display_name' => 'Other owner preset',
+            'owned_by_admin_id' => $other->id,
+        ]);
+
+        $this->actingAs($this->contentOperator, 'admin')->post(
+            route('admin.prompt-modules.versions.store', $module),
+            $this->moduleVersionPayload(),
+        )->assertForbidden();
+        $this->actingAs($this->contentOperator, 'admin')->post(
+            route('admin.prompt-presets.versions.store', $preset),
+            $this->presetVersionPayload($this->draftVersion),
+        )->assertForbidden();
+
+        $this->assertSame(0, $module->versions()->count());
+        $this->assertSame(0, $preset->versions()->count());
+    }
+
+    public function test_production_publish_requires_protected_workflow_permission_even_for_owner(): void
+    {
+        [$module, $version] = $this->customModuleWithDraftVersion('owner-publish');
+        [$preset, $presetVersion] = $this->presetWithDraftVersion('owner-preset-publish');
+        $preset->forceFill(['owned_by_admin_id' => $this->contentOperator->id])->save();
+
+        $this->actingAs($this->contentOperator, 'admin')->post(
+            route('admin.prompt-modules.versions.publish', [$module, $version]),
+            ['reason' => 'Owner tried production release.'],
+        )->assertForbidden();
+        $this->actingAs($this->contentOperator, 'admin')->post(
+            route('admin.prompt-presets.versions.publish', [$preset, $presetVersion]),
+            ['reason' => 'Owner tried production release.'],
+        )->assertForbidden();
+    }
+
+    public function test_system_prompt_body_and_diff_are_hidden_without_protected_workflow_permission(): void
+    {
+        $this->actingAs($this->contentOperator, 'admin')->get(route('admin.prompt-modules.show', [
+            $this->module,
+            'version_id' => $this->draftVersion->id,
+            'compare_to' => $this->productionVersion->id,
+        ]))->assertOk()
+            ->assertDontSee('PROMPT-SECRET-42')
+            ->assertDontSee('Include evidence identifiers.');
+    }
+
+    public function test_preset_cannot_be_published_without_an_applicable_mandatory_system_module(): void
+    {
+        $this->module->forceFill(['is_mandatory' => true])->save();
+        [$preset, $version] = $this->presetWithDraftVersion('missing-mandatory-module');
+
+        $this->actingAs($this->superAdmin, 'admin')->post(
+            route('admin.prompt-presets.versions.publish', [$preset, $version]),
+            ['reason' => 'Incomplete release.'],
+        )->assertSessionHasErrors('reason');
+
+        $this->assertSame(PromptPresetVersion::STATUS_DRAFT, $version->fresh()->lifecycle_status);
+    }
+
     public function test_prompt_text_is_not_included_in_activity_log_payloads(): void
     {
         $this->actingAs($this->superAdmin, 'admin')->post(
@@ -345,6 +413,7 @@ class AdminPromptModulesTest extends TestCase
     public function test_operator_is_reauthorized_after_a_stale_custom_preset_becomes_system(): void
     {
         [$preset] = $this->presetWithDraftVersion('stale-operator');
+        $preset->forceFill(['owned_by_admin_id' => $this->contentOperator->id])->save();
         $this->app->afterResolving(StorePromptPresetRequest::class, function () use ($preset): void {
             PromptPreset::query()->whereKey($preset->id)->update(['is_system' => true]);
         });
@@ -461,6 +530,7 @@ class AdminPromptModulesTest extends TestCase
     public function test_operator_cannot_write_protected_system_fields(): void
     {
         [$preset] = $this->presetWithDraftVersion('protected-fields');
+        $preset->forceFill(['owned_by_admin_id' => $this->contentOperator->id])->save();
 
         $this->actingAs($this->contentOperator, 'admin')->post(
             route('admin.prompt-presets.versions.store', $preset),

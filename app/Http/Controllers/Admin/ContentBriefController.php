@@ -18,6 +18,7 @@ use App\Models\ContentGenerationRun;
 use App\Models\ContentStrategyVersion;
 use App\Models\Keyword;
 use App\Models\KeywordCluster;
+use App\Models\KnowledgeChunk;
 use App\Models\PromptModuleVersion;
 use App\Models\PromptPresetVersion;
 use Illuminate\Http\RedirectResponse;
@@ -181,6 +182,30 @@ final class ContentBriefController extends Controller
             ->orderBy('failover_priority')
             ->orderBy('id')
             ->get();
+        $validated = $request->validate(['run_q' => ['nullable', 'string', 'max:150']]);
+        $runSearch = trim((string) ($validated['run_q'] ?? ''));
+        $runs = ContentGenerationRun::query()
+            ->where('content_brief_id', $brief->id)
+            ->when($runSearch !== '', function ($query) use ($runSearch): void {
+                $like = '%'.mb_strtolower($runSearch).'%';
+                $query->where(function ($nested) use ($runSearch, $like): void {
+                    if (ctype_digit($runSearch)) {
+                        $nested->orWhereKey((int) $runSearch);
+                    }
+                    $nested->orWhereRaw('LOWER(status) LIKE ?', [$like])
+                        ->orWhereRaw('LOWER(COALESCE(error_message, \'\')) LIKE ?', [$like])
+                        ->orWhereHas('qualityReports', fn ($quality) => $quality->whereRaw('LOWER(CAST(issues AS TEXT)) LIKE ?', [$like]));
+                });
+            })
+            ->latest('id')
+            ->paginate(20, ['*'], 'runs_page')
+            ->withQueryString();
+        $evidenceChunks = KnowledgeChunk::query()
+            ->with('knowledgeBase:id,name,review_status')
+            ->whereHas('knowledgeBase', fn ($query) => $query->where('review_status', 'reviewed'))
+            ->orderByDesc('id')
+            ->limit(100)
+            ->get(['id', 'knowledge_base_id', 'chunk_title', 'section_path']);
 
         return view('admin.content-briefs.show', [
             'pageTitle' => __('admin.content_strategy.generation.title'),
@@ -194,7 +219,9 @@ final class ContentBriefController extends Controller
             'moduleResolutionError' => $moduleResolutionError,
             'models' => $models,
             'selectedModel' => $models->first(),
-            'runs' => ContentGenerationRun::query()->where('content_brief_id', $brief->id)->latest('id')->get(),
+            'runs' => $runs,
+            'runSearch' => $runSearch,
+            'evidenceChunks' => $evidenceChunks,
         ]);
     }
 

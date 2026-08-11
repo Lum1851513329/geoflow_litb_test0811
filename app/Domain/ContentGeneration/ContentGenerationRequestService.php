@@ -2,8 +2,9 @@
 
 namespace App\Domain\ContentGeneration;
 
-use App\Domain\PromptComposition\PromptPresetSelector;
+use App\Domain\PromptComposition\MandatoryPromptModuleGuard;
 use App\Domain\PromptComposition\PromptModuleResolver;
+use App\Domain\PromptComposition\PromptPresetSelector;
 use App\Models\Admin;
 use App\Models\AiModel;
 use App\Models\ContentBlueprintVersion;
@@ -26,11 +27,13 @@ final class ContentGenerationRequestService
     public function __construct(
         private readonly PromptPresetSelector $presetSelector,
         private readonly PromptModuleResolver $moduleResolver,
+        private readonly GenerationEvidenceSnapshotter $evidenceSnapshotter,
+        private readonly MandatoryPromptModuleGuard $mandatoryModules,
     ) {}
 
     /**
-     * @param array{strategy_version_id: int, blueprint_version_id: int, preset_version_id: int, ai_model_id: int, idempotency_key?: string|null} $data
-     * @return array{run: ContentGenerationRun, created: bool}
+     * @param  array{strategy_version_id: int, blueprint_version_id: int, preset_version_id: int, ai_model_id: int, idempotency_key?: string|null}  $data
+     * @return array{run: ContentGenerationRun, created: bool, dispatch_required: bool}
      */
     public function reserve(ContentBrief $brief, array $data, Admin $actor): array
     {
@@ -38,18 +41,26 @@ final class ContentGenerationRequestService
         if ($idempotencyKey === '') {
             $idempotencyKey = 'content-generation-'.Str::uuid();
         }
-        $fingerprint = $this->fingerprint((int) $brief->id, $data);
+        $fingerprint = $this->fingerprint((int) $brief->id, $data, true);
+        $baseFingerprint = $this->fingerprint((int) $brief->id, $data, false);
 
         try {
-            return DB::transaction(function () use ($brief, $data, $actor, $idempotencyKey, $fingerprint): array {
+            return DB::transaction(function () use ($brief, $data, $actor, $idempotencyKey, $fingerprint, $baseFingerprint): array {
                 $lockedBrief = ContentBrief::query()->whereKey($brief->id)->lockForUpdate()->firstOrFail();
                 $existing = ContentGenerationRun::query()
                     ->where('idempotency_key', $idempotencyKey)
                     ->first();
                 if ($existing !== null) {
-                    $this->assertReplayMatches($existing, $actor, $fingerprint);
+                    $this->assertReplayMatches($existing, $actor, $fingerprint, $baseFingerprint);
 
-                    return ['run' => $existing, 'created' => false];
+                    return [
+                        'run' => $existing,
+                        'created' => false,
+                        'dispatch_required' => in_array($existing->status, [
+                            ContentGenerationRun::STATUS_PENDING,
+                            ContentGenerationRun::STATUS_QUEUED,
+                        ], true),
+                    ];
                 }
 
                 $strategy = $lockedBrief->strategyVersions()
@@ -90,10 +101,18 @@ final class ContentGenerationRequestService
                     'compiled_prompt' => null,
                     'status' => ContentGenerationRun::STATUS_PENDING,
                     'idempotency_key' => $idempotencyKey,
+                    'request_fingerprint' => $fingerprint,
                     'created_by_admin_id' => $actor->id,
                 ]);
+                $this->evidenceSnapshotter->snapshot(
+                    $run,
+                    array_values(array_map('intval', (array) ($data['knowledge_chunk_ids'] ?? []))),
+                    array_values((array) ($data['evidence'] ?? [])),
+                    $this->requiredFactIds($blueprint->blueprint),
+                    $actor,
+                );
 
-                return ['run' => $run, 'created' => true];
+                return ['run' => $run, 'created' => true, 'dispatch_required' => true];
             }, 3);
         } catch (UniqueConstraintViolationException $exception) {
             $existing = ContentGenerationRun::query()
@@ -102,10 +121,35 @@ final class ContentGenerationRequestService
             if ($existing === null) {
                 throw $exception;
             }
-            $this->assertReplayMatches($existing, $actor, $fingerprint);
+            $this->assertReplayMatches($existing, $actor, $fingerprint, $baseFingerprint);
 
-            return ['run' => $existing, 'created' => false];
+            return [
+                'run' => $existing,
+                'created' => false,
+                'dispatch_required' => in_array($existing->status, [
+                    ContentGenerationRun::STATUS_PENDING,
+                    ContentGenerationRun::STATUS_QUEUED,
+                ], true),
+            ];
         }
+    }
+
+    /** @param array<string, mixed> $blueprint @return list<string> */
+    private function requiredFactIds(array $blueprint): array
+    {
+        $ids = [];
+        foreach ((array) ($blueprint['sections'] ?? []) as $section) {
+            if (! is_array($section)) {
+                continue;
+            }
+            foreach ((array) ($section['required_fact_ids'] ?? []) as $id) {
+                if (is_string($id) && trim($id) !== '') {
+                    $ids[trim($id)] = true;
+                }
+            }
+        }
+
+        return array_keys($ids);
     }
 
     private function lockAndResolvePresetModules(ContentBrief $brief, int $presetVersionId): PromptPresetVersion
@@ -169,6 +213,7 @@ final class ContentGenerationRequestService
         }
 
         try {
+            $this->mandatoryModules->assertComplete($version, $this->presetSelector->context($brief));
             $this->moduleResolver->resolve($version, $this->presetSelector->context($brief));
         } catch (Throwable $exception) {
             report($exception);
@@ -181,31 +226,45 @@ final class ContentGenerationRequestService
     }
 
     /** @param array{strategy_version_id: int, blueprint_version_id: int, preset_version_id: int, ai_model_id: int} $data */
-    private function fingerprint(int $briefId, array $data): string
+    private function fingerprint(int $briefId, array $data, bool $includeEvidence): string
     {
-        return hash('sha256', json_encode([
+        $payload = [
             'content_brief_id' => $briefId,
             'strategy_version_id' => (int) $data['strategy_version_id'],
             'blueprint_version_id' => (int) $data['blueprint_version_id'],
             'preset_version_id' => (int) $data['preset_version_id'],
             'ai_model_id' => (int) $data['ai_model_id'],
-        ], JSON_THROW_ON_ERROR));
+        ];
+        if ($includeEvidence) {
+            $knowledgeIds = array_values(array_unique(array_map('intval', (array) ($data['knowledge_chunk_ids'] ?? []))));
+            sort($knowledgeIds, SORT_NUMERIC);
+            $payload['knowledge_chunk_ids'] = $knowledgeIds;
+            $payload['evidence'] = array_values((array) ($data['evidence'] ?? []));
+        }
+
+        return hash('sha256', json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR));
     }
 
-    private function assertReplayMatches(ContentGenerationRun $existing, Admin $actor, string $fingerprint): void
+    private function assertReplayMatches(ContentGenerationRun $existing, Admin $actor, string $fingerprint, string $baseFingerprint): void
     {
         if ((int) $existing->created_by_admin_id !== (int) $actor->id) {
             throw ValidationException::withMessages([
                 'idempotency_key' => __('admin.content_strategy.validation.idempotency_actor_conflict'),
             ]);
         }
-        $existingFingerprint = $this->fingerprint((int) $existing->content_brief_id, [
-            'strategy_version_id' => (int) $existing->strategy_version_id,
-            'blueprint_version_id' => (int) $existing->blueprint_version_id,
-            'preset_version_id' => (int) $existing->preset_version_id,
-            'ai_model_id' => (int) $existing->ai_model_id,
-        ]);
-        if (! hash_equals($existingFingerprint, $fingerprint)) {
+        if (is_string($existing->request_fingerprint) && $existing->request_fingerprint !== '') {
+            $existingFingerprint = $existing->request_fingerprint;
+            $expectedFingerprint = $fingerprint;
+        } else {
+            $existingFingerprint = $this->fingerprint((int) $existing->content_brief_id, [
+                'strategy_version_id' => (int) $existing->strategy_version_id,
+                'blueprint_version_id' => (int) $existing->blueprint_version_id,
+                'preset_version_id' => (int) $existing->preset_version_id,
+                'ai_model_id' => (int) $existing->ai_model_id,
+            ], false);
+            $expectedFingerprint = $baseFingerprint;
+        }
+        if (! hash_equals($existingFingerprint, $expectedFingerprint)) {
             throw ValidationException::withMessages([
                 'idempotency_key' => __('admin.content_strategy.validation.idempotency_configuration_conflict'),
             ]);

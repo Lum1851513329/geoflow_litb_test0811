@@ -126,6 +126,9 @@ return [
     // 正文生成默认最大输出 token 数；当 AI 模型未单独配置 max_tokens 时使用此兜底值，
     // 避免依赖各服务商较小的默认上限（常见 4K）导致长文被截断。
     'content_max_tokens' => max(256, (int) env('GEOFLOW_CONTENT_MAX_TOKENS', 8192)),
+    // Prompt/input and completion/output budgets are distinct. The safety margin covers provider framing and tokenizer drift.
+    'content_context_window_tokens' => max(4096, (int) env('GEOFLOW_CONTENT_CONTEXT_WINDOW_TOKENS', 32768)),
+    'content_context_safety_margin_tokens' => max(0, (int) env('GEOFLOW_CONTENT_CONTEXT_SAFETY_MARGIN_TOKENS', 1024)),
     // 内容策略、模块化 Prompt 与质量门禁均为渐进式能力；生产默认关闭，旧 Task/Prompt/Worker 链路不受影响。
     'content_strategy_enabled' => filter_var(env('GEOFLOW_CONTENT_STRATEGY_ENABLED', false), FILTER_VALIDATE_BOOLEAN),
     'modular_prompts_enabled' => filter_var(env('GEOFLOW_MODULAR_PROMPTS_ENABLED', false), FILTER_VALIDATE_BOOLEAN),

@@ -2,6 +2,7 @@
 
 namespace App\Domain\ContentGeneration;
 
+use App\Domain\PromptComposition\MandatoryPromptModuleGuard;
 use App\Domain\PromptComposition\PromptCompiler;
 use App\Domain\PromptComposition\PromptContext;
 use App\Domain\PromptComposition\PromptModuleResolver;
@@ -20,6 +21,7 @@ use App\Models\ContentStrategyVersion;
 use App\Models\PromptPresetVersion;
 use App\Services\GeoFlow\ArticleContentGenerationService;
 use Illuminate\Database\QueryException;
+use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Laravel\Ai\Responses\AgentResponse;
@@ -42,6 +44,7 @@ final class ContentGenerationCoordinator
 
     public function __construct(
         private readonly PromptModuleResolver $moduleResolver,
+        private readonly MandatoryPromptModuleGuard $mandatoryModules,
         private readonly PromptCompiler $promptCompiler,
         private readonly ArticleContentGenerationService $generator,
         private readonly DeterministicQualityGate $deterministicQualityGate,
@@ -77,13 +80,23 @@ final class ContentGenerationCoordinator
             return $this->finish($run, ContentGenerationRun::STATUS_MANUAL_REVIEW_REQUIRED, $claim);
         }
 
-        if (($requirements['evidence_required'] ?? false) === true && (array) ($requirements['evidence'] ?? []) === []) {
+        $requiredFactIds = [];
+        foreach ((array) ($blueprint['sections'] ?? []) as $section) {
+            if (is_array($section)) {
+                $requiredFactIds = array_merge($requiredFactIds, array_filter((array) ($section['required_fact_ids'] ?? []), 'is_string'));
+            }
+        }
+        $missingFactIds = array_values(array_diff(array_unique($requiredFactIds), (array) ($requirements['evidence_fact_ids'] ?? [])));
+        if ((($requirements['evidence_required'] ?? false) === true && (array) ($requirements['evidence'] ?? []) === [])
+            || $missingFactIds !== []) {
             $issue = [[
-                'code' => 'needs_evidence',
+                'code' => $missingFactIds === [] ? 'needs_evidence' : 'required_fact_uncovered',
                 'severity' => 'error',
                 'section_key' => null,
-                'message' => 'The selected prompt policy requires evidence, but the run has no evidence snapshot.',
-                'repair_instruction' => 'Attach at least one reviewed evidence source and create a new generation run.',
+                'message' => $missingFactIds === []
+                    ? 'The selected prompt policy requires evidence, but the run has no evidence snapshot.'
+                    : 'Required facts lack reviewed evidence snapshots: '.implode(', ', $missingFactIds).'.',
+                'repair_instruction' => 'Attach reviewed evidence for every required fact and create a new generation run.',
             ]];
             $report = $this->qualityReport($run, null, 'preflight', ContentQualityReport::STATUS_NEEDS_EVIDENCE, false, 0, null, null, $issue, [
                 'Attach reviewed evidence before generation.',
@@ -95,13 +108,16 @@ final class ContentGenerationCoordinator
             return $this->finish($run, ContentGenerationRun::STATUS_NEEDS_EVIDENCE, $claim, $issue[0]['message']);
         }
 
+        [$initialPrompt, $initialSecrets] = $this->modelPayload($run);
         $initial = $prepared['initial_step'] === null
             ? $this->modelInteraction(
                 $run,
                 ContentGenerationRunStep::TYPE_INITIAL_GENERATION,
-                (string) $run->compiled_prompt,
+                $initialPrompt,
                 ['context_digest' => $run->variables_snapshot['context_digest'] ?? null],
                 $claim,
+                (string) $run->compiled_prompt,
+                $initialSecrets,
             )
             : [
                 'ok' => true,
@@ -235,8 +251,10 @@ final class ContentGenerationCoordinator
                 'language_code' => $brief->language_code,
                 'market_code' => $brief->market_code,
             ];
+            $this->mandatoryModules->assertComplete($preset, $selectionContext);
             $modules = $this->moduleResolver->resolve($preset, $selectionContext);
             $generationPolicy = is_array($preset->generation_policy) ? $preset->generation_policy : [];
+            $budgets = $this->modelBudgets($model, $generationPolicy);
             $context = new PromptContext(
                 strategy: $strategy->strategy,
                 blueprint: $blueprint->blueprint,
@@ -246,7 +264,7 @@ final class ContentGenerationCoordinator
                 language: (string) $brief->language_code,
                 market: (string) $brief->market_code,
                 variables: $this->contextVariables($brief, $modules, $generationPolicy),
-                modelTokenBudget: $this->modelTokenBudget($model, $generationPolicy),
+                modelTokenBudget: $budgets['input_token_budget'],
             );
             $compiled = $this->promptCompiler->compile($modules, $context);
 
@@ -269,10 +287,18 @@ final class ContentGenerationCoordinator
                     'language_code' => (string) $brief->language_code,
                     'primary_keyword' => $brief->primaryKeyword?->keyword,
                     'required_mentions' => $brief->required_mentions ?? [],
+                    'prohibited_information' => $brief->prohibited_information ?? [],
+                    'market_code' => (string) $brief->market_code,
+                    'target_length' => (int) ($blueprint->blueprint['target_length'] ?? 0),
+                    'evidence_fact_ids' => $run->evidence->pluck('evidence_key')->values()->all(),
                 ],
             );
             $run->forceFill([
                 'compiled_prompt' => $compiled->text,
+                'encrypted_model_payload' => Crypt::encryptString(json_encode([
+                    'prompt' => $compiled->modelPayload,
+                    'sensitive_values' => $compiled->sensitiveValues,
+                ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR)),
                 'variables_snapshot' => [
                     'resolved_variables' => $compiled->resolvedVariables,
                     'conflict_decisions' => $compiled->conflictDecisions,
@@ -280,7 +306,7 @@ final class ContentGenerationCoordinator
                     'context_digest' => $compiled->contextDigest,
                     'requirements' => $requirements,
                 ],
-                'model_snapshot' => $this->modelSnapshot($model),
+                'model_snapshot' => $this->modelSnapshot($model, $budgets),
                 'generation_parameters' => $generationPolicy,
                 'status' => ContentGenerationRun::STATUS_COMPILING,
                 'started_at' => $run->started_at ?? now(),
@@ -421,16 +447,30 @@ final class ContentGenerationCoordinator
     }
 
     /** @param array<string, mixed> $policy */
-    private function modelTokenBudget(AiModel $model, array $policy): int
+    /** @param array<string, mixed> $policy @return array{context_window_tokens: int, max_output_tokens: int, input_token_budget: int, safety_margin_tokens: int} */
+    private function modelBudgets(AiModel $model, array $policy): array
     {
-        $modelBudget = $this->generator->maxTokens($model);
-        $policyBudget = (int) ($policy['max_tokens'] ?? 0);
+        $configuredOutput = $this->generator->maxTokens($model);
+        $policyOutput = (int) ($policy['max_tokens'] ?? 0);
+        $maxOutput = $policyOutput > 0 ? min($configuredOutput, $policyOutput) : $configuredOutput;
+        $contextWindow = max(1, (int) ($model->context_window_tokens ?: config('geoflow.content_context_window_tokens', 32768)));
+        $safetyMargin = max(0, (int) config('geoflow.content_context_safety_margin_tokens', 1024));
+        $inputBudget = max(1, $contextWindow - $maxOutput - $safetyMargin);
+        $policyInput = (int) ($policy['max_input_tokens'] ?? 0);
+        if ($policyInput > 0) {
+            $inputBudget = min($inputBudget, $policyInput);
+        }
 
-        return $policyBudget > 0 ? min($modelBudget, $policyBudget) : $modelBudget;
+        return [
+            'context_window_tokens' => $contextWindow,
+            'max_output_tokens' => $maxOutput,
+            'input_token_budget' => $inputBudget,
+            'safety_margin_tokens' => $safetyMargin,
+        ];
     }
 
-    /** @return array<string, mixed> */
-    private function modelSnapshot(AiModel $model): array
+    /** @param array<string, int> $budgets @return array<string, mixed> */
+    private function modelSnapshot(AiModel $model, array $budgets): array
     {
         return [
             'id' => (int) $model->id,
@@ -439,7 +479,8 @@ final class ContentGenerationCoordinator
             'model_id' => (string) $model->model_id,
             'model_type' => $model->model_type,
             'api_url' => (string) $model->api_url,
-            'max_tokens' => $this->generator->maxTokens($model),
+            'max_tokens' => $budgets['max_output_tokens'],
+            ...$budgets,
             'configuration_fingerprint' => $this->modelFingerprint($model),
         ];
     }
@@ -454,6 +495,7 @@ final class ContentGenerationCoordinator
             'model_type' => $model->model_type,
             'status' => $model->status,
             'max_tokens' => (int) $model->max_tokens,
+            'context_window_tokens' => (int) $model->context_window_tokens,
             'daily_limit' => (int) $model->daily_limit,
             'failover_priority' => (int) $model->failover_priority,
         ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR));
@@ -464,10 +506,17 @@ final class ContentGenerationCoordinator
      * @param  array{token: string, version: int}  $claim
      * @return array{ok: bool, lost: bool, fatal: bool, output: string, step: ContentGenerationRunStep|null, exception: Throwable}
      */
-    private function modelInteraction(ContentGenerationRun $run, string $type, string $prompt, array $inputSnapshot, array $claim): array
-    {
+    private function modelInteraction(
+        ContentGenerationRun $run,
+        string $type,
+        string $prompt,
+        array $inputSnapshot,
+        array $claim,
+        ?string $auditPrompt = null,
+        array $sensitiveValues = [],
+    ): array {
         try {
-            $step = DB::transaction(function () use ($run, $type, $prompt, $inputSnapshot, $claim): ?ContentGenerationRunStep {
+            $step = DB::transaction(function () use ($run, $type, $prompt, $auditPrompt, $inputSnapshot, $claim): ?ContentGenerationRunStep {
                 $locked = $this->lockClaim((int) $run->id, $claim);
                 if ($locked === null) {
                     return null;
@@ -480,7 +529,7 @@ final class ContentGenerationCoordinator
                         ->where('content_generation_run_id', $run->id)->max('sequence')) + 1,
                     'step_type' => $type,
                     'status' => ContentGenerationRunStep::STATUS_RUNNING,
-                    'prompt' => $prompt,
+                    'prompt' => $auditPrompt ?? $prompt,
                     'input_snapshot' => $inputSnapshot,
                     'started_at' => now(),
                 ]);
@@ -510,18 +559,22 @@ final class ContentGenerationCoordinator
 
             return ['ok' => true, 'lost' => false, 'fatal' => false, 'output' => $output, 'step' => $step->fresh() ?? $step, 'exception' => new RuntimeException('')];
         } catch (Throwable $exception) {
-            $message = $this->sanitize($exception->getMessage());
+            $message = $this->sanitize($exception->getMessage(), $sensitiveValues);
+            $fatal = $exception instanceof RuntimeException
+                && $exception->getMessage() === 'Selected AI model configuration changed after run preparation.';
             $updated = DB::transaction(function () use ($run, $step, $claim, $message): bool {
                 $locked = $this->lockClaim((int) $run->id, $claim);
                 if ($locked === null) {
                     return false;
                 }
-                ContentGenerationRunStep::query()->whereKey($step->id)->update([
-                    'status' => ContentGenerationRunStep::STATUS_FAILED,
-                    'error_message' => $message,
-                    'completed_at' => now(),
-                    'updated_at' => now(),
-                ]);
+                ContentGenerationRunStep::query()->whereKey($step->id)
+                    ->whereIn('status', [ContentGenerationRunStep::STATUS_QUEUED, ContentGenerationRunStep::STATUS_RUNNING])
+                    ->update([
+                        'status' => ContentGenerationRunStep::STATUS_FAILED,
+                        'error_message' => $message,
+                        'completed_at' => now(),
+                        'updated_at' => now(),
+                    ]);
                 $this->extendLease($locked);
 
                 return true;
@@ -530,11 +583,10 @@ final class ContentGenerationCoordinator
             return [
                 'ok' => false,
                 'lost' => ! $updated,
-                'fatal' => $exception instanceof RuntimeException
-                    && $exception->getMessage() === 'Selected AI model configuration changed after run preparation.',
+                'fatal' => $fatal,
                 'output' => '',
                 'step' => $step->fresh() ?? $step,
-                'exception' => $exception,
+                'exception' => new RuntimeException($message, (int) $exception->getCode(), $exception),
             ];
         }
     }
@@ -917,12 +969,14 @@ final class ContentGenerationCoordinator
                 'lease_expires_at' => null,
             ])->save();
             if ($step !== null) {
-                ContentGenerationRunStep::query()->whereKey($step->id)->update([
-                    'status' => ContentGenerationRunStep::STATUS_FAILED,
-                    'error_message' => $message,
-                    'completed_at' => now(),
-                    'updated_at' => now(),
-                ]);
+                ContentGenerationRunStep::query()->whereKey($step->id)
+                    ->whereIn('status', [ContentGenerationRunStep::STATUS_QUEUED, ContentGenerationRunStep::STATUS_RUNNING])
+                    ->update([
+                        'status' => ContentGenerationRunStep::STATUS_FAILED,
+                        'error_message' => $message,
+                        'completed_at' => now(),
+                        'updated_at' => now(),
+                    ]);
             }
             $transitioned = true;
 
@@ -980,17 +1034,13 @@ final class ContentGenerationCoordinator
     /** @param array{token: string, version: int} $claim */
     private function markStepParseFailed(ContentGenerationRun $run, ContentGenerationRunStep $step, Throwable $exception, array $claim): bool
     {
-        return DB::transaction(function () use ($run, $step, $exception, $claim): bool {
+        return DB::transaction(function () use ($run, $claim): bool {
             $locked = $this->lockClaim((int) $run->id, $claim);
             if ($locked === null) {
                 return false;
             }
-            ContentGenerationRunStep::query()->whereKey($step->id)->update([
-                'status' => ContentGenerationRunStep::STATUS_FAILED,
-                'error_message' => $this->sanitize($exception->getMessage()),
-                'completed_at' => now(),
-                'updated_at' => now(),
-            ]);
+            // Provider output and its completed step are immutable. The parse failure is
+            // represented by the retry/final quality report instead of rewriting history.
             $this->extendLease($locked);
 
             return true;
@@ -1006,13 +1056,36 @@ final class ContentGenerationCoordinator
         }
     }
 
-    private function sanitize(string $message): string
+    /** @param list<string> $sensitiveValues */
+    private function sanitize(string $message, array $sensitiveValues = []): string
     {
+        foreach ($sensitiveValues as $value) {
+            if ($value !== '') {
+                $message = str_replace($value, '[REDACTED]', $message);
+            }
+        }
         $message = preg_replace('/(authorization\s*:\s*bearer\s+)[^\s,;]+/iu', '$1[REDACTED]', $message) ?? $message;
         $message = preg_replace('/((?:api[_-]?key|access[_-]?token|secret)\s*[=:]\s*)[^\s,;]+/iu', '$1[REDACTED]', $message) ?? $message;
         $message = preg_replace('/\bsk-[A-Za-z0-9_-]+\b/u', '[REDACTED]', $message) ?? $message;
 
         return mb_substr(trim($message), 0, 2000);
+    }
+
+    /** @return array{0: string, 1: list<string>} */
+    private function modelPayload(ContentGenerationRun $run): array
+    {
+        if ($run->encrypted_model_payload === null) {
+            return [(string) $run->compiled_prompt, []];
+        }
+        $payload = json_decode(Crypt::decryptString((string) $run->encrypted_model_payload), true, 512, JSON_THROW_ON_ERROR);
+        if (! is_array($payload) || ! is_string($payload['prompt'] ?? null)) {
+            throw new RuntimeException('The encrypted model payload is invalid.');
+        }
+
+        return [
+            $payload['prompt'],
+            array_values(array_filter((array) ($payload['sensitive_values'] ?? []), 'is_string')),
+        ];
     }
 
     private function json(mixed $value): string

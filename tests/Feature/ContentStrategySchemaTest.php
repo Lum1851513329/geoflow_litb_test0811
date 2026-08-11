@@ -6,7 +6,10 @@ use App\Models\AiModel;
 use App\Models\ContentBlueprintVersion;
 use App\Models\ContentBrief;
 use App\Models\ContentGenerationRun;
+use App\Models\ContentGenerationRunEvidence;
+use App\Models\ContentGenerationRunModule;
 use App\Models\ContentGenerationRunStep;
+use App\Models\ContentQualityReport;
 use App\Models\ContentStrategyVersion;
 use App\Models\PromptModule;
 use App\Models\PromptModuleVersion;
@@ -364,6 +367,69 @@ class ContentStrategySchemaTest extends TestCase
         ]));
 
         $this->assertTrue($otherBlueprint->contentBrief->is($otherBrief));
+    }
+
+    public function test_database_guards_make_generation_audit_rows_and_published_bindings_append_only(): void
+    {
+        $pipeline = $this->createPipeline('append-only');
+        $binding = PromptPresetModuleVersion::query()->create([
+            'prompt_preset_version_id' => $pipeline['preset_version']->id,
+            'prompt_module_version_id' => $pipeline['module_version']->id,
+            'sort_order' => 1,
+        ]);
+        $module = ContentGenerationRunModule::query()->create([
+            'content_generation_run_id' => $pipeline['run']->id,
+            'prompt_module_version_id' => $pipeline['module_version']->id,
+            'sort_order' => 1,
+            'module_snapshot' => ['module_key' => 'append-only'],
+        ]);
+        $evidence = ContentGenerationRunEvidence::query()->create([
+            'content_generation_run_id' => $pipeline['run']->id,
+            'evidence_key' => 'fact-one',
+            'evidence_snapshot' => ['content' => 'Reviewed fact.'],
+        ]);
+        $step = ContentGenerationRunStep::query()->create([
+            'content_generation_run_id' => $pipeline['run']->id,
+            'sequence' => 1,
+            'step_type' => ContentGenerationRunStep::TYPE_INITIAL_GENERATION,
+            'status' => ContentGenerationRunStep::STATUS_RUNNING,
+            'prompt' => 'Safe audit prompt.',
+            'input_snapshot' => ['digest' => 'one'],
+        ]);
+        $step->update(['status' => ContentGenerationRunStep::STATUS_COMPLETED, 'output' => 'Final output.']);
+        $quality = ContentQualityReport::query()->create([
+            'content_generation_run_id' => $pipeline['run']->id,
+            'content_generation_run_step_id' => $step->id,
+            'report_type' => 'deterministic',
+            'status' => ContentQualityReport::STATUS_PASSED,
+            'passed' => true,
+            'issues' => [],
+        ]);
+        $pipeline['run']->update(['status' => ContentGenerationRun::STATUS_COMPLETED, 'raw_output' => 'Final output.']);
+
+        $this->assertDatabaseRejects(fn () => $binding->update(['sort_order' => 2]));
+        $this->assertDatabaseRejects(fn () => $binding->delete());
+        $this->assertDatabaseRejects(fn () => $module->update(['is_required' => true]));
+        $this->assertDatabaseRejects(fn () => $module->delete());
+        $this->assertDatabaseRejects(fn () => $evidence->update(['is_required' => true]));
+        $this->assertDatabaseRejects(fn () => $evidence->delete());
+        $this->assertDatabaseRejects(fn () => $step->update(['output' => 'Rewritten output.']));
+        $this->assertDatabaseRejects(fn () => $step->delete());
+        $this->assertDatabaseRejects(fn () => $quality->update(['passed' => false]));
+        $this->assertDatabaseRejects(fn () => $quality->delete());
+        $this->assertDatabaseRejects(fn () => $pipeline['run']->update(['raw_output' => 'Rewritten terminal output.']));
+    }
+
+    public function test_audit_guard_migration_rollback_restores_the_previous_run_snapshot_guard(): void
+    {
+        $pipeline = $this->createPipeline('audit-rollback');
+        $migration = require database_path('migrations/2026_08_11_000100_enforce_content_generation_audit_immutability.php');
+
+        $migration->down();
+        $this->assertDatabaseRejects(fn () => ContentGenerationRun::query()->whereKey($pipeline['run'])->update(['compiled_prompt' => 'Mutated after rollback.']));
+
+        $migration->up();
+        $this->assertDatabaseRejects(fn () => ContentGenerationRun::query()->whereKey($pipeline['run'])->update(['compiled_prompt' => 'Mutated after reapply.']));
     }
 
     /** @return array{brief: ContentBrief, strategy: ContentStrategyVersion, blueprint: ContentBlueprintVersion, module: PromptModule, module_version: PromptModuleVersion, preset: PromptPreset, preset_version: PromptPresetVersion, ai_model: AiModel, run: ContentGenerationRun} */

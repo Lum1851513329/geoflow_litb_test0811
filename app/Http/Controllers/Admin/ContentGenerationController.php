@@ -2,8 +2,8 @@
 
 namespace App\Http\Controllers\Admin;
 
-use App\Domain\ContentGeneration\GenerationAdoptionService;
 use App\Domain\ContentGeneration\ContentGenerationRequestService;
+use App\Domain\ContentGeneration\GenerationAdoptionService;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Admin\AdoptContentGenerationRequest;
 use App\Http\Requests\Admin\RequestContentGenerationRequest;
@@ -31,7 +31,7 @@ final class ContentGenerationController extends Controller
         $data = $request->validated();
         $reservation = $this->generationRequests->reserve($brief, $data, $this->actor($request));
         $run = $reservation['run'];
-        if ($reservation['created']) {
+        if ($reservation['dispatch_required']) {
             GenerateStrategyContent::dispatch((int) $run->id);
         }
 
@@ -47,6 +47,7 @@ final class ContentGenerationController extends Controller
             'contentBrief', 'strategyVersion', 'blueprintVersion', 'presetVersion.preset', 'aiModel', 'article',
             'modules.promptModuleVersion.module', 'evidence', 'qualityReports', 'steps',
         ]);
+
         return view('admin.content-generations.show', [
             'pageTitle' => __('admin.content_strategy.run.title', ['id' => $run->id]),
             'activeMenu' => 'content_strategy',

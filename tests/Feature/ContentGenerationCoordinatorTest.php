@@ -21,6 +21,7 @@ use App\Models\PromptPresetModuleVersion;
 use App\Models\PromptPresetVersion;
 use App\Services\GeoFlow\ArticleContentGenerationService;
 use Closure;
+use Database\Seeders\PromptCompositionSeeder;
 use Illuminate\Database\QueryException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
@@ -94,10 +95,16 @@ class ContentGenerationCoordinatorTest extends TestCase
         $fresh = $run->fresh();
         $this->assertSame(ContentGenerationRun::STATUS_READY_FOR_REVIEW, $fresh->status);
         $this->assertNotNull($fresh->compiled_prompt);
+        $this->assertStringNotContainsString('secret-campaign-value', (string) $fresh->compiled_prompt);
+        $this->assertStringNotContainsString('secret-campaign-value', (string) $fresh->encrypted_model_payload);
+        $this->assertStringContainsString('secret-campaign-value', $this->fakeGenerator->prompts[0]);
         $this->assertSame(64, strlen((string) ($fresh->variables_snapshot['context_digest'] ?? '')));
         $this->assertStringNotContainsString('secret-campaign-value', json_encode($fresh->variables_snapshot, JSON_THROW_ON_ERROR));
         $this->assertStringContainsString('[REDACTED]', json_encode($fresh->variables_snapshot, JSON_THROW_ON_ERROR));
         $this->assertSame('fake-model', $fresh->model_snapshot['model_id']);
+        $this->assertSame(32768, $fresh->model_snapshot['context_window_tokens']);
+        $this->assertSame(4096, $fresh->model_snapshot['max_output_tokens']);
+        $this->assertSame(27648, $fresh->model_snapshot['input_token_budget']);
         $this->assertStringNotContainsString('secret-never-snapshot', json_encode($fresh->model_snapshot, JSON_THROW_ON_ERROR));
         $this->assertCount(1, $fresh->modules()->get());
         $this->assertCount(1, $fresh->evidence()->get());
@@ -106,6 +113,10 @@ class ContentGenerationCoordinatorTest extends TestCase
             ContentGenerationRunStep::TYPE_INITIAL_GENERATION,
             ContentGenerationRunStep::TYPE_TARGETED_REVISION,
         ])->get());
+        $this->assertStringNotContainsString(
+            'secret-campaign-value',
+            $fresh->steps()->pluck('prompt')->implode("\n"),
+        );
         $this->assertSame($this->substantiveArticle(), $fresh->raw_output);
         $this->assertSame('## Fit\nToo thin.', $fresh->steps()
             ->where('step_type', ContentGenerationRunStep::TYPE_INITIAL_GENERATION)
@@ -139,6 +150,40 @@ class ContentGenerationCoordinatorTest extends TestCase
         $this->assertSame($run->idempotency_key, $job->uniqueId());
         $this->assertSame(0, $job->tries);
         $this->assertSame(3, $job->maxExceptions);
+    }
+
+    public function test_default_seeded_preset_reaches_review_with_real_evidence(): void
+    {
+        $base = $this->pendingRun();
+        $this->seed(PromptCompositionSeeder::class);
+        $preset = PromptPreset::query()->where('preset_key', 'legacy_geo_trust_en')->sole()->currentVersion()->sole();
+        $run = ContentGenerationRun::forceCreate([
+            'content_brief_id' => $base->content_brief_id,
+            'strategy_version_id' => $base->strategy_version_id,
+            'blueprint_version_id' => $base->blueprint_version_id,
+            'preset_version_id' => $preset->id,
+            'ai_model_id' => $base->ai_model_id,
+            'compiled_prompt' => null,
+            'status' => ContentGenerationRun::STATUS_PENDING,
+            'idempotency_key' => 'seeded-evidence-happy-path',
+        ]);
+        $run->evidence()->create([
+            'evidence_key' => 'fit-source-reviewed',
+            'evidence_snapshot' => [
+                'fact_id' => 'fit-source-reviewed',
+                'source_type' => 'explicit',
+                'content' => 'Reviewed evidence says to leave a thumb width ahead of the longest toe.',
+                'reviewed_by_admin_id' => 1,
+            ],
+            'is_required' => true,
+        ]);
+        $this->fakeGenerator->queue($this->substantiveArticle(), $this->semanticPass());
+
+        $fresh = $this->coordinator->generate($run)->fresh();
+
+        $this->assertSame(ContentGenerationRun::STATUS_READY_FOR_REVIEW, $fresh->status);
+        $this->assertSame(7, $fresh->modules()->count());
+        $this->assertStringContainsString('Reviewed evidence says to leave a thumb width', $this->fakeGenerator->prompts[0]);
     }
 
     public function test_disabled_pipeline_releases_are_not_subject_to_a_retry_deadline(): void
@@ -198,7 +243,7 @@ class ContentGenerationCoordinatorTest extends TestCase
     {
         Event::fake();
         $this->fakeGenerator->queue(new RuntimeException(
-            'Provider rejected Authorization: Bearer sk-live-secret and api_key=private-value',
+            'Provider echoed secret-campaign-value then rejected Authorization: Bearer sk-live-secret and api_key=private-value',
         ));
 
         $run = $this->coordinator->generate($this->pendingRun(withEvidence: true))->fresh();
@@ -206,6 +251,8 @@ class ContentGenerationCoordinatorTest extends TestCase
         $this->assertSame(ContentGenerationRun::STATUS_FAILED, $run->status);
         $this->assertStringNotContainsString('sk-live-secret', (string) $run->error_message);
         $this->assertStringNotContainsString('private-value', (string) $run->error_message);
+        $this->assertStringNotContainsString('secret-campaign-value', (string) $run->error_message);
+        $this->assertStringNotContainsString('secret-campaign-value', (string) $run->steps()->sole()->error_message);
         $this->assertSame(ContentGenerationRunStep::STATUS_FAILED, $run->steps()->sole()->status);
         Event::assertDispatched(ContentGenerationFailed::class, fn ($event): bool => $event->runId === $run->id);
     }
@@ -239,13 +286,16 @@ class ContentGenerationCoordinatorTest extends TestCase
 
     public function test_required_evidence_uses_effective_post_budget_evidence(): void
     {
-        $run = $this->pendingRun(withEvidence: true, evidenceRequired: true);
-        $evidence = $run->evidence()->sole();
-        $evidence->forceFill(['evidence_snapshot' => [
-            'content' => str_repeat('low relevance background material ', 400),
-            'relevance' => 0.1,
-        ]])->save();
-        $run->aiModel()->update(['max_tokens' => 3000]);
+        $run = $this->pendingRun(evidenceRequired: true);
+        $run->evidence()->create([
+            'evidence_key' => 'low-relevance-source',
+            'is_required' => true,
+            'evidence_snapshot' => [
+                'content' => str_repeat('low relevance background material ', 400),
+                'relevance' => 0.1,
+            ],
+        ]);
+        $run->aiModel()->update(['max_tokens' => 2000, 'context_window_tokens' => 5000]);
 
         $fresh = $this->coordinator->generate($run)->fresh();
 
@@ -286,7 +336,7 @@ class ContentGenerationCoordinatorTest extends TestCase
     {
         [$run, $initialStep] = $this->runInterruptedAfterInitialResponse();
         $run->steps()->create([
-            'sequence' => 2,
+            'sequence' => $initialStep->sequence + 1,
             'step_type' => ContentGenerationRunStep::TYPE_SEMANTIC_QUALITY,
             'status' => ContentGenerationRunStep::STATUS_COMPLETED,
             'prompt' => 'durable semantic prompt',
@@ -310,7 +360,7 @@ class ContentGenerationCoordinatorTest extends TestCase
         [$run, $initialStep] = $this->runInterruptedAfterInitialResponse();
         $run->steps()->createMany([
             [
-                'sequence' => 2,
+                'sequence' => $initialStep->sequence + 1,
                 'step_type' => ContentGenerationRunStep::TYPE_SEMANTIC_QUALITY,
                 'status' => ContentGenerationRunStep::STATUS_FAILED,
                 'prompt' => 'semantic attempt one',
@@ -320,7 +370,7 @@ class ContentGenerationCoordinatorTest extends TestCase
                 'completed_at' => now(),
             ],
             [
-                'sequence' => 3,
+                'sequence' => $initialStep->sequence + 2,
                 'step_type' => ContentGenerationRunStep::TYPE_SEMANTIC_QUALITY,
                 'status' => ContentGenerationRunStep::STATUS_COMPLETED,
                 'prompt' => 'semantic attempt two',
@@ -790,14 +840,17 @@ class ContentGenerationCoordinatorTest extends TestCase
         $run = $this->pendingRun(withEvidence: true);
         $this->fakeGenerator->queue(new RuntimeException('interrupted before initial response persisted'));
         $failed = $this->coordinator->generate($run)->fresh();
-        $initialStep = $failed->steps()->where('step_type', ContentGenerationRunStep::TYPE_INITIAL_GENERATION)->sole();
         $article = $this->substantiveArticle();
-        $initialStep->forceFill([
+        $initialStep = $failed->steps()->create([
+            'sequence' => ((int) $failed->steps()->max('sequence')) + 1,
+            'step_type' => ContentGenerationRunStep::TYPE_INITIAL_GENERATION,
             'status' => ContentGenerationRunStep::STATUS_COMPLETED,
+            'prompt' => 'durable initial prompt',
             'output' => $article,
-            'error_message' => null,
+            'input_snapshot' => ['context_digest' => $failed->variables_snapshot['context_digest'] ?? null],
+            'started_at' => now(),
             'completed_at' => now(),
-        ])->save();
+        ]);
         $failed->forceFill([
             'status' => ContentGenerationRun::STATUS_GENERATING,
             'raw_output' => $article,

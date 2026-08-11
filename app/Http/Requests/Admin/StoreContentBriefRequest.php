@@ -24,7 +24,7 @@ final class StoreContentBriefRequest extends FormRequest
         return [
             'topic' => ['required', 'string', 'max:300'],
             'market_code' => ['required', 'string', 'max:10', 'regex:/^[A-Za-z0-9_-]+$/'],
-            'language_code' => ['required', 'string', 'max:10', 'regex:/^[A-Za-z]{2,3}(?:[-_][A-Za-z]{2,4})?$/'],
+            'language_code' => ['required', 'string', 'max:35', 'regex:/^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{1,8})*$/'],
             'audience' => ['required', 'string', 'max:5000'],
             'core_question' => ['required', 'string', 'max:5000'],
             'business_goal' => ['required', 'string', 'max:5000'],
@@ -63,7 +63,7 @@ final class StoreContentBriefRequest extends FormRequest
     {
         $this->merge([
             'market_code' => strtoupper(trim((string) $this->input('market_code'))),
-            'language_code' => str_replace('_', '-', trim((string) $this->input('language_code'))),
+            'language_code' => $this->canonicalLanguageTag((string) $this->input('language_code')),
             'required_mentions' => $this->lines($this->input('required_mentions')),
             'prohibited_information' => $this->lines($this->input('prohibited_information')),
             'reference_urls' => $this->lines($this->input('reference_urls')),
@@ -84,5 +84,24 @@ final class StoreContentBriefRequest extends FormRequest
             preg_split('/\R/u', (string) $value) ?: [],
             static fn (string $item): bool => trim($item) !== '',
         ));
+    }
+
+    private function canonicalLanguageTag(string $value): string
+    {
+        $parts = explode('-', str_replace('_', '-', trim($value)));
+        foreach ($parts as $index => &$part) {
+            if ($index === 0) {
+                $part = strtolower($part);
+            } elseif (strlen($part) === 4 && ctype_alpha($part)) {
+                $part = ucfirst(strtolower($part));
+            } elseif ((strlen($part) === 2 && ctype_alpha($part)) || (strlen($part) === 3 && ctype_digit($part))) {
+                $part = strtoupper($part);
+            } else {
+                $part = strtolower($part);
+            }
+        }
+        unset($part);
+
+        return implode('-', $parts);
     }
 }

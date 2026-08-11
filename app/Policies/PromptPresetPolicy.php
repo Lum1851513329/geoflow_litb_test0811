@@ -25,13 +25,15 @@ final class PromptPresetPolicy
 
     public function update(Admin $admin, PromptPreset $preset): bool
     {
-        return $admin->status === 'active' && (! $preset->is_system || $admin->isSuperAdmin());
+        return $admin->status === 'active'
+            && ($admin->isSuperAdmin() || (! $preset->is_system && (int) $preset->owned_by_admin_id === (int) $admin->id));
     }
 
     public function publishVersion(Admin $admin, PromptPreset $preset, PromptPresetVersion $version): bool
     {
         return (int) $version->prompt_preset_id === (int) $preset->id
-            && $this->update($admin, $preset);
+            && $admin->status === 'active'
+            && $admin->canManageProtectedWorkflows();
     }
 
     public function deprecateVersion(Admin $admin, PromptPreset $preset, PromptPresetVersion $version): bool

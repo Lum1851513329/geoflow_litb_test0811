@@ -56,7 +56,8 @@ final class ContentPipelineSecurityTest extends TestCase
             $this->context(variables: ['campaign_secret' => $secret]),
         );
 
-        $this->assertStringContainsString($secret, $compiled->text);
+        $this->assertStringNotContainsString($secret, $compiled->text);
+        $this->assertStringContainsString($secret, $compiled->modelPayload);
         $this->assertSame('[REDACTED]', $compiled->resolvedVariables['campaign_secret']);
         $snapshotJson = json_encode([
             'modules' => $compiled->moduleSnapshots,

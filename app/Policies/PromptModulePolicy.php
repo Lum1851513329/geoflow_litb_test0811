@@ -18,6 +18,11 @@ final class PromptModulePolicy
         return $admin->status === 'active';
     }
 
+    public function viewContent(Admin $admin, PromptModule $module): bool
+    {
+        return $this->canManage($admin, $module);
+    }
+
     public function create(Admin $admin): bool
     {
         return $admin->status === 'active';
@@ -36,7 +41,8 @@ final class PromptModulePolicy
     public function publishVersion(Admin $admin, PromptModule $module, PromptModuleVersion $version): bool
     {
         return (int) $version->prompt_module_id === (int) $module->id
-            && $this->canManage($admin, $module);
+            && $admin->status === 'active'
+            && $admin->canManageProtectedWorkflows();
     }
 
     public function archiveVersion(Admin $admin, PromptModule $module, PromptModuleVersion $version): bool
@@ -51,11 +57,13 @@ final class PromptModulePolicy
 
     public function deleteVersion(Admin $admin, PromptModule $module, PromptModuleVersion $version): bool
     {
-        return $this->publishVersion($admin, $module, $version);
+        return (int) $version->prompt_module_id === (int) $module->id
+            && $this->canManage($admin, $module);
     }
 
     private function canManage(Admin $admin, PromptModule $module): bool
     {
-        return $admin->status === 'active' && (! $module->is_system || $admin->isSuperAdmin());
+        return $admin->status === 'active'
+            && ($admin->isSuperAdmin() || (! $module->is_system && (int) $module->owned_by_admin_id === (int) $admin->id));
     }
 }

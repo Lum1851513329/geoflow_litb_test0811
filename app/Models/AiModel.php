@@ -28,6 +28,7 @@ class AiModel extends Model
         'total_used',
         'status',
         'max_tokens',
+        'context_window_tokens',
     ];
 
     protected function casts(): array
@@ -39,6 +40,7 @@ class AiModel extends Model
             'usage_date' => 'date',
             'total_used' => 'integer',
             'max_tokens' => 'integer',
+            'context_window_tokens' => 'integer',
         ];
     }
 

@@ -2,9 +2,10 @@
 
 namespace Tests\Feature;
 
-use App\Jobs\GenerateStrategyContent;
+use App\Domain\ContentGeneration\ContentGenerationRequestService;
 use App\Http\Controllers\Admin\ContentGenerationController;
 use App\Http\Requests\Admin\RequestContentGenerationRequest;
+use App\Jobs\GenerateStrategyContent;
 use App\Models\Admin;
 use App\Models\AiModel;
 use App\Models\Article;
@@ -17,6 +18,8 @@ use App\Models\ContentGenerationRunModule;
 use App\Models\ContentGenerationRunStep;
 use App\Models\ContentQualityReport;
 use App\Models\ContentStrategyVersion;
+use App\Models\KnowledgeBase;
+use App\Models\KnowledgeChunk;
 use App\Models\PromptModule;
 use App\Models\PromptModuleVersion;
 use App\Models\PromptPreset;
@@ -178,6 +181,18 @@ final class AdminContentBriefWorkflowTest extends TestCase
             'market_code' => 'US',
             'language_code' => 'en',
             'created_by_admin_id' => $this->operator->id,
+        ]);
+
+        $this->actingAs($this->operator, 'admin')->post($this->adminPath('content-briefs'), [
+            ...$this->briefPayload(),
+            'topic' => 'Canonical locale tags',
+            'market_code' => 'cn',
+            'language_code' => 'ZH_hANS_cn',
+        ])->assertRedirect();
+        $this->assertDatabaseHas('content_briefs', [
+            'topic' => 'Canonical locale tags',
+            'market_code' => 'CN',
+            'language_code' => 'zh-Hans-CN',
         ]);
     }
 
@@ -421,6 +436,124 @@ final class AdminContentBriefWorkflowTest extends TestCase
         Queue::assertPushed(GenerateStrategyContent::class, 1);
     }
 
+    public function test_matching_pending_reservation_is_redispatched_after_the_original_dispatch_was_lost(): void
+    {
+        $brief = $this->createBriefThroughHttp();
+        $this->confirmStrategyThroughHttp($brief);
+        $this->confirmBlueprintThroughHttp($brief);
+        $payload = $this->generationPayload($brief, 'lost-after-commit');
+        $reservation = app(ContentGenerationRequestService::class)->reserve($brief, $payload, $this->operator);
+
+        $this->assertTrue($reservation['created']);
+        Queue::assertNothingPushed();
+
+        $this->requestGenerationThroughHttp($brief, 'lost-after-commit')->assertRedirect();
+
+        $this->assertSame(1, ContentGenerationRun::query()->count());
+        Queue::assertPushed(GenerateStrategyContent::class, 1);
+    }
+
+    public function test_generation_rejects_a_preset_that_omits_an_applicable_mandatory_system_module(): void
+    {
+        $brief = $this->createBriefThroughHttp();
+        $this->confirmStrategyThroughHttp($brief);
+        $this->confirmBlueprintThroughHttp($brief);
+        $module = PromptModule::query()->create([
+            'module_key' => 'mandatory-market-policy',
+            'display_name' => 'Mandatory market policy',
+            'module_type' => PromptModule::TYPE_LANGUAGE_MARKET,
+            'is_system' => true,
+            'is_enabled' => true,
+            'is_mandatory' => true,
+            'applicability' => ['market_code' => ['US']],
+            'owned_by_admin_id' => $this->superAdmin->id,
+        ]);
+        $version = PromptModuleVersion::forceCreate([
+            'prompt_module_id' => $module->id,
+            'version' => 1,
+            'content' => 'Mandatory US market rules.',
+            'variable_contract' => [],
+            'content_sha256' => hash('sha256', 'Mandatory US market rules.'),
+            'lifecycle_status' => PromptModuleVersion::STATUS_PRODUCTION,
+            'created_by_admin_id' => $this->superAdmin->id,
+        ]);
+        $module->forceFill(['current_version_id' => $version->id])->save();
+
+        $this->actingAs($this->operator, 'admin')->post(
+            $this->adminPath("content-briefs/{$brief->id}/generations"),
+            $this->generationPayload($brief, 'missing-mandatory-module'),
+        )->assertSessionHasErrors('preset_version_id');
+
+        $this->assertSame(0, ContentGenerationRun::query()->count());
+        Queue::assertNothingPushed();
+    }
+
+    public function test_generation_reservation_snapshots_explicit_reviewed_evidence_transactionally(): void
+    {
+        $brief = $this->createBriefThroughHttp();
+        $this->confirmStrategyThroughHttp($brief);
+        $blueprint = $this->blueprint();
+        $blueprint['sections'][0]['required_fact_ids'] = ['fit-basics'];
+        $this->actingAs($this->operator, 'admin')->post(
+            $this->adminPath("content-briefs/{$brief->id}/blueprint"),
+            ['blueprint' => $blueprint],
+        )->assertRedirect($this->adminPath("content-briefs/{$brief->id}"));
+
+        $this->actingAs($this->operator, 'admin')->post(
+            $this->adminPath("content-briefs/{$brief->id}/generations"),
+            [
+                ...$this->generationPayload($brief, 'explicit-evidence'),
+                'evidence' => [[
+                    'fact_id' => 'fit-basics',
+                    'title' => 'Operator-reviewed fit note',
+                    'content' => 'A thumbnail width of toe room is a commonly used fit check.',
+                    'source_url' => 'https://example.test/reviewed-fit-note',
+                ]],
+            ],
+        )->assertRedirect();
+
+        $run = ContentGenerationRun::query()->sole();
+        $snapshot = $run->evidence()->sole();
+        $this->assertSame('fit-basics', $snapshot->evidence_key);
+        $this->assertTrue($snapshot->is_required);
+        $this->assertSame('explicit', $snapshot->evidence_snapshot['source_type']);
+        $this->assertSame($this->operator->id, $snapshot->evidence_snapshot['reviewed_by_admin_id']);
+        $this->assertSame(
+            'A thumbnail width of toe room is a commonly used fit check.',
+            $snapshot->evidence_snapshot['content'],
+        );
+    }
+
+    public function test_generation_reservation_snapshots_only_reviewed_knowledge_chunks(): void
+    {
+        $brief = $this->createBriefThroughHttp();
+        $this->confirmStrategyThroughHttp($brief);
+        $this->confirmBlueprintThroughHttp($brief);
+        $knowledgeBase = KnowledgeBase::query()->create([
+            'name' => 'Reviewed fit handbook',
+            'content' => 'Reviewed source content.',
+            'review_status' => 'reviewed',
+        ]);
+        $chunk = KnowledgeChunk::query()->create([
+            'knowledge_base_id' => $knowledgeBase->id,
+            'chunk_index' => 0,
+            'content' => 'Leave comfortable room in front of the longest toe.',
+            'content_hash' => hash('sha256', 'reviewed-fit-chunk'),
+            'chunk_title' => 'Toe room',
+        ]);
+
+        $this->actingAs($this->operator, 'admin')->post(
+            $this->adminPath("content-briefs/{$brief->id}/generations"),
+            [...$this->generationPayload($brief, 'reviewed-knowledge'), 'knowledge_chunk_ids' => [$chunk->id]],
+        )->assertRedirect();
+
+        $evidence = ContentGenerationRun::query()->sole()->evidence()->sole();
+        $this->assertSame('knowledge-chunk:'.$chunk->id, $evidence->evidence_key);
+        $this->assertSame($chunk->id, $evidence->knowledge_chunk_id);
+        $this->assertSame('reviewed', $evidence->evidence_snapshot['knowledge_base_review_status']);
+        $this->assertSame('Leave comfortable room in front of the longest toe.', $evidence->evidence_snapshot['content']);
+    }
+
     public function test_exact_replay_returns_the_original_run_after_operational_configuration_changes(): void
     {
         $brief = $this->createBriefThroughHttp();
@@ -446,6 +579,34 @@ final class AdminContentBriefWorkflowTest extends TestCase
 
         $this->assertSame(1, ContentGenerationRun::query()->count());
         Queue::assertPushed(GenerateStrategyContent::class, 1);
+    }
+
+    public function test_idempotency_key_reuse_rejects_changed_evidence_payload(): void
+    {
+        $brief = $this->createBriefThroughHttp();
+        $this->confirmStrategyThroughHttp($brief);
+        $this->confirmBlueprintThroughHttp($brief);
+        $payload = [
+            ...$this->generationPayload($brief, 'changed-evidence'),
+            'evidence' => [[
+                'fact_id' => 'fit-basics',
+                'content' => 'Reviewed evidence version one.',
+            ]],
+        ];
+
+        $this->actingAs($this->operator, 'admin')->post(
+            $this->adminPath("content-briefs/{$brief->id}/generations"),
+            $payload,
+        )->assertRedirect();
+        $payload['evidence'][0]['content'] = 'A different reviewed evidence body.';
+
+        $this->actingAs($this->operator, 'admin')->post(
+            $this->adminPath("content-briefs/{$brief->id}/generations"),
+            $payload,
+        )->assertSessionHasErrors('idempotency_key');
+
+        $this->assertSame(1, ContentGenerationRun::query()->count());
+        $this->assertSame('Reviewed evidence version one.', ContentGenerationRun::query()->sole()->evidence()->sole()->evidence_snapshot['content']);
     }
 
     public function test_idempotency_key_reuse_rejects_changed_configuration_on_the_key_field(): void
@@ -699,6 +860,45 @@ final class AdminContentBriefWorkflowTest extends TestCase
         $this->actingAs($this->superAdmin, 'admin')->get(
             $this->adminPath("content-generations/{$run->id}"),
         )->assertOk()->assertSee($compiledPrompt);
+    }
+
+    public function test_generation_history_is_paginated_and_searches_quality_issue_text(): void
+    {
+        $brief = $this->createBriefThroughHttp();
+        $this->confirmStrategyThroughHttp($brief);
+        $this->confirmBlueprintThroughHttp($brief);
+        $payload = $this->generationPayload($brief);
+        $runs = collect(range(1, 22))->map(fn (int $index): ContentGenerationRun => ContentGenerationRun::forceCreate([
+            'content_brief_id' => $brief->id,
+            'strategy_version_id' => $payload['strategy_version_id'],
+            'blueprint_version_id' => $payload['blueprint_version_id'],
+            'preset_version_id' => $payload['preset_version_id'],
+            'ai_model_id' => $payload['ai_model_id'],
+            'compiled_prompt' => null,
+            'status' => ContentGenerationRun::STATUS_PENDING,
+            'idempotency_key' => 'history-'.$index,
+            'created_by_admin_id' => $this->operator->id,
+        ]));
+        $oldest = $runs->first();
+        ContentQualityReport::query()->create([
+            'content_generation_run_id' => $oldest->id,
+            'report_type' => 'deterministic',
+            'status' => ContentQualityReport::STATUS_NEEDS_REVISION,
+            'passed' => false,
+            'issues' => [['code' => 'rare-audit-needle', 'message' => 'Rare audit needle']],
+        ]);
+
+        $this->actingAs($this->operator, 'admin')->get($this->adminPath("content-briefs/{$brief->id}"))
+            ->assertOk()
+            ->assertSee('href="'.route('admin.content-generations.show', $runs->last()).'"', false)
+            ->assertDontSee('href="'.route('admin.content-generations.show', $oldest).'"', false);
+        $this->actingAs($this->operator, 'admin')->get($this->adminPath("content-briefs/{$brief->id}?runs_page=2"))
+            ->assertOk()
+            ->assertSee('href="'.route('admin.content-generations.show', $oldest).'"', false);
+        $this->actingAs($this->operator, 'admin')->get($this->adminPath("content-briefs/{$brief->id}?run_q=rare-audit-needle"))
+            ->assertOk()
+            ->assertSee('href="'.route('admin.content-generations.show', $oldest).'"', false)
+            ->assertDontSee('href="'.route('admin.content-generations.show', $runs->last()).'"', false);
     }
 
     public function test_ready_run_can_be_adopted_once_into_the_article_workflow(): void

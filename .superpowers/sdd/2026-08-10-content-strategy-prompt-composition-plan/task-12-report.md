@@ -110,3 +110,23 @@
 - Fresh database: `migrate:fresh --seed --force` plus two standalone composition reseeds passed. Counts remained 7 modules, 10 module versions, 4 presets, 4 preset versions, and 28 bindings; null and incorrect content digest counts were all zero. Both disposable databases were dropped.
 - Targeted Pint `--test`, `git diff --check`, and host `npm run build` passed; Vite transformed 64 modules. The app container does not include an `npm` executable, so the identical repository build was run on the host.
 - The unrelated `docker-compose.yml` edit remains unchanged and excluded.
+
+## Final hardening round — evidence, authorization, audit, and quality enforcement
+
+- Generation reservation now snapshots reviewed Knowledge Chunks and explicit operator evidence transactionally, includes evidence in idempotency identity, and re-dispatches matching pending/queued runs after a post-commit dispatch loss.
+- Prompt module and preset mutation is owner-scoped, production lifecycle transitions use the protected workflow, and ordinary operators can inspect system metadata without receiving Prompt bodies, contracts, or diffs.
+- Enabled/applicable mandatory system modules are enforced when publishing a preset, reserving a run, and preparing worker execution.
+- Audit Prompt text is redacted while the provider receives the full payload. Sensitive values survive retries only inside a Laravel-encrypted run envelope and are scrubbed from steps, snapshots, and provider error text.
+- Equivalent PostgreSQL and SQLite triggers enforce append-only run inputs, evidence, module snapshots, quality reports, completed steps, terminal outputs, and published preset bindings. Rollback restores the prior snapshot guard.
+- Deterministic quality enforcement now includes total target length, prohibited information, external links, per-section CTA policy, required-fact evidence, required mentions, language, and market conventions.
+- Context-window, input, and output token budgets are separated and frozen in the model snapshot. Language tags are BCP-47-canonicalized and market codes uppercased.
+- Run history is paginated and searchable by ID, status, error, and quality issue text. New validation and domain messages are localized in English and Simplified Chinese.
+
+### Final-round verification
+
+- SQLite high-value suite: 195 passed / 996 assertions before the final focused compatibility additions; every subsequent focused test passed.
+- PostgreSQL schema and coordinator suite: 36 passed / 226 assertions, with one expected SQLite-only skip. PostgreSQL and SQLite pagination, quality-issue search, and audit rollback/reapply checks passed.
+- Full repository: 1,739 passed / 13,108 assertions, 2 skipped, and the same 4 unrelated baseline failures in release/theme/image test infrastructure.
+- `npm run build`, targeted Pint `--test`, and `git diff --check` passed.
+- Detailed final-round report: `docs/reports/task12-round1-hardening.md`.
+- The pre-existing `docker-compose.yml` edit remains unchanged and excluded.

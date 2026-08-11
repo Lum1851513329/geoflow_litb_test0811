@@ -226,6 +226,45 @@ class DeterministicQualityGateTest extends TestCase
         $this->assertSame([], $result->issuesAsArray());
     }
 
+    public function test_gate_enforces_prohibited_links_cta_and_market_constraints(): void
+    {
+        $markdown = $this->substantiveArticle('Acme Run Lab')
+            ."\n\nBuy now at [our UK shop](https://example.test) for £99. Unsupported medical claims.";
+
+        $result = $this->gate->inspect($markdown, $this->blueprint(), [
+            'market_code' => 'US',
+            'external_links_allowed' => false,
+            'prohibited_information' => ['Unsupported medical claims'],
+        ]);
+        $codes = array_column($result->issuesAsArray(), 'code');
+
+        $this->assertContains('prohibited_information', $codes);
+        $this->assertContains('external_link_not_allowed', $codes);
+        $this->assertContains('cta_not_allowed', $codes);
+        $this->assertContains('market_mismatch', $codes);
+    }
+
+    public function test_gate_enforces_total_target_length_tolerance(): void
+    {
+        $markdown = "## Sizing\n".$this->words(80)."\n\n## Care\n".$this->words(80);
+
+        $result = $this->gate->inspect($markdown, $this->blueprint(), []);
+
+        $this->assertContains('target_length_out_of_range', array_column($result->issuesAsArray(), 'code'));
+    }
+
+    public function test_gate_requires_reviewed_evidence_for_every_blueprint_fact(): void
+    {
+        $blueprint = $this->blueprint();
+        $blueprint['sections'][0]['required_fact_ids'] = ['fit-study'];
+
+        $missing = $this->gate->inspect($this->substantiveArticle('Acme Run Lab'), $blueprint, ['evidence_fact_ids' => []]);
+        $covered = $this->gate->inspect($this->substantiveArticle('Acme Run Lab'), $blueprint, ['evidence_fact_ids' => ['fit-study']]);
+
+        $this->assertContains('required_fact_uncovered', array_column($missing->issuesAsArray(), 'code'));
+        $this->assertNotContains('required_fact_uncovered', array_column($covered->issuesAsArray(), 'code'));
+    }
+
     /** @return array<string, mixed> */
     private function blueprint(): array
     {

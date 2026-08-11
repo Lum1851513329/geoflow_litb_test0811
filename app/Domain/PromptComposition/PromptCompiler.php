@@ -40,14 +40,14 @@ final class PromptCompiler
         $decisions = array_merge($validation['precedence_decisions'], $resolution['decisions']);
         $evidence = $context->evidence;
 
-        $text = $this->render($modules, $context, $variables, $evidence);
-        $estimatedTokens = $this->estimateTokens($text);
+        $modelPayload = $this->render($modules, $context, $variables, $evidence);
+        $estimatedTokens = $this->estimateTokens($modelPayload);
 
         if ($estimatedTokens > $context->modelTokenBudget) {
             [$evidence, $duplicateDecisions] = $this->removeDuplicateEvidence($evidence, $modules);
             $decisions = array_merge($decisions, $duplicateDecisions);
-            $text = $this->render($modules, $context, $variables, $evidence);
-            $estimatedTokens = $this->estimateTokens($text);
+            $modelPayload = $this->render($modules, $context, $variables, $evidence);
+            $estimatedTokens = $this->estimateTokens($modelPayload);
         }
 
         if ($estimatedTokens > $context->modelTokenBudget) {
@@ -63,8 +63,8 @@ final class PromptCompiler
                     'Low-relevance evidence was removed after duplicate removal to meet the selected model budget.',
                     $modules,
                 );
-                $text = $this->render($modules, $context, $variables, $evidence);
-                $estimatedTokens = $this->estimateTokens($text);
+                $modelPayload = $this->render($modules, $context, $variables, $evidence);
+                $estimatedTokens = $this->estimateTokens($modelPayload);
 
                 if ($estimatedTokens <= $context->modelTokenBudget) {
                     break;
@@ -94,13 +94,18 @@ final class PromptCompiler
         $variables['evidence'] = $evidence;
         $safeVariables = $this->redactVariables($variables, $validation['sensitive_variables']);
         $safeDecisions = $this->redactDecisions($decisions, $validation['sensitive_variables']);
+        $safeText = $this->render($modules, $context, $safeVariables, $evidence);
+        $sensitiveValues = $this->sensitiveValues($variables, $validation['sensitive_variables']);
+        $safeText = str_replace($sensitiveValues, '[REDACTED]', $safeText);
         $contextDigest = hash('sha256', $this->canonicalJson([
             'context' => $context->snapshot(),
             'resolved_variables' => $variables,
         ]));
 
         return new CompiledPrompt(
-            text: $text,
+            text: $safeText,
+            modelPayload: $modelPayload,
+            sensitiveValues: $sensitiveValues,
             moduleSnapshots: $this->moduleSnapshots(
                 $modules,
                 $variables,
@@ -142,9 +147,9 @@ final class PromptCompiler
     }
 
     /**
-     * @param list<ResolvedPromptModule> $modules
-     * @param array<string, mixed> $variables
-     * @param list<mixed> $evidence
+     * @param  list<ResolvedPromptModule>  $modules
+     * @param  array<string, mixed>  $variables
+     * @param  list<mixed>  $evidence
      */
     private function render(array $modules, PromptContext $context, array $variables, array $evidence): string
     {
@@ -319,8 +324,8 @@ final class PromptCompiler
     }
 
     /**
-     * @param list<array{code: string, winner: string, loser: string, reason: string, affected_module_version_ids: list<int>}> $decisions
-     * @param list<string> $sensitiveVariables
+     * @param  list<array{code: string, winner: string, loser: string, reason: string, affected_module_version_ids: list<int>}>  $decisions
+     * @param  list<string>  $sensitiveVariables
      * @return list<array{code: string, winner: string, loser: string, reason: string, affected_module_version_ids: list<int>}>
      */
     private function redactDecisions(array $decisions, array $sensitiveVariables): array
@@ -357,8 +362,8 @@ final class PromptCompiler
     }
 
     /**
-     * @param list<mixed> $evidence
-     * @param list<ResolvedPromptModule> $modules
+     * @param  list<mixed>  $evidence
+     * @param  list<ResolvedPromptModule>  $modules
      * @return array{0: list<mixed>, 1: list<array{code: string, winner: string, loser: string, reason: string, affected_module_version_ids: list<int>}>}
      */
     private function removeDuplicateEvidence(array $evidence, array $modules): array
@@ -445,7 +450,7 @@ final class PromptCompiler
     }
 
     /**
-     * @param list<ResolvedPromptModule> $modules
+     * @param  list<ResolvedPromptModule>  $modules
      * @return array{code: string, winner: string, loser: string, reason: string, affected_module_version_ids: list<int>}
      */
     private function evidenceDecision(string $code, string $winner, string $loser, string $reason, array $modules): array
@@ -468,10 +473,10 @@ final class PromptCompiler
     }
 
     /**
-     * @param list<ResolvedPromptModule> $modules
-     * @param array<string, mixed> $variables
-     * @param list<string> $sensitiveVariables
-     * @param array<int, list<string>> $moduleVariables
+     * @param  list<ResolvedPromptModule>  $modules
+     * @param  array<string, mixed>  $variables
+     * @param  list<string>  $sensitiveVariables
+     * @param  array<int, list<string>>  $moduleVariables
      * @return list<array<string, mixed>>
      */
     private function moduleSnapshots(array $modules, array $variables, array $sensitiveVariables, array $moduleVariables): array
@@ -507,6 +512,27 @@ final class PromptCompiler
         }
 
         return $variables;
+    }
+
+    /** @param array<string, mixed> $variables @param list<string> $sensitiveVariables @return list<string> */
+    private function sensitiveValues(array $variables, array $sensitiveVariables): array
+    {
+        $values = [];
+        foreach ($sensitiveVariables as $name) {
+            if (! array_key_exists($name, $variables)) {
+                continue;
+            }
+            $value = $variables[$name];
+            $rendered = is_string($value) ? $value : $this->canonicalJson($value);
+            if ($rendered !== '') {
+                $values[$rendered] = true;
+            }
+        }
+
+        $values = array_keys($values);
+        usort($values, fn (string $left, string $right): int => strlen($right) <=> strlen($left));
+
+        return $values;
     }
 
     private function canonicalJson(mixed $value): string

@@ -92,24 +92,28 @@ final class PromptModuleController extends Controller
 
     public function show(Request $request, PromptModule $module): View
     {
-        Gate::forUser($this->actor($request))->authorize('view', $module);
+        $actor = $this->actor($request);
+        Gate::forUser($actor)->authorize('view', $module);
+        $canViewContent = Gate::forUser($actor)->allows('viewContent', $module);
 
         $versions = $module->versions()
             ->select(['id', 'prompt_module_id', 'version', 'content_sha256', 'lifecycle_status', 'change_note', 'published_at', 'created_at'])
             ->orderByDesc('version')
             ->paginate(20, ['*'], 'versions_page')
             ->withQueryString();
-        $selectedQuery = $module->versions();
+        $selectedQuery = $module->versions()->when(! $canViewContent, fn ($query) => $query->select([
+            'id', 'prompt_module_id', 'version', 'content_sha256', 'lifecycle_status', 'change_note', 'published_at', 'created_at',
+        ]));
         $selected = $request->query->has('version_id')
             ? $selectedQuery->whereKey((int) $request->query('version_id'))->firstOrFail()
             : $selectedQuery->orderByDesc('version')->first();
         $compareTo = null;
-        if ($selected !== null) {
+        if ($canViewContent && $selected !== null) {
             $compareTo = $request->query->has('compare_to')
                 ? $module->versions()->whereKey((int) $request->query('compare_to'))->firstOrFail()
                 : $module->versions()->where('version', '<', $selected->version)->orderByDesc('version')->first();
         }
-        [$diffLines, $diffMetadata] = $selected !== null && $compareTo !== null
+        [$diffLines, $diffMetadata] = $canViewContent && $selected !== null && $compareTo !== null
             ? $this->lineDiff((string) $compareTo->content, (string) $selected->content)
             : [[], ['truncated' => false, 'old_line_count' => 0, 'new_line_count' => 0, 'compared_line_limit' => 500]];
 
@@ -132,6 +136,7 @@ final class PromptModuleController extends Controller
             'diffLines' => $diffLines,
             'diffMetadata' => $diffMetadata,
             'usages' => $usages,
+            'canViewContent' => $canViewContent,
         ]);
     }
 

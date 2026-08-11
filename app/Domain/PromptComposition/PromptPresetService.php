@@ -14,6 +14,8 @@ use InvalidArgumentException;
 
 final class PromptPresetService
 {
+    public function __construct(private readonly MandatoryPromptModuleGuard $mandatoryModules) {}
+
     /**
      * @param  array<string, mixed>  $identity
      * @param  array<string, mixed>  $version
@@ -65,6 +67,7 @@ final class PromptPresetService
                 ->get();
             $boundVersions = $this->lockBoundModuleVersions($bindings);
             $this->assertNonArchived($boundVersions);
+            $this->mandatoryModules->assertComplete($lockedVersion);
 
             PromptPresetVersion::query()
                 ->where('prompt_preset_id', $preset->id)

@@ -16,6 +16,7 @@ use App\Models\PromptPresetModuleVersion;
 use App\Models\PromptPresetVersion;
 use Database\Seeders\DatabaseSeeder;
 use Database\Seeders\PromptCompositionSeeder;
+use Illuminate\Database\QueryException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use RuntimeException;
 use Tests\TestCase;
@@ -409,19 +410,24 @@ PROMPT;
             ->count());
     }
 
-    public function test_preset_identity_includes_exact_ordered_binding_versions_and_required_flags(): void
+    public function test_published_seed_preset_bindings_cannot_be_corrupted(): void
     {
         $this->seed(PromptCompositionSeeder::class);
         $preset = PromptPreset::query()->where('preset_key', 'legacy_geo_trust_en')->sole();
         $oldVersion = $preset->currentVersion()->sole();
-        $oldVersion->moduleVersions()->orderBy('sort_order')->firstOrFail()->update(['is_required' => false]);
+        try {
+            $oldVersion->moduleVersions()->orderBy('sort_order')->firstOrFail()->update(['is_required' => false]);
+            $this->fail('Expected the database to reject a published binding mutation.');
+        } catch (QueryException) {
+            $this->addToAssertionCount(1);
+        }
 
         $this->seed(PromptCompositionSeeder::class);
 
         $preset->refresh();
         $current = $preset->currentVersion()->sole();
-        $this->assertNotSame($oldVersion->id, $current->id);
-        $this->assertSame(2, $preset->versions()->count());
+        $this->assertSame($oldVersion->id, $current->id);
+        $this->assertSame(1, $preset->versions()->count());
         $this->assertSame(range(1, 7), $current->moduleVersions()->pluck('sort_order')->all());
         $this->assertSame(7, $current->moduleVersions()->where('is_required', true)->count());
     }
@@ -441,6 +447,14 @@ PROMPT;
         app(PromptModuleService::class)->publish($adminModuleVersion, $admin, 'Administrator published module.');
 
         $preset = PromptPreset::query()->where('preset_key', 'legacy_geo_trust_en')->sole();
+        $bindings = $this->bindingData($preset->currentVersion()->sole());
+        foreach ($bindings as &$binding) {
+            $bound = PromptModuleVersion::query()->find($binding['prompt_module_version_id']);
+            if ((int) $bound?->prompt_module_id === (int) $module->id) {
+                $binding['prompt_module_version_id'] = $adminModuleVersion->id;
+            }
+        }
+        unset($binding);
         $adminPresetVersion = app(PromptPresetService::class)->createVersion(
             $preset,
             [
@@ -449,7 +463,7 @@ PROMPT;
                 'conflict_policy' => ['precedence' => 'administrator'],
                 'change_note' => 'Administrator candidate.',
             ],
-            $this->bindingData($preset->currentVersion()->sole()),
+            $bindings,
             $admin,
         );
         app(PromptPresetService::class)->publish($adminPresetVersion, $admin, 'Administrator published preset.');

@@ -8,6 +8,8 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 
 final class ContentGenerationRun extends Model
 {
+    protected $hidden = ['encrypted_model_payload'];
+
     public const STATUS_PENDING = 'pending';
 
     public const STATUS_QUEUED = 'queued';

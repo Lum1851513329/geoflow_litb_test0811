@@ -149,6 +149,82 @@ final class DeterministicQualityGate
             );
         }
 
+        $targetLength = (int) ($requirements['target_length'] ?? $blueprint['target_length'] ?? 0);
+        if ($targetLength > 0) {
+            $tolerance = max(0.0, min(0.9, (float) ($requirements['target_length_tolerance'] ?? 0.40)));
+            $minimum = (int) floor($targetLength * (1 - $tolerance));
+            $maximum = (int) ceil($targetLength * (1 + $tolerance));
+            if ($articleWordCount < $minimum || $articleWordCount > $maximum) {
+                $issues[] = new QualityIssue(
+                    code: 'target_length_out_of_range',
+                    severity: QualityIssue::SEVERITY_ERROR,
+                    sectionKey: null,
+                    message: "Article length is {$articleWordCount} content units; the allowed range is {$minimum}-{$maximum}.",
+                    repairInstruction: "Adjust the article to {$minimum}-{$maximum} substantive content units.",
+                );
+            }
+        }
+
+        foreach ($this->stringList($requirements['prohibited_information'] ?? []) as $prohibited) {
+            if ($this->phraseOccurrences($document['body'], $prohibited) > 0) {
+                $issues[] = new QualityIssue(
+                    code: 'prohibited_information',
+                    severity: QualityIssue::SEVERITY_ERROR,
+                    sectionKey: null,
+                    message: "Prohibited information \"{$prohibited}\" appears in the article.",
+                    repairInstruction: "Remove the prohibited information \"{$prohibited}\".",
+                );
+            }
+        }
+
+        if (($requirements['external_links_allowed'] ?? true) === false
+            && preg_match('/(?:https?:\/\/|\[[^\]]+\]\([^)]*https?:\/\/)/iu', $visibleMarkdown) === 1) {
+            $issues[] = new QualityIssue(
+                code: 'external_link_not_allowed',
+                severity: QualityIssue::SEVERITY_ERROR,
+                sectionKey: null,
+                message: 'The article contains an external link although external links are disabled.',
+                repairInstruction: 'Remove all external links while preserving useful non-linked prose.',
+            );
+        }
+
+        foreach ($sections as $section) {
+            if (! $section['cta_allowed'] && $this->containsCallToAction($document['section_content'][$section['key']] ?? '')) {
+                $issues[] = new QualityIssue(
+                    code: 'cta_not_allowed',
+                    severity: QualityIssue::SEVERITY_ERROR,
+                    sectionKey: $section['key'],
+                    message: "Section \"{$section['heading']}\" contains a call to action that its blueprint forbids.",
+                    repairInstruction: "Remove promotional calls to action from \"{$section['heading']}\".",
+                );
+            }
+        }
+
+        $availableFactIds = array_flip($this->stringList($requirements['evidence_fact_ids'] ?? []));
+        foreach ($sections as $section) {
+            foreach ($section['required_fact_ids'] as $factId) {
+                if (! isset($availableFactIds[$factId])) {
+                    $issues[] = new QualityIssue(
+                        code: 'required_fact_uncovered',
+                        severity: QualityIssue::SEVERITY_ERROR,
+                        sectionKey: $section['key'],
+                        message: "Required fact \"{$factId}\" has no reviewed evidence snapshot.",
+                        repairInstruction: "Attach reviewed evidence for fact \"{$factId}\" before generation.",
+                    );
+                }
+            }
+        }
+
+        if ($this->hasMarketMismatch($document['body'], (string) ($requirements['market_code'] ?? ''))) {
+            $issues[] = new QualityIssue(
+                code: 'market_mismatch',
+                severity: QualityIssue::SEVERITY_ERROR,
+                sectionKey: null,
+                message: 'Article currency conventions conflict with the requested market.',
+                repairInstruction: 'Use currency and market conventions consistent with the requested market.',
+            );
+        }
+
         return $this->result($issues);
     }
 
@@ -175,6 +251,8 @@ final class DeterministicQualityGate
                 'heading' => $heading,
                 'minimum_words' => max(0, (int) ($section['minimum_words'] ?? 0)),
                 'questions' => $this->stringList($section['questions_to_answer'] ?? []),
+                'required_fact_ids' => $this->stringList($section['required_fact_ids'] ?? []),
+                'cta_allowed' => (bool) ($section['cta_allowed'] ?? false),
             ];
         }
 
@@ -398,6 +476,7 @@ final class DeterministicQualityGate
             ...$this->stringList($blueprint['required_entities'] ?? []),
             ...$this->stringList($requirements['required_entities'] ?? []),
             ...$this->stringList($requirements['entities'] ?? []),
+            ...$this->stringList($requirements['required_mentions'] ?? []),
         ]);
     }
 
@@ -485,6 +564,24 @@ final class DeterministicQualityGate
         }
 
         return false;
+    }
+
+    private function containsCallToAction(string $content): bool
+    {
+        return preg_match('/\b(?:buy|shop|order|subscribe|sign up|get started|learn more|click here)\b|(?:立即购买|马上购买|点击购买|立即订阅|立即注册)/iu', $content) === 1;
+    }
+
+    private function hasMarketMismatch(string $body, string $market): bool
+    {
+        $market = strtoupper(trim($market));
+        $forbidden = match ($market) {
+            'US' => '/(?:£|\bGBP\b|¥|\bCNY\b)/u',
+            'GB', 'UK' => '/(?:\$|\bUSD\b|¥|\bCNY\b)/u',
+            'CN' => '/(?:\$|\bUSD\b|£|\bGBP\b)/u',
+            default => null,
+        };
+
+        return $forbidden !== null && preg_match($forbidden, $body) === 1;
     }
 
     /** @param array<string, mixed> $blueprint

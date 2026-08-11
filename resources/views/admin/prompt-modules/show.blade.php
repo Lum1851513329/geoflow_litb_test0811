@@ -35,16 +35,16 @@
                     <form method="POST" action="{{ route('admin.prompt-modules.versions.archive', [$module, $selectedVersion]) }}" class="flex gap-2">@csrf<input name="reason" required maxlength="2000" class="rounded-md border-gray-300 text-sm" placeholder="{{ __('admin.prompt_modules.fields.reason') }}"><button class="rounded-md border border-red-300 px-3 py-2 text-sm font-semibold text-red-700">{{ __('admin.prompt_modules.actions.archive') }}</button></form>
                 @endif
             </div></div>
-            <pre class="max-h-[32rem] overflow-auto whitespace-pre-wrap p-6 text-sm leading-6 text-gray-800">{{ $selectedVersion->content }}</pre>
+            @if($canViewContent)<pre class="max-h-[32rem] overflow-auto whitespace-pre-wrap p-6 text-sm leading-6 text-gray-800">{{ $selectedVersion->content }}</pre>@endif
         </section>
 
-        <section class="rounded-lg bg-white p-6 shadow">
+        @if($canViewContent)<section class="rounded-lg bg-white p-6 shadow">
             <div class="flex flex-wrap items-end justify-between gap-4"><div><h2 class="text-lg font-semibold">{{ __('admin.prompt_modules.diff.title') }}</h2><p class="text-sm text-gray-500">{{ __('admin.prompt_modules.diff.subtitle') }}</p></div><form method="GET" class="flex items-end gap-2"><input type="hidden" name="version_id" value="{{ $selectedVersion->id }}"><label class="text-xs text-gray-600">{{ __('admin.prompt_modules.diff.compare_to') }}<select name="compare_to" class="mt-1 rounded-md border-gray-300 text-sm">@foreach($versions->where('id', '!=', $selectedVersion->id) as $version)<option value="{{ $version->id }}" @selected($compareVersion?->id === $version->id)>v{{ $version->version }}</option>@endforeach</select></label><button class="rounded-md bg-gray-900 px-3 py-2 text-sm text-white">{{ __('admin.prompt_modules.actions.compare') }}</button></form></div>
             <div class="mt-4 overflow-auto rounded-md bg-gray-950 p-4 font-mono text-xs text-gray-200">
                 @forelse($diffLines as $line)<div class="whitespace-pre-wrap {{ $line['kind'] === 'added' ? 'bg-green-950 text-green-200' : ($line['kind'] === 'removed' ? 'bg-red-950 text-red-200' : '') }}"><span class="inline-block w-5 select-none opacity-70">{{ $line['kind'] === 'added' ? '+' : ($line['kind'] === 'removed' ? '-' : ' ') }}</span>{{ $line['line'] }}</div>@empty<div class="text-gray-400">{{ __('admin.prompt_modules.diff.empty') }}</div>@endforelse
             </div>
             @if($diffMetadata['truncated'])<p class="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">{{ __('admin.prompt_modules.diff.truncated', ['old' => $diffMetadata['old_line_count'], 'new' => $diffMetadata['new_line_count'], 'limit' => $diffMetadata['compared_line_limit']]) }}</p>@endif
-        </section>
+        </section>@endif
 
         <section class="rounded-lg bg-white p-6 shadow">
             <h2 class="text-lg font-semibold">{{ __('admin.prompt_modules.usage.title') }}</h2><p class="mt-1 text-sm text-gray-500">{{ __('admin.prompt_modules.usage.subtitle') }}</p>

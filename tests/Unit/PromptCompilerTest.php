@@ -173,7 +173,7 @@ class PromptCompilerTest extends TestCase
         $this->assertSame($sorted, $positions);
     }
 
-    public function test_sensitive_values_are_redacted_from_snapshots_but_remain_usable_in_execution_text(): void
+    public function test_sensitive_values_are_redacted_from_audit_text_but_remain_usable_in_model_payload(): void
     {
         $module = $this->module(
             key: 'private_brand_context',
@@ -188,7 +188,10 @@ class PromptCompilerTest extends TestCase
             'campaign_secret' => 'Project Firefly',
         ]));
 
-        $this->assertStringContainsString('Project Firefly', $compiled->text);
+        $this->assertStringNotContainsString('Project Firefly', $compiled->text);
+        $this->assertStringContainsString('[REDACTED]', $compiled->text);
+        $this->assertStringContainsString('Project Firefly', $compiled->modelPayload);
+        $this->assertSame(['Project Firefly'], $compiled->sensitiveValues);
         $this->assertSame('[REDACTED]', $compiled->resolvedVariables['campaign_secret']);
         $this->assertStringContainsString('[REDACTED]', $compiled->moduleSnapshots[0]['rendered_content']);
         $this->assertStringNotContainsString('Project Firefly', json_encode($compiled->moduleSnapshots, JSON_THROW_ON_ERROR));
@@ -362,7 +365,7 @@ class PromptCompilerTest extends TestCase
         $compiled = app(PromptCompiler::class)->compile(
             [$style, $brand, $strategy, $evidence, $stage, $hard],
             $this->context([
-            'tone' => 'promotional',
+                'tone' => 'promotional',
             ]),
         );
 
