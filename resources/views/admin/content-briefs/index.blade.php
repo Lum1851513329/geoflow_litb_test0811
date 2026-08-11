@@ -2,6 +2,8 @@
 
 @section('content')
 <div class="space-y-6 px-4 sm:px-0">
+    @include('admin.partials.content-center-nav', ['activeSection' => 'briefs'])
+
     <div class="flex flex-wrap items-start justify-between gap-4">
         <div>
             <h1 class="text-2xl font-bold text-gray-900">{{ __('admin.content_strategy.index.title') }}</h1>

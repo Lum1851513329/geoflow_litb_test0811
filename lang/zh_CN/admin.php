@@ -6,6 +6,12 @@ if (! is_file($manualPublicationsPath) && function_exists('lang_path')) {
 }
 
 return [
+    'content_center' => [
+        'title' => '内容中心',
+        'briefs' => '内容简报',
+        'prompt_modules' => 'Prompt 模块',
+        'prompt_presets' => 'Prompt 预设',
+    ],
     'content_strategy' => [
         'index' => ['title' => '内容策略', 'subtitle' => '规划、生成、审核并采纳全链路可追溯内容。', 'empty' => '当前筛选条件下没有内容简报。'],
         'create' => ['title' => '创建内容简报', 'subtitle' => '在制定策略前明确受众、市场、核心问题和业务约束。'],

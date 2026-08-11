@@ -2,6 +2,8 @@
 
 @section('content')
 <div class="space-y-6 px-4 sm:px-0">
+    @include('admin.partials.content-center-nav', ['activeSection' => 'presets'])
+
     <div class="flex flex-wrap items-start justify-between gap-4"><div><h1 class="text-2xl font-bold text-gray-900">{{ __('admin.prompt_presets.title') }}</h1><p class="mt-1 text-sm text-gray-600">{{ __('admin.prompt_presets.subtitle') }}</p></div><a href="{{ route('admin.prompt-modules.index') }}" class="rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700">{{ __('admin.prompt_presets.actions.manage_modules') }}</a></div>
 
     <form method="GET" class="flex gap-3 rounded-lg bg-white p-4 shadow"><input name="q" value="{{ request('q') }}" class="min-w-0 flex-1 rounded-md border-gray-300" placeholder="{{ __('admin.prompt_presets.filters.search') }}"><button class="rounded-md bg-gray-900 px-4 py-2 text-sm text-white">{{ __('admin.prompt_presets.actions.filter') }}</button></form>

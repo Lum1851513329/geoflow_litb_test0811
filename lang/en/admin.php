@@ -6,6 +6,12 @@ if (! is_file($manualPublicationsPath) && function_exists('lang_path')) {
 }
 
 return [
+    'content_center' => [
+        'title' => 'Content Center',
+        'briefs' => 'Content Briefs',
+        'prompt_modules' => 'Prompt Modules',
+        'prompt_presets' => 'Prompt Presets',
+    ],
     'content_strategy' => [
         'index' => ['title' => 'Content Strategy', 'subtitle' => 'Plan, generate, review, and adopt traceable content.', 'empty' => 'No content briefs match the current filters.'],
         'create' => ['title' => 'Create Content Brief', 'subtitle' => 'Define the audience, market, question, and business constraints before strategy work begins.'],
