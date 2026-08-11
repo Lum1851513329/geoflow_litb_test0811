@@ -197,6 +197,46 @@ class PromptCompilerTest extends TestCase
         $this->assertStringNotContainsString('Project Firefly', json_encode($compiled->moduleSnapshots, JSON_THROW_ON_ERROR));
     }
 
+    public function test_nested_sensitive_values_collect_every_scalar_leaf_and_canonical_composite(): void
+    {
+        $secret = [
+            'credentials' => [
+                'pin' => 884211,
+                'token' => 'nested-token-8842',
+            ],
+            'segments' => ['segment-orchid-5521', 'segment-cobalt-9174'],
+        ];
+        $module = $this->module(
+            key: 'private_nested_context',
+            type: 'foundation',
+            content: 'Use private launch configuration {{campaign_secret}}.',
+            contract: ['variables' => [
+                'campaign_secret' => ['type' => 'object', 'required' => true, 'sensitive' => true],
+            ]],
+        );
+
+        $compiled = app(PromptCompiler::class)->compile([$module], $this->context([
+            'campaign_secret' => $secret,
+        ]));
+
+        $whole = '{"credentials":{"pin":884211,"token":"nested-token-8842"},"segments":["segment-orchid-5521","segment-cobalt-9174"]}';
+        $this->assertStringContainsString($whole, $compiled->modelPayload);
+        foreach ([
+            $whole,
+            '{"pin":884211,"token":"nested-token-8842"}',
+            '["segment-orchid-5521","segment-cobalt-9174"]',
+            '884211',
+            'nested-token-8842',
+            'segment-orchid-5521',
+            'segment-cobalt-9174',
+        ] as $sensitiveValue) {
+            $this->assertContains($sensitiveValue, $compiled->sensitiveValues);
+            $this->assertStringNotContainsString($sensitiveValue, $compiled->text);
+            $this->assertStringNotContainsString($sensitiveValue, json_encode($compiled->moduleSnapshots, JSON_THROW_ON_ERROR));
+        }
+        $this->assertSame('[REDACTED]', $compiled->resolvedVariables['campaign_secret']);
+    }
+
     public function test_required_module_strategy_and_blueprint_are_not_removed_when_budget_is_exceeded(): void
     {
         $module = $this->module(

@@ -524,6 +524,135 @@ class ContentStrategySchemaTest extends TestCase
         ]));
     }
 
+    public function test_ready_for_review_rejects_audit_appends_except_the_exact_adoption_step_shape(): void
+    {
+        $pipeline = $this->createPipeline('review-terminal-inserts');
+        $secondModule = $this->createModule('review-terminal-second');
+        $secondModuleVersion = $this->createModuleVersion($secondModule, 1);
+        $pipeline['run']->forceFill([
+            'status' => ContentGenerationRun::STATUS_READY_FOR_REVIEW,
+            'raw_output' => 'Reviewed output ready for adoption.',
+        ])->save();
+
+        $adoptionStepId = DB::table('content_generation_run_steps')->insertGetId([
+            'content_generation_run_id' => $pipeline['run']->id,
+            'sequence' => 1,
+            'step_type' => ContentGenerationRunStep::TYPE_ADOPTION,
+            'status' => ContentGenerationRunStep::STATUS_COMPLETED,
+            'input_snapshot' => json_encode([
+                'actor_admin_id' => 91,
+                'raw_output_sha256' => str_repeat('a', 64),
+                'adopted_output_sha256' => str_repeat('b', 64),
+                'compiled_prompt_sha256' => str_repeat('c', 64),
+            ], JSON_THROW_ON_ERROR),
+            'metadata' => json_encode([
+                'article_id' => 77,
+                'article_content_sha256' => str_repeat('d', 64),
+            ], JSON_THROW_ON_ERROR),
+            'started_at' => now(),
+            'completed_at' => now(),
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        $this->assertDatabaseHas('content_generation_run_steps', ['id' => $adoptionStepId]);
+
+        $this->assertDatabaseRejects(fn () => DB::table('content_generation_run_modules')->insert([
+            'content_generation_run_id' => $pipeline['run']->id,
+            'prompt_module_version_id' => $secondModuleVersion->id,
+            'sort_order' => 2,
+            'is_required' => false,
+            'module_snapshot' => json_encode(['module_key' => 'late-review-module'], JSON_THROW_ON_ERROR),
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]));
+        $this->assertDatabaseRejects(fn () => DB::table('content_generation_run_evidence')->insert([
+            'content_generation_run_id' => $pipeline['run']->id,
+            'evidence_key' => 'late-review-fact',
+            'evidence_snapshot' => json_encode(['content' => 'Late review fact.'], JSON_THROW_ON_ERROR),
+            'is_required' => false,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]));
+        $this->assertDatabaseRejects(fn () => DB::table('content_quality_reports')->insert([
+            'content_generation_run_id' => $pipeline['run']->id,
+            'content_generation_run_step_id' => $adoptionStepId,
+            'report_type' => 'late-review',
+            'status' => ContentQualityReport::STATUS_PASSED,
+            'passed' => true,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]));
+        $this->assertDatabaseRejects(fn () => DB::table('content_generation_run_steps')->insert([
+            'content_generation_run_id' => $pipeline['run']->id,
+            'sequence' => 2,
+            'step_type' => ContentGenerationRunStep::TYPE_SEMANTIC_QUALITY,
+            'status' => ContentGenerationRunStep::STATUS_COMPLETED,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]));
+        $this->assertDatabaseRejects(fn () => DB::table('content_generation_run_steps')->insert([
+            'content_generation_run_id' => $pipeline['run']->id,
+            'sequence' => 3,
+            'step_type' => ContentGenerationRunStep::TYPE_ADOPTION,
+            'status' => ContentGenerationRunStep::STATUS_RUNNING,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]));
+        $this->assertDatabaseRejects(fn () => DB::table('content_generation_run_steps')->insert([
+            'content_generation_run_id' => $pipeline['run']->id,
+            'sequence' => 4,
+            'step_type' => ContentGenerationRunStep::TYPE_ADOPTION,
+            'status' => ContentGenerationRunStep::STATUS_COMPLETED,
+            'input_snapshot' => json_encode(['actor_admin_id' => 91], JSON_THROW_ON_ERROR),
+            'metadata' => json_encode(['article_id' => 77], JSON_THROW_ON_ERROR),
+            'started_at' => now(),
+            'completed_at' => now(),
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]));
+        $this->assertDatabaseRejects(fn () => DB::table('content_generation_run_steps')->insert([
+            'content_generation_run_id' => $pipeline['run']->id,
+            'sequence' => 5,
+            'step_type' => ContentGenerationRunStep::TYPE_ADOPTION,
+            'status' => ContentGenerationRunStep::STATUS_COMPLETED,
+            'prompt' => 'Provider work must not occur during adoption.',
+            'input_snapshot' => json_encode([
+                'actor_admin_id' => 91,
+                'raw_output_sha256' => str_repeat('a', 64),
+                'adopted_output_sha256' => str_repeat('b', 64),
+                'compiled_prompt_sha256' => str_repeat('c', 64),
+            ], JSON_THROW_ON_ERROR),
+            'metadata' => json_encode([
+                'article_id' => 77,
+                'article_content_sha256' => str_repeat('d', 64),
+            ], JSON_THROW_ON_ERROR),
+            'started_at' => now(),
+            'completed_at' => now(),
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]));
+        $this->assertDatabaseRejects(fn () => DB::table('content_generation_run_steps')->insert([
+            'content_generation_run_id' => $pipeline['run']->id,
+            'sequence' => 6,
+            'step_type' => ContentGenerationRunStep::TYPE_ADOPTION,
+            'status' => ContentGenerationRunStep::STATUS_COMPLETED,
+            'input_snapshot' => json_encode([
+                'actor_admin_id' => 91,
+                'raw_output_sha256' => str_repeat('z', 64),
+                'adopted_output_sha256' => str_repeat('b', 64),
+                'compiled_prompt_sha256' => str_repeat('c', 64),
+            ], JSON_THROW_ON_ERROR),
+            'metadata' => json_encode([
+                'article_id' => 77,
+                'article_content_sha256' => str_repeat('d', 64),
+            ], JSON_THROW_ON_ERROR),
+            'started_at' => now(),
+            'completed_at' => now(),
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]));
+    }
+
     public function test_draft_binding_update_returns_new_and_delete_returns_old(): void
     {
         $pipeline = $this->createPipeline('draft-trigger-return');

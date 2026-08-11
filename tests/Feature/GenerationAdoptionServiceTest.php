@@ -193,11 +193,17 @@ class GenerationAdoptionServiceTest extends TestCase
     public function test_adoption_scrubs_sensitive_values_from_operator_content_and_every_plaintext_audit_column(): void
     {
         $secret = 'provider-echo-secret-8842';
+        $segment = 'private-segment-5521';
+        $nestedSecret = [
+            'credentials' => ['token' => $secret],
+            'segments' => [$segment],
+        ];
+        $canonicalSecret = json_encode($nestedSecret, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
         $run = $this->readyRun(ContentGenerationRun::STATUS_PENDING);
         $run->forceFill([
             'encrypted_model_payload' => Crypt::encryptString(json_encode([
-                'prompt' => "Use {$secret} internally.",
-                'sensitive_values' => [$secret],
+                'prompt' => "Use {$canonicalSecret} internally.",
+                'sensitive_values' => [$nestedSecret],
             ], JSON_THROW_ON_ERROR)),
             'raw_output' => 'Safe article prepared for adoption.',
             'status' => ContentGenerationRun::STATUS_READY_FOR_REVIEW,
@@ -205,21 +211,23 @@ class GenerationAdoptionServiceTest extends TestCase
 
         $article = $this->service->adopt($run->fresh(), $this->articleData([
             'title' => "Title {$secret}",
-            'excerpt' => "Excerpt {$secret}",
-            'content' => "Edited provider output {$secret}",
+            'excerpt' => "Excerpt {$segment}",
+            'content' => "Edited provider output {$canonicalSecret}",
             'keywords' => "running, {$secret}",
-            'meta_description' => "Description {$secret}",
+            'meta_description' => "Description {$segment}",
         ]), $this->admin);
 
-        $this->assertStringNotContainsString($secret, json_encode(
-            DB::table('articles')->where('id', $article->id)->first(),
-            JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR,
-        ));
-        foreach (['content_generation_runs', 'content_generation_run_steps'] as $table) {
-            $this->assertStringNotContainsString($secret, json_encode(
-                DB::table($table)->get()->map(fn (object $row): array => (array) $row)->all(),
+        foreach ([$secret, $segment, $canonicalSecret] as $sensitiveValue) {
+            $this->assertStringNotContainsString($sensitiveValue, json_encode(
+                DB::table('articles')->where('id', $article->id)->first(),
                 JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR,
             ));
+            foreach (['content_generation_runs', 'content_generation_run_steps'] as $table) {
+                $this->assertStringNotContainsString($sensitiveValue, json_encode(
+                    DB::table($table)->get()->map(fn (object $row): array => (array) $row)->all(),
+                    JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR,
+                ));
+            }
         }
         $this->assertStringContainsString('[REDACTED]', (string) $article->content);
         $this->assertStringContainsString('[REDACTED]', (string) $run->fresh()->adopted_output);

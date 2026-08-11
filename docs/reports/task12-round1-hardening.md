@@ -53,3 +53,17 @@ The pre-existing `docker-compose.yml` worktree change was not modified, staged, 
 - Real PostgreSQL, per database-bearing file: schema **14 / 88**, coordinator **30 / 165** with one expected SQLite-only skip, admin workflow **31 / 322**, adoption **9 / 42**.
 - Full repository before the final queue-configuration guard: **1,752 passed / 13,192 assertions**, 2 skipped, with the same 4 unrelated environment/filesystem baseline failures listed above; the final guard and its focused regression then passed.
 - Targeted Pint completed cleanly, Vite production build transformed 64 modules, and `git diff --check` passed.
+
+## Round 3 hardening
+
+- `ready_for_review` is terminal for module, evidence, quality-report, and ordinary-step inserts. PostgreSQL and SQLite permit only a completed `adoption` step with null provider fields, timestamps, positive actor/article IDs, exact snapshot key sets, and lowercase SHA-256 values.
+- Sensitive arrays and objects are recursively normalized into unique scalar leaves and non-empty canonical composites. The encrypted-envelope boundary applies the same normalization, and initial payload extraction now uses the centralized redactor.
+- Provider echoes of nested string and numeric leaves are removed from later provider prompts, run/step/report plaintext, revision data, and adopted article fields.
+- CTA enforcement recognizes purchase, order, shop, secure, reserve, subscribe, and sign-up actions in structured labels and urgency/availability prose. The reviewer bypass sentence is blocked, while explanatory uses remain allowed.
+
+### Round 3 verification
+
+- Focused SQLite: **131 passed / 571 assertions**.
+- Real PostgreSQL: schema **15 / 97**, adoption **9 / 48**, coordinator **30 / 195**, with one expected SQLite-only skip.
+- Targeted Pint `--test` passed for all 10 changed PHP files; Vite production build transformed 64 modules; `git diff --check` passed.
+- The disposable PostgreSQL database was dropped. The pre-existing `docker-compose.yml` edit remained unchanged and excluded.

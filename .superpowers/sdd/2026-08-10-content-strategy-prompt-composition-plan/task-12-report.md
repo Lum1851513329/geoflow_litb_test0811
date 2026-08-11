@@ -131,6 +131,19 @@
 - Detailed final-round report: `docs/reports/task12-round1-hardening.md`.
 - The pre-existing `docker-compose.yml` edit remains unchanged and excluded.
 
+## Hardening round 3 — final Important findings
+
+- Review is now a terminal audit state: raw PostgreSQL and SQLite inserts reject late modules, evidence, quality reports, and normal steps. Only the exact adoption audit shape can be appended before the atomic transition to `adopted`.
+- Nested sensitive objects and lists now contribute every scalar leaf and meaningful canonical sub-composite to redaction. Compiler, retry-envelope, provider-interaction, persistence, and adoption regressions cover nested provider echoes.
+- CTA checks now cover purchase/order/shop/secure/reserve/subscribe/sign-up vocabulary across Markdown labels, HTML buttons/links, and transactional urgency or stock prose, including the exact reviewer bypass sentence. Benign editorial uses remain negative controls.
+
+### Hardening-round-3 verification
+
+- Focused SQLite: **131 passed / 571 assertions**.
+- PostgreSQL: schema **15 / 97**, adoption **9 / 48**, coordinator **30 / 195**; one SQLite-specific coordinator case skipped as expected.
+- Targeted Pint `--test`, Vite build (64 modules), and `git diff --check` passed. The temporary PostgreSQL database was removed.
+- The unrelated `docker-compose.yml` edit remains untouched and excluded from the commit.
+
 ## Hardening round 2 — durable dispatch and parser/security closure
 
 - Generation reservation and database-queue publication now share one transaction and one durable marker; unique-lock orphaning can no longer suppress a run, and scheduled stale recovery publishes at most one job without another request.

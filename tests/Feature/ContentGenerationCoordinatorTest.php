@@ -296,6 +296,54 @@ class ContentGenerationCoordinatorTest extends TestCase
         ));
     }
 
+    public function test_provider_echoes_of_nested_sensitive_array_and_object_leaves_are_scrubbed_everywhere(): void
+    {
+        $nestedSecret = [
+            'credentials' => [
+                'pin' => 884211,
+                'token' => 'nested-token-8842',
+            ],
+            'segments' => ['segment-orchid-5521', 'segment-cobalt-9174'],
+        ];
+        $secretLeaves = ['884211', 'nested-token-8842', 'segment-orchid-5521', 'segment-cobalt-9174'];
+        $initial = $this->substantiveArticle('Provider echoed nested-token-8842 and segment-orchid-5521.');
+        $semantic = json_encode([
+            'passed' => false,
+            'score' => 72,
+            'issues' => [[
+                'code' => 'clarity',
+                'section_key' => 'fit',
+                'message' => 'Provider echoed PIN 884211 in semantic review.',
+                'repair_instruction' => 'Remove segment-cobalt-9174 without changing supported facts.',
+            ]],
+        ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
+        $revision = $this->substantiveArticle('The revision echoed all values: 884211 nested-token-8842 segment-orchid-5521 segment-cobalt-9174.');
+        $this->fakeGenerator->queue($initial, $semantic, $revision, $this->semanticPass());
+
+        $run = $this->coordinator->generate($this->pendingRun(
+            withEvidence: true,
+            campaignSecret: $nestedSecret,
+            campaignSecretType: 'object',
+        ))->fresh();
+
+        $this->assertSame(ContentGenerationRun::STATUS_READY_FOR_REVIEW, $run->status);
+        foreach ($secretLeaves as $secretLeaf) {
+            $this->assertStringContainsString($secretLeaf, $this->fakeGenerator->prompts[0]);
+            foreach (array_slice($this->fakeGenerator->prompts, 1) as $prompt) {
+                $this->assertStringNotContainsString($secretLeaf, $prompt);
+            }
+            foreach (['content_generation_runs', 'content_generation_run_steps', 'content_quality_reports'] as $table) {
+                $rows = DB::table($table)->get()->map(fn (object $row): array => (array) $row)->all();
+                $this->assertStringNotContainsString(
+                    $secretLeaf,
+                    json_encode($rows, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR),
+                    "Nested sensitive provider output leaked through {$table}.",
+                );
+            }
+        }
+        $this->assertStringContainsString('[REDACTED]', (string) $run->raw_output);
+    }
+
     public function test_empty_initial_output_fails_without_quality_or_revision_calls(): void
     {
         $this->fakeGenerator->queue(" \n\t ");
@@ -779,8 +827,12 @@ class ContentGenerationCoordinatorTest extends TestCase
         Event::assertNotDispatched(ContentGenerationFailed::class);
     }
 
-    private function pendingRun(bool $withEvidence = false, bool $evidenceRequired = false): ContentGenerationRun
-    {
+    private function pendingRun(
+        bool $withEvidence = false,
+        bool $evidenceRequired = false,
+        mixed $campaignSecret = 'secret-campaign-value',
+        string $campaignSecretType = 'string',
+    ): ContentGenerationRun {
         $brief = ContentBrief::query()->create([
             'topic' => 'Running shoe fit',
             'market_code' => 'US',
@@ -816,7 +868,7 @@ class ContentGenerationCoordinatorTest extends TestCase
             'content' => 'Write a practical guide for {{ audience }}. Internal launch: {{ campaign_secret }}.',
             'variable_contract' => ['variables' => [
                 'audience' => ['type' => 'string', 'required' => true],
-                'campaign_secret' => ['type' => 'string', 'default' => 'secret-campaign-value', 'sensitive' => true],
+                'campaign_secret' => ['type' => $campaignSecretType, 'default' => $campaignSecret, 'sensitive' => true],
             ]],
             'lifecycle_status' => PromptModuleVersion::STATUS_PRODUCTION,
         ]);

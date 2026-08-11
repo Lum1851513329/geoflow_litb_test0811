@@ -1091,7 +1091,7 @@ final class ContentGenerationCoordinator
 
         return [
             $payload['prompt'],
-            array_values(array_filter((array) ($payload['sensitive_values'] ?? []), 'is_string')),
+            $this->redactor->valuesForRun($run),
         ];
     }
 

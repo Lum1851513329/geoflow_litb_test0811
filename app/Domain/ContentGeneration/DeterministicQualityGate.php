@@ -323,6 +323,9 @@ final class DeterministicQualityGate
             }
 
             $cleanLine = $this->stripMarkdown($line);
+            if ($currentSectionKey !== null) {
+                $sectionMarkdown[$currentSectionKey] = trim(($sectionMarkdown[$currentSectionKey] ?? '')."\n".$line);
+            }
             if ($cleanLine === '') {
                 continue;
             }
@@ -331,7 +334,6 @@ final class DeterministicQualityGate
             $paragraphLines[] = $cleanLine;
             if ($currentSectionKey !== null) {
                 $sectionContent[$currentSectionKey] = trim(($sectionContent[$currentSectionKey] ?? '').' '.$cleanLine);
-                $sectionMarkdown[$currentSectionKey] = trim(($sectionMarkdown[$currentSectionKey] ?? '')."\n".$line);
             }
         }
 
@@ -599,7 +601,12 @@ final class DeterministicQualityGate
         $prose = $this->stripMarkdown($content);
 
         return preg_match(
-            '/(?:^|[.!?。！？]\s*)(?:buy\s+now|shop\s+now|order\s+(?:now|today)|subscribe\s+now|sign\s+up|get\s+started|learn\s+more|click\s+here|start\s+(?:your\s+)?free\s+trial|request\s+a\s+demo|contact\s+sales|download\s+now|book\s+(?:a\s+)?(?:call|consultation)|add\s+to\s+cart|join\s+now)(?:\b|$)|(?:^|[。！？]\s*)(?:立即购买|马上购买|点击购买|立即订阅|立即注册|免费试用|预约咨询)/iu',
+            '/(?:^|[.!?。！？]\s*)'
+                .'(?:(?=[^.!?。！？]{0,160}\b(?:now|today|tonight|before|while|stock|inventory|supplies|availability|limited(?:[- ]time)?|lasts?|ends?|runs?\s+out)\b)'
+                .'(?:buy|purchase|order|shop|secure|reserve)\s+(?:now|today|yours?\b|(?:your|this|the|our|a|an)\b)'
+                .'|subscribe\s+(?:now|today|to|for)\b|sign\s+up\s+(?:now|today|to|for)\b'
+                .'|get\s+started|learn\s+more|click\s+here|start\s+(?:your\s+)?free\s+trial|request\s+a\s+demo|contact\s+sales|download\s+now|book\s+(?:a\s+)?(?:call|consultation)|add\s+to\s+cart|join\s+now)'
+                .'(?:\b|$)|(?:^|[。！？]\s*)(?:立即购买|马上购买|点击购买|立即订阅|立即注册|免费试用|预约咨询)/iu',
             $prose,
         ) === 1;
     }
@@ -706,7 +713,8 @@ final class DeterministicQualityGate
                 continue;
             }
             $classes = preg_split('/\s+/u', trim($element->getAttribute('class'))) ?: [];
-            if ($element->hasAttribute('data-cta')
+            if (strtolower($element->tagName) === 'button'
+                || $element->hasAttribute('data-cta')
                 || strtolower($element->getAttribute('role')) === 'button'
                 || array_filter($classes, static fn (string $class): bool => preg_match('/(?:^|[-_])cta(?:$|[-_])|call[-_]?to[-_]?action/i', $class) === 1)
                 || $this->isActionLabel(trim($element->textContent))) {
@@ -733,7 +741,14 @@ final class DeterministicQualityGate
 
     private function isActionLabel(string $label): bool
     {
-        return preg_match('/\b(?:buy\s+now|shop\s+now|order\s+(?:now|today)|subscribe(?:\s+now)?|sign\s+up|get\s+started|learn\s+more|click\s+here|start\s+(?:your\s+)?free\s+trial|request\s+a\s+demo|contact\s+sales|download\s+now|book\s+(?:a\s+)?(?:call|consultation)|add\s+to\s+cart|join\s+now)\b|(?:立即购买|马上购买|点击购买|立即订阅|立即注册|免费试用|预约咨询)/iu', $label) === 1;
+        return preg_match(
+            '/^\s*(?:buy|purchase|order|shop|secure|reserve)\s*[.!]?\s*$'
+                .'|(?:^|\b)(?:(?:buy|purchase|order|shop|secure|reserve)\s+(?:now|today|yours?|(?:your|this|the|our|a|an)\s+(?:product|pair|item|collection|plan|place|copy|spot|access))'
+                .'|subscribe(?:\s+(?:now|today|to|for)(?:\s+\S+){0,5})?|sign\s+up(?:\s+(?:now|today|to|for)(?:\s+\S+){0,5})?'
+                .'|get\s+started|learn\s+more|click\s+here|start\s+(?:your\s+)?free\s+trial|request\s+a\s+demo|contact\s+sales|download\s+now|book\s+(?:a\s+)?(?:call|consultation)|add\s+to\s+cart|join\s+now)(?:\b|$)'
+                .'|(?:立即购买|马上购买|点击购买|立即订阅|立即注册|免费试用|预约咨询)/iu',
+            $label,
+        ) === 1;
     }
 
     private function hasMarketMismatch(string $body, string $market): bool
@@ -807,6 +822,7 @@ final class DeterministicQualityGate
     private function stripMarkdown(string $value): string
     {
         $value = $this->withoutFormatCharacters($value);
+        $value = strip_tags($value);
         $value = preg_replace('/!?(?:\[([^\]]*)\])\([^)]*\)/u', '$1', $value) ?? $value;
         $value = preg_replace('/[`*_~>#]+/u', ' ', $value) ?? $value;
         $value = preg_replace('/^\s*(?:[-+*]|\d+\.)\s+/u', '', $value) ?? $value;

@@ -552,17 +552,37 @@ final class PromptCompiler
             if (! array_key_exists($name, $variables)) {
                 continue;
             }
-            $value = $variables[$name];
-            $rendered = is_string($value) ? $value : $this->canonicalJson($value);
-            if ($rendered !== '') {
-                $values[$rendered] = true;
-            }
+            $this->collectSensitiveValues($this->canonicalize($variables[$name]), $values);
         }
 
-        $values = array_keys($values);
+        $values = array_values($values);
         usort($values, fn (string $left, string $right): int => strlen($right) <=> strlen($left));
 
         return $values;
+    }
+
+    /** @param array<string, string> $values */
+    private function collectSensitiveValues(mixed $value, array &$values): void
+    {
+        if (is_array($value)) {
+            if ($value !== []) {
+                $rendered = $this->canonicalJson($value);
+                $values['value:'.$rendered] = $rendered;
+            }
+            foreach ($value as $item) {
+                $this->collectSensitiveValues($item, $values);
+            }
+
+            return;
+        }
+        if (! is_scalar($value)) {
+            return;
+        }
+
+        $rendered = is_string($value) ? $value : $this->canonicalJson($value);
+        if ($rendered !== '') {
+            $values['value:'.$rendered] = $rendered;
+        }
     }
 
     private function canonicalJson(mixed $value): string

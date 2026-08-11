@@ -284,11 +284,44 @@ class DeterministicQualityGateTest extends TestCase
             '<a class="content-cta" href="/next">Explore sizing options</a>',
             '<aside data-cta></aside>',
             '[Start your free trial](/trial)',
+            '[Purchase today](/products)',
+            '[Shop the collection](/collection)',
+            '<button>Reserve yours</button>',
+            '<a href="/alerts">Subscribe for product alerts</a>',
+            '[Sign up for early access](/signup)',
         ] as $probe) {
             $result = $this->gate->inspect($this->substantiveArticle('Acme Run Lab')."\n\n{$probe}", $this->blueprint(), []);
 
             $this->assertContains('cta_not_allowed', array_column($result->issuesAsArray(), 'code'), $probe);
         }
+    }
+
+    public function test_cta_gate_blocks_purchase_and_signup_prose_with_transactional_urgency(): void
+    {
+        foreach ([
+            'Purchase today to secure your product before stock runs out.',
+            'Order yours now while supplies last.',
+            'Shop the collection before inventory runs out.',
+            'Secure your pair today while stock lasts.',
+            'Reserve yours now before availability ends.',
+            'Subscribe today for product alerts.',
+            'Sign up now for early access.',
+        ] as $probe) {
+            $result = $this->gate->inspect($this->substantiveArticle('Acme Run Lab')."\n\n{$probe}", $this->blueprint(), []);
+
+            $this->assertContains('cta_not_allowed', array_column($result->issuesAsArray(), 'code'), $probe);
+        }
+    }
+
+    public function test_cta_gate_allows_editorial_discussion_of_transaction_verbs(): void
+    {
+        $prose = 'Purchase decisions depend on fit evidence. Order processing usually takes two days. '
+            .'Shop safety policies protect workers. Secure storage prevents credential leaks. '
+            .'Reserve capacity is measured separately. Subscribers receive account notices. '
+            .'Sign-up conversion is one metric in an analytics report. [Purchase criteria](/guides/criteria).';
+        $result = $this->gate->inspect($this->substantiveArticle('Acme Run Lab')."\n\n{$prose}", $this->blueprint(), []);
+
+        $this->assertNotContains('cta_not_allowed', array_column($result->issuesAsArray(), 'code'));
     }
 
     public function test_gate_enforces_total_target_length_tolerance(): void

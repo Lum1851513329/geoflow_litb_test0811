@@ -19,10 +19,11 @@ final class SensitiveContentRedactor
             throw new RuntimeException('The encrypted model payload is invalid.');
         }
 
-        $values = array_values(array_unique(array_filter(
-            (array) ($payload['sensitive_values'] ?? []),
-            static fn (mixed $value): bool => is_string($value) && $value !== '',
-        )));
+        $unique = [];
+        foreach ((array) ($payload['sensitive_values'] ?? []) as $value) {
+            $this->collect($value, $unique);
+        }
+        $values = array_values($unique);
         usort($values, static fn (string $left, string $right): int => mb_strlen($right, 'UTF-8') <=> mb_strlen($left, 'UTF-8'));
 
         return $values;
@@ -55,5 +56,56 @@ final class SensitiveContentRedactor
         }
 
         return $safe;
+    }
+
+    /** @param array<string, string> $values */
+    private function collect(mixed $value, array &$values): void
+    {
+        if (is_array($value)) {
+            if ($value !== []) {
+                $rendered = $this->canonicalJson($value);
+                $values['value:'.$rendered] = $rendered;
+            }
+            foreach ($value as $item) {
+                $this->collect($item, $values);
+            }
+
+            return;
+        }
+        if (! is_scalar($value)) {
+            return;
+        }
+
+        $rendered = is_string($value)
+            ? $value
+            : json_encode($value, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
+        if ($rendered !== '') {
+            $values['value:'.$rendered] = $rendered;
+        }
+    }
+
+    private function canonicalJson(array $value): string
+    {
+        if (array_is_list($value)) {
+            $canonical = array_map(fn (mixed $item): mixed => is_array($item) ? $this->canonicalize($item) : $item, $value);
+        } else {
+            $canonical = $this->canonicalize($value);
+        }
+
+        return json_encode($canonical, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
+    }
+
+    private function canonicalize(array $value): array
+    {
+        if (! array_is_list($value)) {
+            ksort($value, SORT_STRING);
+        }
+        foreach ($value as $key => $item) {
+            if (is_array($item)) {
+                $value[$key] = $this->canonicalize($item);
+            }
+        }
+
+        return $value;
     }
 }
