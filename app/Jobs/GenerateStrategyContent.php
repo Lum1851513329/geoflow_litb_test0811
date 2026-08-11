@@ -4,11 +4,10 @@ namespace App\Jobs;
 
 use App\Domain\ContentGeneration\ContentGenerationCoordinator;
 use App\Models\ContentGenerationRun;
-use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
 
-final class GenerateStrategyContent implements ShouldBeUnique, ShouldQueue
+final class GenerateStrategyContent implements ShouldQueue
 {
     use Queueable;
 
@@ -21,8 +20,6 @@ final class GenerateStrategyContent implements ShouldBeUnique, ShouldQueue
     public int $maxExceptions = 3;
 
     public int $timeout = 900;
-
-    public int $uniqueFor = 1800;
 
     public function __construct(public readonly int $runId) {}
 

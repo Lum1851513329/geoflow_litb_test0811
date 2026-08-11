@@ -49,6 +49,7 @@ final class ContentGenerationCoordinator
         private readonly ArticleContentGenerationService $generator,
         private readonly DeterministicQualityGate $deterministicQualityGate,
         private readonly SemanticQualityReviewer $semanticReviewer,
+        private readonly SensitiveContentRedactor $redactor,
     ) {}
 
     public function generate(ContentGenerationRun $run): ContentGenerationRun
@@ -515,8 +516,14 @@ final class ContentGenerationCoordinator
         ?string $auditPrompt = null,
         array $sensitiveValues = [],
     ): array {
+        $sensitiveValues = array_values(array_unique([
+            ...$sensitiveValues,
+            ...$this->redactor->valuesForRun($run),
+        ]));
+        $safePrompt = $this->redactor->string($auditPrompt ?? $prompt, $sensitiveValues);
+        $safeInputSnapshot = $this->redactor->value($inputSnapshot, $sensitiveValues);
         try {
-            $step = DB::transaction(function () use ($run, $type, $prompt, $auditPrompt, $inputSnapshot, $claim): ?ContentGenerationRunStep {
+            $step = DB::transaction(function () use ($run, $type, $safePrompt, $safeInputSnapshot, $claim): ?ContentGenerationRunStep {
                 $locked = $this->lockClaim((int) $run->id, $claim);
                 if ($locked === null) {
                     return null;
@@ -529,8 +536,8 @@ final class ContentGenerationCoordinator
                         ->where('content_generation_run_id', $run->id)->max('sequence')) + 1,
                     'step_type' => $type,
                     'status' => ContentGenerationRunStep::STATUS_RUNNING,
-                    'prompt' => $auditPrompt ?? $prompt,
-                    'input_snapshot' => $inputSnapshot,
+                    'prompt' => $safePrompt,
+                    'input_snapshot' => $safeInputSnapshot,
                     'started_at' => now(),
                 ]);
             });
@@ -552,8 +559,8 @@ final class ContentGenerationCoordinator
                 throw new RuntimeException('Selected AI model configuration changed after run preparation.');
             }
             $response = $this->generator->generate($model, $prompt);
-            $output = (string) ($response->text ?? '');
-            if (! $this->completeStep($run, $step, $response, $output, $claim)) {
+            $output = $this->redactor->string((string) ($response->text ?? ''), $sensitiveValues);
+            if (! $this->completeStep($run, $step, $response, $output, $claim, $sensitiveValues)) {
                 return ['ok' => false, 'lost' => true, 'fatal' => false, 'output' => '', 'step' => $step, 'exception' => new RuntimeException('Generation claim was superseded.')];
             }
 
@@ -592,9 +599,9 @@ final class ContentGenerationCoordinator
     }
 
     /** @param array{token: string, version: int} $claim */
-    private function completeStep(ContentGenerationRun $run, ContentGenerationRunStep $step, AgentResponse $response, string $output, array $claim): bool
+    private function completeStep(ContentGenerationRun $run, ContentGenerationRunStep $step, AgentResponse $response, string $output, array $claim, array $sensitiveValues): bool
     {
-        return DB::transaction(function () use ($run, $step, $response, $output, $claim): bool {
+        return DB::transaction(function () use ($run, $step, $response, $output, $claim, $sensitiveValues): bool {
             $locked = $this->lockClaim((int) $run->id, $claim);
             if ($locked === null) {
                 return false;
@@ -602,11 +609,11 @@ final class ContentGenerationCoordinator
             ContentGenerationRunStep::query()->whereKey($step->id)->update([
                 'status' => ContentGenerationRunStep::STATUS_COMPLETED,
                 'output' => $output,
-                'metadata' => json_encode([
+                'metadata' => json_encode($this->redactor->value([
                     'invocation_id' => $response->invocationId,
                     'provider' => $response->meta->provider,
                     'model' => $response->meta->model,
-                ], JSON_THROW_ON_ERROR),
+                ], $sensitiveValues), JSON_THROW_ON_ERROR),
                 'input_tokens' => $response->usage->promptTokens,
                 'output_tokens' => $response->usage->completionTokens,
                 'completed_at' => now(),

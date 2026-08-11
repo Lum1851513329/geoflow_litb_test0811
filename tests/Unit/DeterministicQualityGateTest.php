@@ -244,6 +244,53 @@ class DeterministicQualityGateTest extends TestCase
         $this->assertContains('market_mismatch', $codes);
     }
 
+    public function test_external_link_gate_parses_protocol_relative_and_arbitrary_scheme_destinations(): void
+    {
+        $probes = [
+            '[protocol relative](//outside.example/path)',
+            '<a href="//outside.example/path">HTML protocol relative</a>',
+            '[file transfer](ftp://outside.example/archive)',
+            '<a href="mailto:outside@example.test">Email</a>',
+            '<img src="data:image/svg+xml;base64,PHN2Zy8+" alt="embedded">',
+            "[reference][outside]\n\n[outside]: javascript:alert(1)",
+        ];
+
+        foreach ($probes as $probe) {
+            $result = $this->gate->inspect($this->substantiveArticle('Acme Run Lab')."\n\n{$probe}", $this->blueprint(), [
+                'external_links_allowed' => false,
+            ]);
+
+            $this->assertContains('external_link_not_allowed', array_column($result->issuesAsArray(), 'code'), $probe);
+        }
+    }
+
+    public function test_external_link_gate_allows_relative_anchors_and_non_link_prose(): void
+    {
+        $markdown = $this->substantiveArticle('Acme Run Lab')
+            ."\n\n[Local sizing](/guides/sizing) [Care notes](../care) [Footnote](#fit-note). Readers learn how to buy safely by comparing fit evidence.";
+
+        $result = $this->gate->inspect($markdown, $this->blueprint(), [
+            'external_links_allowed' => false,
+        ]);
+        $codes = array_column($result->issuesAsArray(), 'code');
+
+        $this->assertNotContains('external_link_not_allowed', $codes);
+        $this->assertNotContains('cta_not_allowed', $codes);
+    }
+
+    public function test_cta_gate_blocks_explicit_markers_and_actionable_link_labels(): void
+    {
+        foreach ([
+            '<a class="content-cta" href="/next">Explore sizing options</a>',
+            '<aside data-cta></aside>',
+            '[Start your free trial](/trial)',
+        ] as $probe) {
+            $result = $this->gate->inspect($this->substantiveArticle('Acme Run Lab')."\n\n{$probe}", $this->blueprint(), []);
+
+            $this->assertContains('cta_not_allowed', array_column($result->issuesAsArray(), 'code'), $probe);
+        }
+    }
+
     public function test_gate_enforces_total_target_length_tolerance(): void
     {
         $markdown = "## Sizing\n".$this->words(80)."\n\n## Care\n".$this->words(80);

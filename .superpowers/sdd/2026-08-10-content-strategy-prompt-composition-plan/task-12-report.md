@@ -130,3 +130,19 @@
 - `npm run build`, targeted Pint `--test`, and `git diff --check` passed.
 - Detailed final-round report: `docs/reports/task12-round1-hardening.md`.
 - The pre-existing `docker-compose.yml` edit remains unchanged and excluded.
+
+## Hardening round 2 — durable dispatch and parser/security closure
+
+- Generation reservation and database-queue publication now share one transaction and one durable marker; unique-lock orphaning can no longer suppress a run, and scheduled stale recovery publishes at most one job without another request.
+- PostgreSQL and SQLite reject bindings inserted or moved into published parents, reject mutations moved out of published parents, and reject audit children appended after a run becomes terminal. Draft binding UPDATE/DELETE semantics are covered on PostgreSQL.
+- Provider-derived output is recursively scrubbed before it reaches steps, reports, run output, revision inputs, or adopted Article columns.
+- CommonMark and HTML parsing now identifies protocol-relative and arbitrary-scheme destinations, while CTA enforcement recognizes explicit structural markers and conservative action labels without flagging benign prose.
+- Unicode-aware token estimation replaces byte length, including an 8,000-Han-character budget boundary; blueprint heading and purpose validation labels are localized in English and Simplified Chinese.
+
+### Hardening-round-2 verification
+
+- Focused SQLite: 238 passed / 1,162 assertions.
+- Real PostgreSQL per file: schema 14 / 88; coordinator 30 / 165 (one expected SQLite-only skip); admin workflow 31 / 322; adoption 9 / 42.
+- Full repository before the final queue-configuration guard: 1,752 passed / 13,192 assertions, 2 skipped, with only the same four unrelated baseline environment/filesystem failures; the final guard and its focused regression then passed.
+- Targeted Pint, Vite production build (64 modules), and `git diff --check` passed.
+- The pre-existing `docker-compose.yml` edit remains unchanged and excluded.

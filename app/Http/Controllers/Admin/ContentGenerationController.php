@@ -7,7 +7,6 @@ use App\Domain\ContentGeneration\GenerationAdoptionService;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Admin\AdoptContentGenerationRequest;
 use App\Http\Requests\Admin\RequestContentGenerationRequest;
-use App\Jobs\GenerateStrategyContent;
 use App\Models\Admin;
 use App\Models\Author;
 use App\Models\Category;
@@ -31,9 +30,6 @@ final class ContentGenerationController extends Controller
         $data = $request->validated();
         $reservation = $this->generationRequests->reserve($brief, $data, $this->actor($request));
         $run = $reservation['run'];
-        if ($reservation['dispatch_required']) {
-            GenerateStrategyContent::dispatch((int) $run->id);
-        }
 
         return redirect()->route('admin.content-generations.show', $run)
             ->with('message', __('admin.content_strategy.messages.generation_queued'));

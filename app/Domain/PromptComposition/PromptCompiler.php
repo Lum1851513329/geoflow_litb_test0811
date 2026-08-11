@@ -317,10 +317,40 @@ final class PromptCompiler
         return $escaped;
     }
 
-    /* A byte fallback tokenizer cannot emit more tokens than input bytes. */
     private function estimateTokens(string $text): int
     {
-        return strlen($text);
+        if ($text === '') {
+            return 0;
+        }
+        if (class_exists(\Normalizer::class)) {
+            $normalized = \Normalizer::normalize($text, \Normalizer::FORM_C);
+            if ($normalized !== false) {
+                $text = $normalized;
+            }
+        }
+
+        preg_match_all(
+            '/[\p{Han}\p{Hiragana}\p{Katakana}\p{Hangul}]|[\p{L}\p{N}]+|[^\s]/u',
+            $text,
+            $matches,
+        );
+        $tokens = 0;
+        foreach ($matches[0] ?? [] as $segment) {
+            if (preg_match('/^[\p{Han}\p{Hiragana}\p{Katakana}\p{Hangul}]$/u', $segment) === 1) {
+                $tokens++;
+
+                continue;
+            }
+            if (preg_match('/^[\p{L}\p{N}]+$/u', $segment) === 1) {
+                $tokens += max(1, (int) ceil(mb_strlen($segment, 'UTF-8') / 4));
+
+                continue;
+            }
+            // Punctuation, symbols, emoji scalars, and joiners each retain one conservative unit.
+            $tokens += max(1, mb_strlen($segment, 'UTF-8'));
+        }
+
+        return $tokens;
     }
 
     /**

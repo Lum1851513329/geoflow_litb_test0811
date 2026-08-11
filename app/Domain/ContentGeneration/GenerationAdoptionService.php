@@ -14,6 +14,7 @@ final class GenerationAdoptionService
 {
     public function __construct(
         private readonly ArticleGeoFlowService $articleGeoFlowService,
+        private readonly SensitiveContentRedactor $redactor,
     ) {}
 
     /**
@@ -39,13 +40,15 @@ final class GenerationAdoptionService
                 throw new DomainException('Only ready-for-review generation runs can be adopted.');
             }
 
-            $rawOutput = (string) $lockedRun->raw_output;
+            $sensitiveValues = $this->redactor->valuesForRun($lockedRun);
+            $rawOutput = $this->redactor->string((string) $lockedRun->raw_output, $sensitiveValues);
             if (trim($rawOutput) === '') {
                 throw new DomainException('A generation run without output cannot be adopted.');
             }
 
-            $created = $this->articleGeoFlowService->createArticle(array_merge($articleData, [
-                'content' => $articleData['content'] ?? $rawOutput,
+            $safeArticleData = $this->redactor->value($articleData, $sensitiveValues);
+            $created = $this->articleGeoFlowService->createArticle(array_merge($safeArticleData, [
+                'content' => $safeArticleData['content'] ?? $rawOutput,
                 'status' => 'draft',
                 'review_status' => 'pending',
                 'is_ai_generated' => 1,
@@ -54,23 +57,6 @@ final class GenerationAdoptionService
 
             /** @var Article $article */
             $article = Article::query()->findOrFail($created['id']);
-
-            $updated = ContentGenerationRun::query()
-                ->whereKey($lockedRun->id)
-                ->where('status', ContentGenerationRun::STATUS_READY_FOR_REVIEW)
-                ->whereNull('article_id')
-                ->update([
-                    'article_id' => $article->id,
-                    'adopted_output' => $article->content,
-                    'status' => ContentGenerationRun::STATUS_ADOPTED,
-                    'adopted_by_admin_id' => $actor->id,
-                    'adopted_at' => now(),
-                    'updated_at' => now(),
-                ]);
-
-            if ($updated !== 1) {
-                throw new DomainException('The generation run changed before it could be adopted.');
-            }
 
             ContentGenerationRunStep::query()->create([
                 'content_generation_run_id' => $lockedRun->id,
@@ -90,6 +76,23 @@ final class GenerationAdoptionService
                 'started_at' => now(),
                 'completed_at' => now(),
             ]);
+
+            $updated = ContentGenerationRun::query()
+                ->whereKey($lockedRun->id)
+                ->where('status', ContentGenerationRun::STATUS_READY_FOR_REVIEW)
+                ->whereNull('article_id')
+                ->update([
+                    'article_id' => $article->id,
+                    'adopted_output' => $article->content,
+                    'status' => ContentGenerationRun::STATUS_ADOPTED,
+                    'adopted_by_admin_id' => $actor->id,
+                    'adopted_at' => now(),
+                    'updated_at' => now(),
+                ]);
+
+            if ($updated !== 1) {
+                throw new DomainException('The generation run changed before it could be adopted.');
+            }
 
             return $article;
         });

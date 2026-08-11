@@ -215,7 +215,7 @@ class AdminPromptModulesTest extends TestCase
             'version' => 1,
             'matching_rules' => [],
             'generation_policy' => [],
-            'lifecycle_status' => PromptPresetVersion::STATUS_PRODUCTION,
+            'lifecycle_status' => PromptPresetVersion::STATUS_DRAFT,
             'created_by_admin_id' => $this->superAdmin->id,
         ]);
         PromptPresetModuleVersion::query()->create([
@@ -224,6 +224,7 @@ class AdminPromptModulesTest extends TestCase
             'sort_order' => 1,
             'is_required' => true,
         ]);
+        $presetVersion->forceFill(['lifecycle_status' => PromptPresetVersion::STATUS_PRODUCTION])->save();
 
         $this->actingAs($this->superAdmin, 'admin')->delete(
             route('admin.prompt-modules.versions.destroy', [$this->module, $this->productionVersion]),
@@ -283,6 +284,7 @@ class AdminPromptModulesTest extends TestCase
             'is_required' => true,
             'module_snapshot' => ['module_key' => $this->module->module_key, 'version' => 2],
         ]);
+        $run->forceFill(['status' => ContentGenerationRun::STATUS_COMPLETED])->save();
 
         $response = $this->actingAs($this->superAdmin, 'admin')->get(route('admin.prompt-modules.show', [
             $this->module,
@@ -1002,7 +1004,7 @@ class AdminPromptModulesTest extends TestCase
             'ai_model_id' => $model->id,
             'article_id' => $article->id,
             'compiled_prompt' => 'Compiled Prompt.',
-            'status' => ContentGenerationRun::STATUS_COMPLETED,
+            'status' => ContentGenerationRun::STATUS_QUEUED,
             'idempotency_key' => 'prompt-usage-run',
         ]);
     }

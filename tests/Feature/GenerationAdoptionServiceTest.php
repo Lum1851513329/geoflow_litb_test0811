@@ -19,6 +19,7 @@ use App\Models\PromptPreset;
 use App\Models\PromptPresetVersion;
 use DomainException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\DB;
 use RuntimeException;
 use Tests\TestCase;
@@ -187,6 +188,41 @@ class GenerationAdoptionServiceTest extends TestCase
         $this->assertSame($first->id, $second->id);
         $this->assertSame(1, Article::query()->count());
         $this->assertSame(1, $run->fresh()->steps()->where('step_type', ContentGenerationRunStep::TYPE_ADOPTION)->count());
+    }
+
+    public function test_adoption_scrubs_sensitive_values_from_operator_content_and_every_plaintext_audit_column(): void
+    {
+        $secret = 'provider-echo-secret-8842';
+        $run = $this->readyRun(ContentGenerationRun::STATUS_PENDING);
+        $run->forceFill([
+            'encrypted_model_payload' => Crypt::encryptString(json_encode([
+                'prompt' => "Use {$secret} internally.",
+                'sensitive_values' => [$secret],
+            ], JSON_THROW_ON_ERROR)),
+            'raw_output' => 'Safe article prepared for adoption.',
+            'status' => ContentGenerationRun::STATUS_READY_FOR_REVIEW,
+        ])->save();
+
+        $article = $this->service->adopt($run->fresh(), $this->articleData([
+            'title' => "Title {$secret}",
+            'excerpt' => "Excerpt {$secret}",
+            'content' => "Edited provider output {$secret}",
+            'keywords' => "running, {$secret}",
+            'meta_description' => "Description {$secret}",
+        ]), $this->admin);
+
+        $this->assertStringNotContainsString($secret, json_encode(
+            DB::table('articles')->where('id', $article->id)->first(),
+            JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR,
+        ));
+        foreach (['content_generation_runs', 'content_generation_run_steps'] as $table) {
+            $this->assertStringNotContainsString($secret, json_encode(
+                DB::table($table)->get()->map(fn (object $row): array => (array) $row)->all(),
+                JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR,
+            ));
+        }
+        $this->assertStringContainsString('[REDACTED]', (string) $article->content);
+        $this->assertStringContainsString('[REDACTED]', (string) $run->fresh()->adopted_output);
     }
 
     /** @param array<string, mixed> $overrides */

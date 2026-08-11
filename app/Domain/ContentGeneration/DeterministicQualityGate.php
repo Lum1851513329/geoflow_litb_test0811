@@ -3,6 +3,14 @@
 namespace App\Domain\ContentGeneration;
 
 use App\Domain\ContentStrategy\BlueprintValidator;
+use DOMDocument;
+use DOMElement;
+use League\CommonMark\Extension\CommonMark\Node\Block\HtmlBlock;
+use League\CommonMark\Extension\CommonMark\Node\Inline\AbstractWebResource;
+use League\CommonMark\Extension\CommonMark\Node\Inline\HtmlInline;
+use League\CommonMark\GithubFlavoredMarkdownConverter;
+use League\CommonMark\Node\Node;
+use League\CommonMark\Node\StringContainerInterface;
 
 final class DeterministicQualityGate
 {
@@ -178,7 +186,7 @@ final class DeterministicQualityGate
         }
 
         if (($requirements['external_links_allowed'] ?? true) === false
-            && preg_match('/(?:https?:\/\/|\[[^\]]+\]\([^)]*https?:\/\/)/iu', $visibleMarkdown) === 1) {
+            && $this->containsExternalDestination($visibleMarkdown)) {
             $issues[] = new QualityIssue(
                 code: 'external_link_not_allowed',
                 severity: QualityIssue::SEVERITY_ERROR,
@@ -189,7 +197,7 @@ final class DeterministicQualityGate
         }
 
         foreach ($sections as $section) {
-            if (! $section['cta_allowed'] && $this->containsCallToAction($document['section_content'][$section['key']] ?? '')) {
+            if (! $section['cta_allowed'] && $this->containsCallToAction($document['section_markdown'][$section['key']] ?? '')) {
                 $issues[] = new QualityIssue(
                     code: 'cta_not_allowed',
                     severity: QualityIssue::SEVERITY_ERROR,
@@ -261,7 +269,7 @@ final class DeterministicQualityGate
 
     /**
      * @param  list<array{key: string, heading: string, minimum_words: int, questions: list<string>}>  $sections
-     * @return array{headings: list<array{level: int, text: string, section_key: string|null}>, paragraphs: list<array{text: string, section_key: string|null}>, section_content: array<string, string>, body: string}
+     * @return array{headings: list<array{level: int, text: string, section_key: string|null}>, paragraphs: list<array{text: string, section_key: string|null}>, section_content: array<string, string>, section_markdown: array<string, string>, body: string}
      */
     private function parseMarkdown(string $markdown, array $sections): array
     {
@@ -274,6 +282,7 @@ final class DeterministicQualityGate
         $headings = [];
         $paragraphs = [];
         $sectionContent = [];
+        $sectionMarkdown = [];
         $bodyLines = [];
         $paragraphLines = [];
         $currentSectionKey = null;
@@ -298,6 +307,7 @@ final class DeterministicQualityGate
                     $currentSectionKey = $sectionKey;
                     $currentSectionLevel = $level;
                     $sectionContent[$sectionKey] ??= '';
+                    $sectionMarkdown[$sectionKey] ??= '';
                 } elseif ($currentSectionLevel !== null && $level <= $currentSectionLevel) {
                     $currentSectionKey = null;
                     $currentSectionLevel = null;
@@ -321,6 +331,7 @@ final class DeterministicQualityGate
             $paragraphLines[] = $cleanLine;
             if ($currentSectionKey !== null) {
                 $sectionContent[$currentSectionKey] = trim(($sectionContent[$currentSectionKey] ?? '').' '.$cleanLine);
+                $sectionMarkdown[$currentSectionKey] = trim(($sectionMarkdown[$currentSectionKey] ?? '')."\n".$line);
             }
         }
 
@@ -330,6 +341,7 @@ final class DeterministicQualityGate
             'headings' => $headings,
             'paragraphs' => $paragraphs,
             'section_content' => $sectionContent,
+            'section_markdown' => $sectionMarkdown,
             'body' => trim(implode(' ', $bodyLines)),
         ];
     }
@@ -568,7 +580,160 @@ final class DeterministicQualityGate
 
     private function containsCallToAction(string $content): bool
     {
-        return preg_match('/\b(?:buy|shop|order|subscribe|sign up|get started|learn more|click here)\b|(?:立即购买|马上购买|点击购买|立即订阅|立即注册)/iu', $content) === 1;
+        $document = $this->markdownDocument($content);
+        $walker = $document->walker();
+        while (($event = $walker->next()) !== null) {
+            if (! $event->isEntering()) {
+                continue;
+            }
+            $node = $event->getNode();
+            if ($node instanceof AbstractWebResource && $this->isActionLabel($this->nodeText($node))) {
+                return true;
+            }
+            if (($node instanceof HtmlInline || $node instanceof HtmlBlock)
+                && $this->htmlContainsCtaMarker($node->getLiteral())) {
+                return true;
+            }
+        }
+
+        $prose = $this->stripMarkdown($content);
+
+        return preg_match(
+            '/(?:^|[.!?。！？]\s*)(?:buy\s+now|shop\s+now|order\s+(?:now|today)|subscribe\s+now|sign\s+up|get\s+started|learn\s+more|click\s+here|start\s+(?:your\s+)?free\s+trial|request\s+a\s+demo|contact\s+sales|download\s+now|book\s+(?:a\s+)?(?:call|consultation)|add\s+to\s+cart|join\s+now)(?:\b|$)|(?:^|[。！？]\s*)(?:立即购买|马上购买|点击购买|立即订阅|立即注册|免费试用|预约咨询)/iu',
+            $prose,
+        ) === 1;
+    }
+
+    private function containsExternalDestination(string $markdown): bool
+    {
+        $walker = $this->markdownDocument($markdown)->walker();
+        while (($event = $walker->next()) !== null) {
+            if (! $event->isEntering()) {
+                continue;
+            }
+            $node = $event->getNode();
+            if ($node instanceof AbstractWebResource && $this->isExternalDestination($node->getUrl())) {
+                return true;
+            }
+            if ($node instanceof HtmlInline || $node instanceof HtmlBlock) {
+                foreach ($this->htmlDestinations($node->getLiteral()) as $destination) {
+                    if ($this->isExternalDestination($destination)) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private function markdownDocument(string $markdown): Node
+    {
+        $converter = new GithubFlavoredMarkdownConverter([
+            'allow_unsafe_links' => true,
+            'html_input' => 'allow',
+        ]);
+
+        return $converter->convert($markdown)->getDocument();
+    }
+
+    private function isExternalDestination(string $destination): bool
+    {
+        $destination = trim(html_entity_decode($destination, ENT_QUOTES | ENT_HTML5, 'UTF-8'));
+        $destination = preg_replace('/[\x00-\x20\x7F]+/u', '', $destination) ?? $destination;
+        if ($destination === '' || str_starts_with($destination, '#')
+            || str_starts_with($destination, '/') && ! str_starts_with($destination, '//')
+            || str_starts_with($destination, './') || str_starts_with($destination, '../')
+            || str_starts_with($destination, '?')) {
+            return false;
+        }
+
+        return str_starts_with($destination, '//')
+            || preg_match('/^[A-Za-z][A-Za-z0-9+.-]*:/u', $destination) === 1;
+    }
+
+    /** @return list<string> */
+    private function htmlDestinations(string $html): array
+    {
+        $document = new DOMDocument;
+        $previous = libxml_use_internal_errors(true);
+        $loaded = $document->loadHTML(
+            '<div id="geoflow-fragment">'.$html.'</div>',
+            LIBXML_HTML_NOIMPLIED | LIBXML_HTML_NODEFDTD | LIBXML_NONET,
+        );
+        libxml_clear_errors();
+        libxml_use_internal_errors($previous);
+        if (! $loaded) {
+            return [];
+        }
+
+        $destinations = [];
+        foreach ($document->getElementsByTagName('*') as $element) {
+            foreach (['href', 'src', 'action', 'formaction', 'poster', 'xlink:href'] as $attribute) {
+                if ($element->hasAttribute($attribute)) {
+                    $destinations[] = $element->getAttribute($attribute);
+                }
+            }
+            if ($element->hasAttribute('srcset')) {
+                foreach (explode(',', $element->getAttribute('srcset')) as $candidate) {
+                    $parts = preg_split('/\s+/u', trim($candidate)) ?: [];
+                    if (($parts[0] ?? '') !== '') {
+                        $destinations[] = $parts[0];
+                    }
+                }
+            }
+        }
+
+        return $destinations;
+    }
+
+    private function htmlContainsCtaMarker(string $html): bool
+    {
+        $document = new DOMDocument;
+        $previous = libxml_use_internal_errors(true);
+        $loaded = $document->loadHTML(
+            '<div id="geoflow-fragment">'.$html.'</div>',
+            LIBXML_HTML_NOIMPLIED | LIBXML_HTML_NODEFDTD | LIBXML_NONET,
+        );
+        libxml_clear_errors();
+        libxml_use_internal_errors($previous);
+        if (! $loaded) {
+            return false;
+        }
+
+        foreach ($document->getElementsByTagName('*') as $element) {
+            if (! $element instanceof DOMElement || $element->getAttribute('id') === 'geoflow-fragment') {
+                continue;
+            }
+            $classes = preg_split('/\s+/u', trim($element->getAttribute('class'))) ?: [];
+            if ($element->hasAttribute('data-cta')
+                || strtolower($element->getAttribute('role')) === 'button'
+                || array_filter($classes, static fn (string $class): bool => preg_match('/(?:^|[-_])cta(?:$|[-_])|call[-_]?to[-_]?action/i', $class) === 1)
+                || $this->isActionLabel(trim($element->textContent))) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function nodeText(Node $node): string
+    {
+        $text = '';
+        $walker = $node->walker();
+        while (($event = $walker->next()) !== null) {
+            $child = $event->getNode();
+            if ($event->isEntering() && $child instanceof StringContainerInterface) {
+                $text .= ' '.$child->getLiteral();
+            }
+        }
+
+        return trim($text);
+    }
+
+    private function isActionLabel(string $label): bool
+    {
+        return preg_match('/\b(?:buy\s+now|shop\s+now|order\s+(?:now|today)|subscribe(?:\s+now)?|sign\s+up|get\s+started|learn\s+more|click\s+here|start\s+(?:your\s+)?free\s+trial|request\s+a\s+demo|contact\s+sales|download\s+now|book\s+(?:a\s+)?(?:call|consultation)|add\s+to\s+cart|join\s+now)\b|(?:立即购买|马上购买|点击购买|立即订阅|立即注册|免费试用|预约咨询)/iu', $label) === 1;
     }
 
     private function hasMarketMismatch(string $body, string $market): bool

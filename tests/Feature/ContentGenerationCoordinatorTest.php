@@ -257,6 +257,45 @@ class ContentGenerationCoordinatorTest extends TestCase
         Event::assertDispatched(ContentGenerationFailed::class, fn ($event): bool => $event->runId === $run->id);
     }
 
+    public function test_provider_echoed_sensitive_values_are_scrubbed_from_every_persisted_generation_column(): void
+    {
+        $secret = 'secret-campaign-value';
+        $initial = $this->substantiveArticle("Provider echoed {$secret} in the initial article.");
+        $semantic = json_encode([
+            'passed' => false,
+            'score' => 72,
+            'issues' => [[
+                'code' => 'clarity',
+                'section_key' => 'fit',
+                'message' => "Provider echoed {$secret} in semantic review.",
+                'repair_instruction' => "Remove {$secret} without changing supported facts.",
+            ]],
+        ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
+        $revision = $this->substantiveArticle("The revision also echoed {$secret}.");
+        $this->fakeGenerator->queue($initial, $semantic, $revision, $this->semanticPass());
+
+        $run = $this->coordinator->generate($this->pendingRun(withEvidence: true))->fresh();
+
+        $this->assertSame(ContentGenerationRun::STATUS_READY_FOR_REVIEW, $run->status);
+        $this->assertStringContainsString($secret, $this->fakeGenerator->prompts[0]);
+        foreach (array_slice($this->fakeGenerator->prompts, 1) as $prompt) {
+            $this->assertStringNotContainsString($secret, $prompt);
+        }
+        foreach (['content_generation_runs', 'content_generation_run_steps', 'content_quality_reports'] as $table) {
+            $rows = DB::table($table)->get()->map(fn (object $row): array => (array) $row)->all();
+            $this->assertStringNotContainsString(
+                $secret,
+                json_encode($rows, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR),
+                "Sensitive provider output leaked through {$table}.",
+            );
+        }
+        $this->assertStringContainsString('[REDACTED]', (string) $run->raw_output);
+        $this->assertStringContainsString('[REDACTED]', json_encode(
+            $run->qualityReports()->get()->toArray(),
+            JSON_THROW_ON_ERROR,
+        ));
+    }
+
     public function test_empty_initial_output_fails_without_quality_or_revision_calls(): void
     {
         $this->fakeGenerator->queue(" \n\t ");
@@ -605,6 +644,10 @@ class ContentGenerationCoordinatorTest extends TestCase
         $this->assertNull($run->fresh()->compiled_prompt);
         $run->fresh()->forceFill(['compiled_prompt' => 'initialized before rollback'])->save();
 
+        $dispatchMigration = require database_path('migrations/2026_08_11_000200_add_content_generation_dispatch_marker.php');
+        $auditMigration = require database_path('migrations/2026_08_11_000100_enforce_content_generation_audit_immutability.php');
+        $dispatchMigration->down();
+        $auditMigration->down();
         $migration->down();
         $this->assertFalse($this->generationRunColumn('compiled_prompt')['nullable']);
         $this->assertSame('queued', $this->columnDefault('status'));
@@ -614,6 +657,8 @@ class ContentGenerationCoordinatorTest extends TestCase
         $this->assertDatabaseRejects(fn () => ContentGenerationRun::query()->whereKey($run->id)->delete());
 
         $migration->up();
+        $auditMigration->up();
+        $dispatchMigration->up();
         $this->assertTrue($this->generationRunColumn('compiled_prompt')['nullable']);
         $this->assertSame('pending', $this->columnDefault('status'));
         $run->fresh()->forceFill([
@@ -784,7 +829,7 @@ class ContentGenerationCoordinatorTest extends TestCase
             'version' => 1,
             'matching_rules' => ['content_type' => 'guide'],
             'generation_policy' => ['evidence_required' => $evidenceRequired],
-            'lifecycle_status' => PromptPresetVersion::STATUS_PRODUCTION,
+            'lifecycle_status' => PromptPresetVersion::STATUS_DRAFT,
         ]);
         PromptPresetModuleVersion::query()->create([
             'prompt_preset_version_id' => $presetVersion->id,
@@ -792,6 +837,7 @@ class ContentGenerationCoordinatorTest extends TestCase
             'sort_order' => 1,
             'is_required' => true,
         ]);
+        $presetVersion->forceFill(['lifecycle_status' => PromptPresetVersion::STATUS_PRODUCTION])->save();
         $model = AiModel::query()->create([
             'name' => 'Fake model',
             'version' => '2026-08',
@@ -841,6 +887,12 @@ class ContentGenerationCoordinatorTest extends TestCase
         $this->fakeGenerator->queue(new RuntimeException('interrupted before initial response persisted'));
         $failed = $this->coordinator->generate($run)->fresh();
         $article = $this->substantiveArticle();
+        $failed->forceFill([
+            'status' => ContentGenerationRun::STATUS_GENERATING,
+            'error_message' => null,
+            'completed_at' => null,
+            'lease_expires_at' => now()->subMinute(),
+        ])->save();
         $initialStep = $failed->steps()->create([
             'sequence' => ((int) $failed->steps()->max('sequence')) + 1,
             'step_type' => ContentGenerationRunStep::TYPE_INITIAL_GENERATION,
@@ -852,11 +904,7 @@ class ContentGenerationCoordinatorTest extends TestCase
             'completed_at' => now(),
         ]);
         $failed->forceFill([
-            'status' => ContentGenerationRun::STATUS_GENERATING,
             'raw_output' => $article,
-            'error_message' => null,
-            'completed_at' => null,
-            'lease_expires_at' => now()->subMinute(),
         ])->save();
 
         return [$failed->fresh(), $initialStep->fresh()];

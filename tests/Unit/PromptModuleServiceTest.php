@@ -248,7 +248,7 @@ class PromptModuleServiceTest extends TestCase
             'version' => 1,
             'matching_rules' => ['market_code' => 'US'],
             'generation_policy' => ['max_tokens' => 1200],
-            'lifecycle_status' => PromptPresetVersion::STATUS_PRODUCTION,
+            'lifecycle_status' => PromptPresetVersion::STATUS_DRAFT,
             'created_by_admin_id' => $this->admin->id,
         ]);
         PromptPresetModuleVersion::query()->create([
@@ -257,6 +257,7 @@ class PromptModuleServiceTest extends TestCase
             'sort_order' => 1,
             'is_required' => true,
         ]);
+        $presetVersion->forceFill(['lifecycle_status' => PromptPresetVersion::STATUS_PRODUCTION])->save();
 
         return $version;
     }

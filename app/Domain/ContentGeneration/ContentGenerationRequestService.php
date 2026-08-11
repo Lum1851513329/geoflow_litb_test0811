@@ -29,11 +29,12 @@ final class ContentGenerationRequestService
         private readonly PromptModuleResolver $moduleResolver,
         private readonly GenerationEvidenceSnapshotter $evidenceSnapshotter,
         private readonly MandatoryPromptModuleGuard $mandatoryModules,
+        private readonly ContentGenerationDispatcher $dispatcher,
     ) {}
 
     /**
      * @param  array{strategy_version_id: int, blueprint_version_id: int, preset_version_id: int, ai_model_id: int, idempotency_key?: string|null}  $data
-     * @return array{run: ContentGenerationRun, created: bool, dispatch_required: bool}
+     * @return array{run: ContentGenerationRun, created: bool, dispatch_required: bool, dispatched: bool}
      */
     public function reserve(ContentBrief $brief, array $data, Admin $actor): array
     {
@@ -53,13 +54,13 @@ final class ContentGenerationRequestService
                 if ($existing !== null) {
                     $this->assertReplayMatches($existing, $actor, $fingerprint, $baseFingerprint);
 
+                    $dispatched = $this->dispatcher->dispatch($existing);
+
                     return [
                         'run' => $existing,
                         'created' => false,
-                        'dispatch_required' => in_array($existing->status, [
-                            ContentGenerationRun::STATUS_PENDING,
-                            ContentGenerationRun::STATUS_QUEUED,
-                        ], true),
+                        'dispatch_required' => false,
+                        'dispatched' => $dispatched,
                     ];
                 }
 
@@ -111,8 +112,9 @@ final class ContentGenerationRequestService
                     $this->requiredFactIds($blueprint->blueprint),
                     $actor,
                 );
+                $this->dispatcher->dispatch($run);
 
-                return ['run' => $run, 'created' => true, 'dispatch_required' => true];
+                return ['run' => $run->fresh() ?? $run, 'created' => true, 'dispatch_required' => false, 'dispatched' => true];
             }, 3);
         } catch (UniqueConstraintViolationException $exception) {
             $existing = ContentGenerationRun::query()
@@ -123,14 +125,11 @@ final class ContentGenerationRequestService
             }
             $this->assertReplayMatches($existing, $actor, $fingerprint, $baseFingerprint);
 
-            return [
-                'run' => $existing,
-                'created' => false,
-                'dispatch_required' => in_array($existing->status, [
-                    ContentGenerationRun::STATUS_PENDING,
-                    ContentGenerationRun::STATUS_QUEUED,
-                ], true),
-            ];
+            return DB::transaction(function () use ($existing): array {
+                $dispatched = $this->dispatcher->dispatch($existing);
+
+                return ['run' => $existing->fresh() ?? $existing, 'created' => false, 'dispatch_required' => false, 'dispatched' => $dispatched];
+            });
         }
     }
 

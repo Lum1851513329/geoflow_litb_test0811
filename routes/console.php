@@ -80,6 +80,13 @@ Schedule::command('geoflow:recover-knowledge-syncs')
     ->onOneServer()
     ->withoutOverlapping(10);
 
+Schedule::command('geoflow:recover-content-generation-dispatches', [
+    '--stale' => (int) config('geoflow.content_generation_dispatch_stale_seconds', 300),
+])
+    ->everyMinute()
+    ->onOneServer()
+    ->withoutOverlapping(10);
+
 Schedule::command('geoflow:prune-expired-cache')
     ->hourly()
     ->onOneServer()

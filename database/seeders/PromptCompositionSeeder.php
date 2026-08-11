@@ -459,10 +459,10 @@ PROMPT,
                 'matching_rules' => $matchingRules,
                 'generation_policy' => $generationPolicy,
                 'conflict_policy' => $conflictPolicy,
-                'lifecycle_status' => PromptPresetVersion::STATUS_PRODUCTION,
+                'lifecycle_status' => PromptPresetVersion::STATUS_DRAFT,
                 'change_note' => 'Prompt composition system seed.',
                 'created_by_admin_id' => null,
-                'published_at' => now(),
+                'published_at' => null,
             ]);
             foreach ($versions as $index => $moduleVersion) {
                 PromptPresetModuleVersion::query()->create([
@@ -474,6 +474,10 @@ PROMPT,
                     'configuration' => null,
                 ]);
             }
+            $existing->forceFill([
+                'lifecycle_status' => PromptPresetVersion::STATUS_PRODUCTION,
+                'published_at' => now(),
+            ])->save();
             if ($this->canAdvancePresetCurrent($preset, $existing, $presetWasRecentlyCreated)) {
                 $preset->forceFill(['current_version_id' => $existing->id])->save();
             }

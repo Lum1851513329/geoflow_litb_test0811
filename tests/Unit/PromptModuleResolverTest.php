@@ -58,13 +58,14 @@ class PromptModuleResolverTest extends TestCase
             'version' => 1,
             'matching_rules' => ['content_type' => 'buying_guide'],
             'generation_policy' => ['mode' => 'auto'],
-            'lifecycle_status' => PromptPresetVersion::STATUS_PRODUCTION,
+            'lifecycle_status' => PromptPresetVersion::STATUS_DRAFT,
             'created_by_admin_id' => $this->admin->id,
         ]);
 
         $this->bind($this->presetVersion, $this->versions['foundation_truth'], 1, true);
         $this->bind($this->presetVersion, $this->versions['geo_citability'], 2, true);
         $this->bind($this->presetVersion, $this->versions['buying_guide'], 3, false);
+        $this->presetVersion->forceFill(['lifecycle_status' => PromptPresetVersion::STATUS_PRODUCTION])->save();
     }
 
     public function test_auto_mode_resolves_exact_production_versions_in_stable_order(): void

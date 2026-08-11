@@ -2,7 +2,7 @@
 
 namespace Tests\Feature;
 
-use App\Domain\ContentGeneration\ContentGenerationRequestService;
+use App\Domain\ContentStrategy\BlueprintValidator;
 use App\Http\Controllers\Admin\ContentGenerationController;
 use App\Http\Requests\Admin\RequestContentGenerationRequest;
 use App\Jobs\GenerateStrategyContent;
@@ -25,12 +25,18 @@ use App\Models\PromptModuleVersion;
 use App\Models\PromptPreset;
 use App\Models\PromptPresetModuleVersion;
 use App\Models\PromptPresetVersion;
+use Illuminate\Bus\UniqueLock;
+use Illuminate\Contracts\Cache\Repository as CacheRepository;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Foundation\Http\Middleware\ValidateCsrfToken;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Queue\QueueManager;
 use Illuminate\Routing\Route;
+use Illuminate\Support\Facades\Artisan;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Testing\Fakes\QueueFake;
 use Illuminate\Validation\ValidationException;
 use Tests\TestCase;
 
@@ -240,6 +246,23 @@ final class AdminContentBriefWorkflowTest extends TestCase
         $this->assertSame(0, $brief->blueprintVersions()->count());
     }
 
+    public function test_blueprint_heading_and_purpose_validation_labels_are_localized(): void
+    {
+        $blueprint = $this->blueprint();
+        $blueprint['sections'][0]['heading'] = '';
+        $blueprint['sections'][0]['purpose'] = '';
+
+        app()->setLocale('en');
+        $english = app(BlueprintValidator::class)->validate($blueprint);
+        $this->assertSame('Heading is required.', $english['sections.0.heading.required'][0]);
+        $this->assertSame('Purpose is required.', $english['sections.0.purpose.required'][0]);
+
+        app()->setLocale('zh_CN');
+        $chinese = app(BlueprintValidator::class)->validate($blueprint);
+        $this->assertSame('章节标题为必填项。', $chinese['sections.0.heading.required'][0]);
+        $this->assertSame('章节目的为必填项。', $chinese['sections.0.purpose.required'][0]);
+    }
+
     public function test_operator_can_complete_brief_to_generation_request_workflow(): void
     {
         $brief = $this->createBriefThroughHttp();
@@ -336,7 +359,7 @@ final class AdminContentBriefWorkflowTest extends TestCase
             'matching_rules' => ['content_type' => 'guide', 'market_code' => 'US'],
             'generation_policy' => ['max_tokens' => 4096],
             'conflict_policy' => [],
-            'lifecycle_status' => PromptPresetVersion::STATUS_PRODUCTION,
+            'lifecycle_status' => PromptPresetVersion::STATUS_DRAFT,
             'created_by_admin_id' => $this->superAdmin->id,
         ]);
         PromptPresetModuleVersion::query()->create([
@@ -436,21 +459,125 @@ final class AdminContentBriefWorkflowTest extends TestCase
         Queue::assertPushed(GenerateStrategyContent::class, 1);
     }
 
-    public function test_matching_pending_reservation_is_redispatched_after_the_original_dispatch_was_lost(): void
+    public function test_generation_reservation_and_database_queue_publish_are_one_transaction(): void
     {
         $brief = $this->createBriefThroughHttp();
         $this->confirmStrategyThroughHttp($brief);
         $this->confirmBlueprintThroughHttp($brief);
-        $payload = $this->generationPayload($brief, 'lost-after-commit');
-        $reservation = app(ContentGenerationRequestService::class)->reserve($brief, $payload, $this->operator);
+        $this->restoreRealQueue();
+        config()->set('geoflow.content_generation_queue_connection', 'database');
 
-        $this->assertTrue($reservation['created']);
-        Queue::assertNothingPushed();
+        $this->requestGenerationThroughHttp($brief, 'transactional-db-queue')->assertRedirect();
+        $run = ContentGenerationRun::query()->sole();
 
-        $this->requestGenerationThroughHttp($brief, 'lost-after-commit')->assertRedirect();
+        $this->assertNotNull($run->dispatch_enqueued_at);
+        $this->assertSame(1, DB::table('jobs')->count());
 
+        $this->requestGenerationThroughHttp($brief, 'transactional-db-queue')->assertRedirect();
         $this->assertSame(1, ContentGenerationRun::query()->count());
-        Queue::assertPushed(GenerateStrategyContent::class, 1);
+        $this->assertSame(1, DB::table('jobs')->count());
+    }
+
+    public function test_database_queue_publish_failure_rolls_back_the_generation_reservation(): void
+    {
+        $brief = $this->createBriefThroughHttp();
+        $this->confirmStrategyThroughHttp($brief);
+        $this->confirmBlueprintThroughHttp($brief);
+        $this->restoreRealQueue();
+        config()->set([
+            'geoflow.content_generation_queue_connection' => 'database',
+            'queue.connections.database.table' => 'missing_content_generation_jobs',
+        ]);
+        $this->withoutExceptionHandling();
+
+        try {
+            $this->requestGenerationThroughHttp($brief, 'atomic-queue-failure');
+            $this->fail('Expected the database queue insert to fail.');
+        } catch (\Throwable) {
+            $this->assertSame(0, ContentGenerationRun::query()->count());
+        }
+    }
+
+    public function test_generation_dispatch_rejects_a_non_database_queue_connection_atomically(): void
+    {
+        $brief = $this->createBriefThroughHttp();
+        $this->confirmStrategyThroughHttp($brief);
+        $this->confirmBlueprintThroughHttp($brief);
+        config()->set('geoflow.content_generation_queue_connection', 'redis');
+        $this->withoutExceptionHandling();
+
+        try {
+            $this->requestGenerationThroughHttp($brief, 'non-database-queue');
+            $this->fail('Expected the non-database generation queue to be rejected.');
+        } catch (\LogicException $exception) {
+            $this->assertSame('Content generation requires a database queue on the run database connection.', $exception->getMessage());
+        }
+
+        $this->assertSame(0, ContentGenerationRun::query()->count());
+        Queue::assertNothingPushed();
+    }
+
+    public function test_stale_reconciler_recovers_after_real_unique_lock_and_transport_failure_without_duplicate_jobs(): void
+    {
+        $brief = $this->createBriefThroughHttp();
+        $this->confirmStrategyThroughHttp($brief);
+        $this->confirmBlueprintThroughHttp($brief);
+        $payload = $this->generationPayload($brief, 'orphan-unique-lock');
+        $run = ContentGenerationRun::forceCreate([
+            'content_brief_id' => $brief->id,
+            'strategy_version_id' => $payload['strategy_version_id'],
+            'blueprint_version_id' => $payload['blueprint_version_id'],
+            'preset_version_id' => $payload['preset_version_id'],
+            'ai_model_id' => $payload['ai_model_id'],
+            'compiled_prompt' => null,
+            'status' => ContentGenerationRun::STATUS_PENDING,
+            'idempotency_key' => $payload['idempotency_key'],
+            'created_by_admin_id' => $this->operator->id,
+            'created_at' => now()->subMinutes(10),
+            'updated_at' => now()->subMinutes(10),
+        ]);
+        $job = new GenerateStrategyContent((int) $run->id);
+        $lock = new UniqueLock(app(CacheRepository::class));
+        $this->assertTrue($lock->acquire($job));
+
+        $manager = $this->restoreRealQueue();
+        config()->set([
+            'queue.connections.content_generation_broken_transport' => [
+                'driver' => 'redis',
+                'connection' => 'content_generation_broken_transport',
+                'queue' => 'geoflow',
+                'retry_after' => 960,
+                'block_for' => null,
+                'after_commit' => false,
+            ],
+            'database.redis.content_generation_broken_transport' => [
+                'url' => null,
+                'host' => '127.0.0.1',
+                'username' => null,
+                'password' => null,
+                'port' => 1,
+                'database' => 15,
+                'timeout' => 0.05,
+                'read_timeout' => 0.05,
+            ],
+            'geoflow.content_generation_queue_connection' => 'database',
+        ]);
+
+        try {
+            $manager->connection('content_generation_broken_transport')->push($job, '', 'geoflow');
+            $this->fail('Expected the real Redis transport connection to fail.');
+        } catch (\Throwable) {
+            $this->assertSame(0, DB::table('jobs')->count());
+        }
+
+        $this->travelTo(now()->addMinutes(10));
+        $this->assertSame(0, Artisan::call('geoflow:recover-content-generation-dispatches', ['--stale' => 60]));
+        $this->assertSame(1, DB::table('jobs')->count());
+        $this->assertNotNull($run->fresh()->dispatch_enqueued_at);
+
+        $this->assertSame(0, Artisan::call('geoflow:recover-content-generation-dispatches', ['--stale' => 60]));
+        $this->assertSame(1, DB::table('jobs')->count());
+        $lock->release($job);
     }
 
     public function test_generation_rejects_a_preset_that_omits_an_applicable_mandatory_system_module(): void
@@ -983,6 +1110,18 @@ final class AdminContentBriefWorkflowTest extends TestCase
         );
     }
 
+    private function restoreRealQueue(): QueueManager
+    {
+        $root = Queue::getFacadeRoot();
+        $manager = $root instanceof QueueFake
+            ? $root->queue
+            : $root;
+        $this->assertInstanceOf(QueueManager::class, $manager);
+        Queue::swap($manager);
+
+        return $manager;
+    }
+
     private function validatedGenerationRequest(
         ContentBrief $brief,
         string $idempotencyKey,
@@ -1092,7 +1231,7 @@ final class AdminContentBriefWorkflowTest extends TestCase
             'matching_rules' => ['content_type' => 'guide', 'market_code' => 'US'],
             'generation_policy' => ['max_tokens' => 4096],
             'conflict_policy' => [],
-            'lifecycle_status' => PromptPresetVersion::STATUS_PRODUCTION,
+            'lifecycle_status' => PromptPresetVersion::STATUS_DRAFT,
             'created_by_admin_id' => $this->superAdmin->id,
         ]);
         PromptPresetModuleVersion::query()->create([
@@ -1101,6 +1240,10 @@ final class AdminContentBriefWorkflowTest extends TestCase
             'sort_order' => 1,
             'is_required' => true,
         ]);
+        $presetVersion->forceFill([
+            'lifecycle_status' => PromptPresetVersion::STATUS_PRODUCTION,
+            'published_at' => now(),
+        ])->save();
         $preset->forceFill(['current_version_id' => $presetVersion->id])->save();
 
         return [$moduleVersion, $presetVersion];

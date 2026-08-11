@@ -54,6 +54,7 @@ final class ContentGenerationRun extends Model
             'model_snapshot' => 'array',
             'generation_parameters' => 'array',
             'created_by_admin_id' => 'integer',
+            'dispatch_enqueued_at' => 'datetime',
             'lease_version' => 'integer',
             'adopted_by_admin_id' => 'integer',
             'lease_expires_at' => 'datetime',

@@ -129,6 +129,10 @@ return [
     // Prompt/input and completion/output budgets are distinct. The safety margin covers provider framing and tokenizer drift.
     'content_context_window_tokens' => max(4096, (int) env('GEOFLOW_CONTENT_CONTEXT_WINDOW_TOKENS', 32768)),
     'content_context_safety_margin_tokens' => max(0, (int) env('GEOFLOW_CONTENT_CONTEXT_SAFETY_MARGIN_TOKENS', 1024)),
+    // Content generation is durably published through the database queue on the same DB transaction.
+    'content_generation_queue_connection' => env('GEOFLOW_CONTENT_GENERATION_QUEUE_CONNECTION', 'database'),
+    'content_generation_queue' => env('GEOFLOW_CONTENT_GENERATION_QUEUE', 'geoflow'),
+    'content_generation_dispatch_stale_seconds' => max(30, (int) env('GEOFLOW_CONTENT_GENERATION_DISPATCH_STALE_SECONDS', 300)),
     // 内容策略、模块化 Prompt 与质量门禁均为渐进式能力；生产默认关闭，旧 Task/Prompt/Worker 链路不受影响。
     'content_strategy_enabled' => filter_var(env('GEOFLOW_CONTENT_STRATEGY_ENABLED', false), FILTER_VALIDATE_BOOLEAN),
     'modular_prompts_enabled' => filter_var(env('GEOFLOW_MODULAR_PROMPTS_ENABLED', false), FILTER_VALIDATE_BOOLEAN),

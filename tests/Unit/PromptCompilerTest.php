@@ -229,7 +229,7 @@ class PromptCompilerTest extends TestCase
                 ['id' => 'duplicate-b', 'content' => $duplicate, 'relevance' => 0.7],
                 ['id' => 'low', 'content' => $low, 'relevance' => 0.1],
             ],
-            modelTokenBudget: $baseline->estimatedTokens + 1200,
+            modelTokenBudget: $baseline->estimatedTokens + 300,
         );
 
         $compiled = app(PromptCompiler::class)->compile($this->modules(), $context);
@@ -251,7 +251,7 @@ class PromptCompilerTest extends TestCase
                 ['id' => 'lower', 'content' => $content, 'relevance' => 0.2],
                 ['id' => 'higher', 'content' => $content, 'relevance' => 0.95],
             ],
-            modelTokenBudget: $baseline->estimatedTokens + 1000,
+            modelTokenBudget: $baseline->estimatedTokens + 250,
         ));
 
         $this->assertStringContainsString('"id": "higher"', $compiled->text);
@@ -798,7 +798,7 @@ class PromptCompilerTest extends TestCase
         $this->assertStringContainsString('{"sequence":1}', $compiled->moduleSnapshots[0]['rendered_content']);
     }
 
-    public function test_token_estimate_is_an_upper_bound_by_utf8_byte_count(): void
+    public function test_token_estimate_is_unicode_calibrated_instead_of_utf8_byte_count(): void
     {
         $module = $this->module(
             key: 'unicode',
@@ -819,7 +819,46 @@ class PromptCompilerTest extends TestCase
 
         $compiled = app(PromptCompiler::class)->compile([$module], $context);
 
-        $this->assertGreaterThanOrEqual(strlen($compiled->text), $compiled->estimatedTokens);
+        $this->assertGreaterThan(0, $compiled->estimatedTokens);
+        $this->assertLessThan(strlen($compiled->modelPayload), $compiled->estimatedTokens);
+    }
+
+    public function test_eight_thousand_han_characters_respect_an_eight_k_token_boundary(): void
+    {
+        $module = $this->module(
+            key: 'cjk_boundary',
+            type: 'foundation',
+            content: str_repeat('汉', 8000),
+        );
+        $context = new PromptContext(
+            strategy: [],
+            blueprint: [],
+            keywords: [],
+            evidence: [],
+            products: [],
+            language: 'zh-Hans-CN',
+            market: 'CN',
+            modelTokenBudget: 50_000,
+        );
+
+        $compiled = app(PromptCompiler::class)->compile([$module], $context);
+
+        $this->assertGreaterThan(8192, $compiled->estimatedTokens);
+        $this->assertLessThan(12_000, $compiled->estimatedTokens);
+        $this->assertLessThan(strlen($compiled->modelPayload), $compiled->estimatedTokens);
+
+        $this->expectException(PromptCompilationException::class);
+        $this->expectExceptionMessage('Protected prompt content exceeds');
+        app(PromptCompiler::class)->compile([$module], new PromptContext(
+            strategy: [],
+            blueprint: [],
+            keywords: [],
+            evidence: [],
+            products: [],
+            language: 'zh-Hans-CN',
+            market: 'CN',
+            modelTokenBudget: 8192,
+        ));
     }
 
     /** @return list<ResolvedPromptModule> */

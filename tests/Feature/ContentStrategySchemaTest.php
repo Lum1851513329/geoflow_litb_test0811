@@ -91,7 +91,7 @@ class ContentStrategySchemaTest extends TestCase
             'version' => 1,
             'matching_rules' => ['market_code' => 'US'],
             'generation_policy' => ['max_tokens' => 1200],
-            'lifecycle_status' => PromptPresetVersion::STATUS_PRODUCTION,
+            'lifecycle_status' => PromptPresetVersion::STATUS_DRAFT,
         ]);
         PromptPresetModuleVersion::query()->create([
             'prompt_preset_version_id' => $presetVersion->id,
@@ -99,6 +99,7 @@ class ContentStrategySchemaTest extends TestCase
             'sort_order' => 10,
             'is_required' => true,
         ]);
+        $presetVersion->forceFill(['lifecycle_status' => PromptPresetVersion::STATUS_PRODUCTION])->save();
         $aiModel = AiModel::query()->create([
             'name' => 'Test model',
             'api_key' => 'test-key',
@@ -372,11 +373,13 @@ class ContentStrategySchemaTest extends TestCase
     public function test_database_guards_make_generation_audit_rows_and_published_bindings_append_only(): void
     {
         $pipeline = $this->createPipeline('append-only');
+        $pipeline['preset_version']->forceFill(['lifecycle_status' => PromptPresetVersion::STATUS_DRAFT])->save();
         $binding = PromptPresetModuleVersion::query()->create([
             'prompt_preset_version_id' => $pipeline['preset_version']->id,
             'prompt_module_version_id' => $pipeline['module_version']->id,
             'sort_order' => 1,
         ]);
+        $pipeline['preset_version']->forceFill(['lifecycle_status' => PromptPresetVersion::STATUS_PRODUCTION])->save();
         $module = ContentGenerationRunModule::query()->create([
             'content_generation_run_id' => $pipeline['run']->id,
             'prompt_module_version_id' => $pipeline['module_version']->id,
@@ -418,6 +421,159 @@ class ContentStrategySchemaTest extends TestCase
         $this->assertDatabaseRejects(fn () => $quality->update(['passed' => false]));
         $this->assertDatabaseRejects(fn () => $quality->delete());
         $this->assertDatabaseRejects(fn () => $pipeline['run']->update(['raw_output' => 'Rewritten terminal output.']));
+    }
+
+    public function test_database_guards_allow_active_audit_inserts_and_reject_terminal_or_published_appends(): void
+    {
+        $pipeline = $this->createPipeline('insert-guards');
+        $draft = $this->createPresetVersion($pipeline['preset'], 2);
+        $draft->forceFill(['lifecycle_status' => PromptPresetVersion::STATUS_DRAFT])->save();
+        $secondModule = $this->createModule('insert-guards-second');
+        $secondModuleVersion = $this->createModuleVersion($secondModule, 1);
+
+        $bindingId = DB::table('prompt_preset_module_versions')->insertGetId([
+            'prompt_preset_version_id' => $draft->id,
+            'prompt_module_version_id' => $pipeline['module_version']->id,
+            'sort_order' => 1,
+            'is_required' => false,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        DB::table('content_generation_run_modules')->insert([
+            'content_generation_run_id' => $pipeline['run']->id,
+            'prompt_module_version_id' => $pipeline['module_version']->id,
+            'sort_order' => 1,
+            'is_required' => false,
+            'module_snapshot' => json_encode(['module_key' => 'active'], JSON_THROW_ON_ERROR),
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        DB::table('content_generation_run_evidence')->insert([
+            'content_generation_run_id' => $pipeline['run']->id,
+            'evidence_key' => 'active-fact',
+            'evidence_snapshot' => json_encode(['content' => 'Active fact.'], JSON_THROW_ON_ERROR),
+            'is_required' => false,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        $stepId = DB::table('content_generation_run_steps')->insertGetId([
+            'content_generation_run_id' => $pipeline['run']->id,
+            'sequence' => 1,
+            'step_type' => ContentGenerationRunStep::TYPE_INITIAL_GENERATION,
+            'status' => ContentGenerationRunStep::STATUS_RUNNING,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        DB::table('content_quality_reports')->insert([
+            'content_generation_run_id' => $pipeline['run']->id,
+            'content_generation_run_step_id' => $stepId,
+            'report_type' => 'deterministic',
+            'status' => ContentQualityReport::STATUS_PASSED,
+            'passed' => true,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        $this->assertDatabaseHas('prompt_preset_module_versions', ['id' => $bindingId]);
+
+        $draft->forceFill(['lifecycle_status' => PromptPresetVersion::STATUS_DEPRECATED])->save();
+        $this->assertDatabaseRejects(fn () => DB::table('prompt_preset_module_versions')->insert([
+            'prompt_preset_version_id' => $draft->id,
+            'prompt_module_version_id' => $secondModuleVersion->id,
+            'sort_order' => 2,
+            'is_required' => false,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]));
+
+        $pipeline['run']->forceFill([
+            'status' => ContentGenerationRun::STATUS_COMPLETED,
+            'raw_output' => 'Terminal output.',
+        ])->save();
+        $this->assertDatabaseRejects(fn () => DB::table('content_generation_run_modules')->insert([
+            'content_generation_run_id' => $pipeline['run']->id,
+            'prompt_module_version_id' => $secondModuleVersion->id,
+            'sort_order' => 2,
+            'is_required' => false,
+            'module_snapshot' => json_encode(['module_key' => 'late'], JSON_THROW_ON_ERROR),
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]));
+        $this->assertDatabaseRejects(fn () => DB::table('content_generation_run_evidence')->insert([
+            'content_generation_run_id' => $pipeline['run']->id,
+            'evidence_key' => 'late-fact',
+            'evidence_snapshot' => json_encode(['content' => 'Late fact.'], JSON_THROW_ON_ERROR),
+            'is_required' => false,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]));
+        $this->assertDatabaseRejects(fn () => DB::table('content_generation_run_steps')->insert([
+            'content_generation_run_id' => $pipeline['run']->id,
+            'sequence' => 2,
+            'step_type' => ContentGenerationRunStep::TYPE_SEMANTIC_QUALITY,
+            'status' => ContentGenerationRunStep::STATUS_COMPLETED,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]));
+        $this->assertDatabaseRejects(fn () => DB::table('content_quality_reports')->insert([
+            'content_generation_run_id' => $pipeline['run']->id,
+            'report_type' => 'late',
+            'status' => ContentQualityReport::STATUS_PASSED,
+            'passed' => true,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]));
+    }
+
+    public function test_draft_binding_update_returns_new_and_delete_returns_old(): void
+    {
+        $pipeline = $this->createPipeline('draft-trigger-return');
+        $pipeline['preset_version']->forceFill(['lifecycle_status' => PromptPresetVersion::STATUS_DRAFT])->save();
+        $binding = PromptPresetModuleVersion::query()->create([
+            'prompt_preset_version_id' => $pipeline['preset_version']->id,
+            'prompt_module_version_id' => $pipeline['module_version']->id,
+            'sort_order' => 1,
+        ]);
+
+        $this->assertSame(1, DB::table('prompt_preset_module_versions')->where('id', $binding->id)->update(['sort_order' => 2]));
+        $this->assertSame(2, (int) DB::table('prompt_preset_module_versions')->where('id', $binding->id)->value('sort_order'));
+        $this->assertSame(1, DB::table('prompt_preset_module_versions')->where('id', $binding->id)->delete());
+        $this->assertDatabaseMissing('prompt_preset_module_versions', ['id' => $binding->id]);
+    }
+
+    public function test_published_binding_cannot_be_moved_to_a_draft_parent(): void
+    {
+        $pipeline = $this->createPipeline('published-binding-move');
+        $published = $pipeline['preset_version'];
+        $published->forceFill(['lifecycle_status' => PromptPresetVersion::STATUS_DRAFT])->save();
+        $binding = PromptPresetModuleVersion::query()->create([
+            'prompt_preset_version_id' => $published->id,
+            'prompt_module_version_id' => $pipeline['module_version']->id,
+            'sort_order' => 1,
+        ]);
+        $published->forceFill(['lifecycle_status' => PromptPresetVersion::STATUS_PRODUCTION])->save();
+        $draftTarget = $this->createPresetVersion($pipeline['preset'], 2);
+        $draftTarget->forceFill(['lifecycle_status' => PromptPresetVersion::STATUS_DRAFT])->save();
+
+        $this->assertDatabaseRejects(fn () => DB::table('prompt_preset_module_versions')
+            ->where('id', $binding->id)
+            ->update(['prompt_preset_version_id' => $draftTarget->id]));
+    }
+
+    public function test_draft_binding_cannot_be_moved_to_a_published_parent(): void
+    {
+        $pipeline = $this->createPipeline('draft-binding-move');
+        $draft = $pipeline['preset_version'];
+        $draft->forceFill(['lifecycle_status' => PromptPresetVersion::STATUS_DRAFT])->save();
+        $binding = PromptPresetModuleVersion::query()->create([
+            'prompt_preset_version_id' => $draft->id,
+            'prompt_module_version_id' => $pipeline['module_version']->id,
+            'sort_order' => 1,
+        ]);
+        $publishedTarget = $this->createPresetVersion($pipeline['preset'], 2);
+
+        $this->assertDatabaseRejects(fn () => DB::table('prompt_preset_module_versions')
+            ->where('id', $binding->id)
+            ->update(['prompt_preset_version_id' => $publishedTarget->id]));
     }
 
     public function test_audit_guard_migration_rollback_restores_the_previous_run_snapshot_guard(): void
@@ -541,11 +697,23 @@ class ContentStrategySchemaTest extends TestCase
 
     private function assertDatabaseRejects(callable $operation): void
     {
+        $outerLevel = DB::transactionLevel();
+        DB::beginTransaction();
         try {
             $operation();
+            DB::rollBack();
             $this->fail('Expected the database to reject the operation.');
         } catch (QueryException) {
+            while (DB::transactionLevel() > $outerLevel) {
+                DB::rollBack();
+            }
             $this->addToAssertionCount(1);
+        } catch (\Throwable $exception) {
+            while (DB::transactionLevel() > $outerLevel) {
+                DB::rollBack();
+            }
+
+            throw $exception;
         }
     }
 }
