@@ -57,4 +57,33 @@ final class LitbKnowledgeImporterTest extends TestCase
         $this->assertSame('Operator-owned content.', KnowledgeBase::query()->sole()->content);
         $this->assertNull(KnowledgeBase::query()->sole()->asset_key);
     }
+
+    public function test_two_governed_sources_with_the_same_title_receive_distinct_names(): void
+    {
+        File::ensureDirectoryExists($this->root.'/LightInTheBox_PT_Official_KB/03_Policies');
+        File::put($this->root.'/LightInTheBox_PT_Official_KB/03_Policies/Payment Methods.md', "# Payment Methods\nPolicy context.");
+        $records = (new LitbSourceScanner())->scanKnowledge($this->root);
+
+        $manifest = $this->app->make(LitbKnowledgeImporter::class)->import($records, false);
+
+        $this->assertSame(2, $manifest->createdCount());
+        $this->assertSame(2, KnowledgeBase::query()->whereNotNull('asset_key')->count());
+        $this->assertCount(2, KnowledgeBase::query()->pluck('name')->unique());
+    }
+
+    public function test_long_relative_paths_are_preserved_in_provenance_but_fit_display_columns(): void
+    {
+        $directory = $this->root.'/LightInTheBox_PT_Official_KB/'.str_repeat('long-policy-directory-', 7);
+        File::ensureDirectoryExists($directory);
+        File::put($directory.'/'.str_repeat('return-policy-', 6).'.md', '# Return policy');
+        $records = (new LitbSourceScanner())->scanKnowledge($this->root);
+
+        $manifest = $this->app->make(LitbKnowledgeImporter::class)->import($records, false);
+
+        $this->assertSame(0, $manifest->failedCount());
+        $long = KnowledgeBase::query()->get()->first(fn (KnowledgeBase $knowledge): bool => mb_strlen((string) ($knowledge->asset_provenance['source_path'] ?? '')) > 150);
+        $this->assertNotNull($long);
+        $this->assertLessThanOrEqual(150, mb_strlen((string) $long->source_name));
+        $this->assertGreaterThan(150, mb_strlen((string) $long->asset_provenance['source_path']));
+    }
 }

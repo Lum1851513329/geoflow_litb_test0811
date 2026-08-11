@@ -43,13 +43,17 @@ final class LitbKnowledgeImporter
     {
         $knowledge = KnowledgeBase::query()->where('asset_key', $record->sourceKey)->lockForUpdate()->first();
         if ($knowledge === null) {
-            $nameCollision = KnowledgeBase::query()->where('name', Str::limit($record->title, 100, ''))->lockForUpdate()->first();
-            if ($nameCollision !== null) {
+            $name = Str::limit($record->title, 100, '');
+            $nameCollision = KnowledgeBase::query()->where('name', $name)->lockForUpdate()->first();
+            if ($nameCollision !== null && $nameCollision->asset_key === null) {
                 $manifest->conflict($record->sourceKey, 'operator_owned_name_collision');
 
                 return null;
             }
-            $knowledge = KnowledgeBase::query()->create($this->payload($record, $content));
+            if ($nameCollision !== null) {
+                $name = Str::limit($record->title.' · '.$record->languageCode.' · '.substr(hash('sha256', $record->relativePath), 0, 8), 100, '');
+            }
+            $knowledge = KnowledgeBase::query()->create($this->payload($record, $content, $name));
             $manifest->created($record->sourceKey);
 
             return (int) $knowledge->id;
@@ -66,25 +70,25 @@ final class LitbKnowledgeImporter
 
             return null;
         }
-        $knowledge->update($this->payload($record, $content));
+        $knowledge->update($this->payload($record, $content, (string) $knowledge->name));
         $manifest->updated($record->sourceKey);
 
         return (int) $knowledge->id;
     }
 
     /** @return array<string, mixed> */
-    private function payload(LitbSourceRecord $record, string $content): array
+    private function payload(LitbSourceRecord $record, string $content, ?string $name = null): array
     {
         return [
             'asset_key' => $record->sourceKey,
-            'name' => Str::limit($record->title, 100, ''),
+            'name' => $name ?? Str::limit($record->title, 100, ''),
             'description' => "Imported LITB {$record->groupKey} source: {$record->relativePath}",
             'content' => $content,
             'character_count' => mb_strlen($content, 'UTF-8'),
             'word_count' => count(preg_split('/\s+/u', trim(strip_tags($content)), -1, PREG_SPLIT_NO_EMPTY) ?: []),
             'file_type' => strtolower(pathinfo($record->absolutePath, PATHINFO_EXTENSION)) === 'docx' ? 'word' : 'markdown',
             'file_path' => '',
-            'source_name' => $record->relativePath,
+            'source_name' => Str::limit($record->relativePath, 150, ''),
             'source_type' => $record->sourceType,
             'business_line' => $record->groupKey,
             'risk_level' => $record->riskLevel,
