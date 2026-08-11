@@ -17,8 +17,10 @@ final class LitbSourceScannerTest extends TestCase
         $this->root = storage_path('framework/testing/litb-source-scanner-'.uniqid());
         File::ensureDirectoryExists($this->root.'/LightInTheBox_PT_Official_KB/02_Customer_Service');
         File::ensureDirectoryExists($this->root.'/officialknowege/LITB_Reports');
+        File::ensureDirectoryExists($this->root.'/LightInTheBox_PT_Keyword_Library');
         File::put($this->root.'/LightInTheBox_PT_Official_KB/02_Customer_Service/2.8_Payment Methods.md', "# Payment Methods\nUse the methods shown at checkout.");
         File::put($this->root.'/officialknowege/LITB_Reports/02_财务数据全面分析.md', "# 财务分析\n研究材料。");
+        File::put($this->root.'/LightInTheBox_PT_Keyword_Library/keywords.txt', 'wedding dresses');
         File::put($this->root.'/.DS_Store', 'ignored');
     }
 

@@ -36,6 +36,9 @@ final class LitbSourceScanner
                 continue;
             }
             $relativePath = str_replace(DIRECTORY_SEPARATOR, '/', substr($absolutePath, strlen($resolvedRoot) + 1));
+            if (str_contains(mb_strtolower($relativePath, 'UTF-8'), 'keyword_library')) {
+                continue;
+            }
             $sha256 = hash_file('sha256', $absolutePath);
             if ($sha256 === false) {
                 throw new RuntimeException('litb_assets.source_hash_failed');
