@@ -49,11 +49,22 @@ final class LitbKeywordSourceReader
             $lineNumber = 0;
             while (($line = fgets($handle)) !== false) {
                 $lineNumber++;
-                $keyword = preg_replace('/^\s*(?:[-*+]\s+|\d+[.)]\s+|#+\s*)/u', '', trim($line));
-                if ($keyword === null || $keyword === '' || str_starts_with($keyword, '<!--')) {
+                $cleanLine = preg_replace('/^\s*(?:[-*+]\s+|\d+[.)]\s+|#+\s*)/u', '', trim($line));
+                if ($cleanLine === null || $cleanLine === '' || str_starts_with($cleanLine, '<!--')) {
                     continue;
                 }
-                yield $this->row($path, $sha256, $lineNumber, $keyword, $sourceConfig);
+                $keywords = str_getcsv($cleanLine, ',', '"', '\\');
+                foreach ($keywords as $index => $keyword) {
+                    $keyword = trim($keyword);
+                    if ($keyword === '') {
+                        continue;
+                    }
+                    $position = $index + 1;
+                    yield $this->row($path, $sha256, $lineNumber, $keyword, $sourceConfig) + [
+                        'source_position' => $position,
+                        'import_row_number' => ($lineNumber * 1000) + $position,
+                    ];
+                }
             }
         } finally {
             fclose($handle);
@@ -80,6 +91,8 @@ final class LitbKeywordSourceReader
                 $market = strtoupper(trim((string) ($mapped['country'] ?? $sourceConfig['market_code'])));
                 $rowConfig['market_code'] = preg_match('/^[A-Z]{2}$/D', $market) === 1 ? $market : $sourceConfig['market_code'];
                 yield $this->row($path, $sha256, (int) $sourceRow['row_number'], $keyword, $rowConfig) + [
+                    'source_position' => 1,
+                    'import_row_number' => (int) $sourceRow['row_number'],
                     'source_sheet' => $chunk['sheet_name'],
                     'clicks' => $this->number($mapped['clicks'] ?? null),
                     'impressions' => $this->number($mapped['impressions'] ?? null),

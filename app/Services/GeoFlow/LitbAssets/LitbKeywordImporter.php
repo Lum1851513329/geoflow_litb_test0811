@@ -88,7 +88,7 @@ final class LitbKeywordImporter
                 $importRow = KeywordImportRow::query()->create([
                     'batch_id' => $batch->id,
                     'sheet_name' => $row['source_sheet'] ?? 'text',
-                    'row_number' => $row['source_line'],
+                    'row_number' => $row['import_row_number'] ?? $row['source_line'],
                     'source_payload' => $row,
                     'keyword_id' => $keyword->id,
                     'normalized_keyword' => $row['normalized_keyword'],

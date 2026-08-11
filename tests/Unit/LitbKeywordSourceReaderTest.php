@@ -49,4 +49,25 @@ final class LitbKeywordSourceReaderTest extends TestCase
         $this->assertArrayHasKey('clicks', $rows[0]);
         $this->assertArrayHasKey('impressions', $rows[0]);
     }
+
+    public function test_it_splits_comma_separated_keyword_lists_without_losing_source_position(): void
+    {
+        $path = storage_path('framework/testing/litb-keywords-comma-'.uniqid().'.txt');
+        File::put($path, 'women clothing, wedding dresses, LightInTheBox shipping');
+        try {
+            $rows = iterator_to_array($this->app->make(LitbKeywordSourceReader::class)->read($path, [
+                'library_asset_key' => 'litb.keywords.product.en',
+                'library_name' => 'LITB Product & Category Keywords — EN',
+                'language_code' => 'en',
+                'market_code' => 'US',
+                'source_type' => 'owned_keyword_research',
+            ]));
+        } finally {
+            File::delete($path);
+        }
+
+        $this->assertSame(['women clothing', 'wedding dresses', 'lightinthebox shipping'], array_column($rows, 'normalized_keyword'));
+        $this->assertSame([1, 2, 3], array_column($rows, 'source_position'));
+        $this->assertCount(3, array_unique(array_column($rows, 'import_row_number')));
+    }
 }
