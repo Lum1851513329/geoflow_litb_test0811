@@ -44,7 +44,7 @@ final class LitbArticleArchiveWriter
         $slug = $this->slug($assetKey, $run);
 
         $articlePath = $this->root.'/articles/en/'.$slug.'.md';
-        $this->atomicPut($articlePath, $this->renderFrontMatter($run, $assetKey)."\n---\n\n".$content."\n");
+        $this->atomicPut($articlePath, $this->renderFrontMatter($run, $assetKey, $content)."\n---\n\n".$content."\n");
 
         $evidencePath = $this->writeEvidenceManifest($run, $slug);
         $qualityPath = $this->writeQualityReports($run, $slug);
@@ -88,7 +88,7 @@ final class LitbArticleArchiveWriter
     }
 
     /** @return array<string,mixed> */
-    private function renderFrontMatter(ContentGenerationRun $run, string $assetKey): string
+    private function renderFrontMatter(ContentGenerationRun $run, string $assetKey, string $content): string
     {
         $brief = $run->contentBrief;
         $provenance = (array) ($brief?->asset_provenance ?? []);
@@ -110,6 +110,7 @@ final class LitbArticleArchiveWriter
             'content_generation_run_id: '.(int) $run->id,
             'generation_run_id: '.(int) $run->id,
             'generation_status: '.$this->yamlScalar((string) $run->status),
+            'content_sha256: '.$this->yamlScalar(hash('sha256', $content)),
             'ai_model_id: '.(int) $run->ai_model_id,
             'preset_version_id: '.(int) $run->preset_version_id,
             'strategy_version_id: '.(int) $run->strategy_version_id,

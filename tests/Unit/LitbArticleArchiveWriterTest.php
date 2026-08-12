@@ -75,6 +75,7 @@ class LitbArticleArchiveWriterTest extends TestCase
         $this->assertStringContainsString('slug:', $markdown);
         $this->assertStringContainsString('seo_title:', $markdown);
         $this->assertStringContainsString('content_generation_run_id: '.$run->id, $markdown);
+        $this->assertStringContainsString('content_sha256: "'.hash('sha256', trim($run->raw_output)).'"', $markdown);
         $this->assertStringContainsString($run->raw_output, $markdown);
 
         $this->assertJson(file_get_contents($result->evidencePath));
