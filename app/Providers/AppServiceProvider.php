@@ -39,6 +39,7 @@ class AppServiceProvider extends ServiceProvider
         $fixedContextCapability = new \stdClass;
         $trustedTerminal = Closure::fromCallable(Utils::chooseHandler());
 
+        $this->app->singleton(\App\Services\GeoFlow\LitbAssets\LitbAssetConfig::class, fn () => \App\Services\GeoFlow\LitbAssets\LitbAssetConfig::fromConfig());
         $this->app->bind(HostResolver::class, SystemHostResolver::class);
         $this->app->singleton(FinalOutboundSecurityPolicy::class);
         $this->app->bind(OutboundTransport::class, function () use ($fixedContextCapability): LaravelPinnedOutboundTransport {
