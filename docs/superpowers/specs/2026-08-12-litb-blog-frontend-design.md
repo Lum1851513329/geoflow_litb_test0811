@@ -88,12 +88,29 @@
 - 使用 Flexbox/Grid 响应式布局，不使用浮动布局；不引入 AMP。
 - 保留 `canonical`，多语言页面预留 `hreflang`（当前仅英文，先占位不强制填充）。
 
+### 6.4 爬虫发现层：`robots.txt` 与 `sitemap.xml`
+
+现状核实：`public/robots.txt` 是静态默认文件（`User-agent: * / Disallow:`），未区分 AI 爬虫、未引用 sitemap；`/sitemap.xml` 不存在，无路由无控制器，69 篇已发布文章没有系统化的发现入口。这两项是遵循 RFC 9309（`robots.txt`）与 sitemaps.org 协议（`sitemap.xml`）的基础设施层，先于逐页 Schema 生效，本次一并实施：
+
+- **`robots.txt`**：改为按需生成（可仍以静态文件产出，但内容需覆盖）：
+  - 保留 `User-agent: *` 默认允许规则；
+  - 为主流 AI 爬虫显式声明规则（`GPTBot`、`ClaudeBot`、`Google-Extended`、`PerplexityBot`、`Meta-ExternalAgent` 等），默认 `Allow: /`（不阻挡 AI 引用，与本项目提升 GEO 可见度的目标一致）；
+  - 结尾追加 `Sitemap: https://<site-domain>/sitemap.xml`。
+- **`sitemap.xml`**：新增动态路由（例如 `GET /sitemap.xml`），实时聚合：
+  - 首页、About、Archive 索引页；
+  - 全部分类页（第 4 节新增的 7 个分类）；
+  - 全部 `status=published` 文章，`lastmod` 取 `updated_at`；
+  - 若未来 URL 总数超过 50,000，需拆分为 Sitemap Index，本阶段 69 篇文章规模远低于该阈值，暂不实现索引拆分逻辑（超限前不做）。
+- **`llms.txt`**：本阶段明确不实施（非目标，见第 7 节）——Google 官方不支持，且暂无证据表明 ChatGPT/Gemini 等生产环境读取该文件；待主流 AI 搜索引擎给出明确支持信号后再评估。
+
 ## 7. 非目标
 
 - 不实现任何支付、购物车或结账相关功能。
 - 不在本阶段自动化“促销卡片”内容的生成或与商城系统的实时同步；卡片文案由人工维护。
 - 不在本阶段处理多语言站点（`litb_zhishiku` 中的葡语等其他语言内容留待后续阶段）。
 - 不替换或删除现有 21 个主题；新主题作为新增选项，通过 `active_theme` 设置切换。
+- 不实施 `llms.txt`（社区提案，Google 不支持，效果主要面向 AI 编程工具而非搜索类 AI）。
+- 不实现 Image/Video/News Sitemap 或 Sitemap Index（当前 URL 规模不需要）。
 
 ## 8. 验收标准
 
@@ -102,3 +119,4 @@
 3. 每篇文章页、分类页、首页均通过结构化数据校验（`BlogPosting`/`NewsArticle`/`FAQPage`/`BreadcrumbList`/`CollectionPage`/`WebSite` 按页面类型正确出现，且字段无编造）。
 4. 全站页面标题层级、语义地标、图片懒加载、外链 `rel` 属性均符合第 6 节要求。
 5. 站点不含支付相关代码或链接指向站内结账流程。
+6. `/robots.txt` 包含主流 AI 爬虫规则与 `Sitemap:` 引用；`/sitemap.xml` 可访问，包含首页、About、Archive、全部分类页与全部已发布文章，`lastmod` 准确。
