@@ -39,6 +39,7 @@ class AuthenticateAdminWeb
         }
 
         $guard->setUser($admin);
+        Auth::shouldUse('admin');
 
         return $next($request);
     }
