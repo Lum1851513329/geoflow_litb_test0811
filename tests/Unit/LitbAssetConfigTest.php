@@ -40,4 +40,25 @@ final class LitbAssetConfigTest extends TestCase
         $this->assertSame('litb-quarterly-2026-q3', $config->quarterKey());
         $this->assertSame(base_path('content/litb-quarterly-2026-q3'), $config->archiveRoot());
     }
+
+    public function test_quarter_key_and_archive_root_do_not_require_knowledge_or_keyword_directories_to_exist(): void
+    {
+        config()->set('litb_content_assets.knowledge_root', '/nonexistent/knowledge');
+        config()->set('litb_content_assets.keyword_root', '/nonexistent/keywords');
+
+        $config = LitbAssetConfig::fromConfig();
+
+        $this->assertSame('litb-quarterly-2026-q3', $config->quarterKey());
+        $this->assertSame(base_path('content/litb-quarterly-2026-q3'), $config->archiveRoot());
+    }
+
+    public function test_knowledge_root_is_validated_lazily_on_access(): void
+    {
+        config()->set('litb_content_assets.knowledge_root', '/nonexistent/knowledge');
+        $config = LitbAssetConfig::fromConfig();
+
+        $this->expectException(\InvalidArgumentException::class);
+
+        $config->knowledgeRoot();
+    }
 }

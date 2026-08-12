@@ -15,17 +15,9 @@ final readonly class LitbAssetConfig
 
     public static function fromConfig(): self
     {
-        $knowledgeRoot = realpath((string) config('litb_content_assets.knowledge_root'));
-        $keywordRoot = realpath((string) config('litb_content_assets.keyword_root'));
         $quarterKey = trim((string) config('litb_content_assets.quarter_key'));
         $archiveRoot = trim((string) config('litb_content_assets.archive_root'));
 
-        if ($knowledgeRoot === false || ! is_dir($knowledgeRoot)) {
-            throw new InvalidArgumentException('litb_assets.knowledge_root_missing');
-        }
-        if ($keywordRoot === false || ! is_dir($keywordRoot)) {
-            throw new InvalidArgumentException('litb_assets.keyword_root_missing');
-        }
         if (preg_match('/^[a-z0-9][a-z0-9._-]{2,189}$/D', $quarterKey) !== 1) {
             throw new InvalidArgumentException('litb_assets.quarter_key_invalid');
         }
@@ -34,8 +26,8 @@ final readonly class LitbAssetConfig
         }
 
         return new self(
-            knowledgeRoot: $knowledgeRoot,
-            keywordRoot: $keywordRoot,
+            knowledgeRoot: (string) config('litb_content_assets.knowledge_root'),
+            keywordRoot: (string) config('litb_content_assets.keyword_root'),
             quarterKey: $quarterKey,
             archiveRoot: str_starts_with($archiveRoot, DIRECTORY_SEPARATOR)
                 ? $archiveRoot
@@ -43,14 +35,32 @@ final readonly class LitbAssetConfig
         );
     }
 
+    /**
+     * Validated lazily: knowledge scanning needs this directory to exist, but
+     * archiving and generation (quarterKey/archiveRoot only) do not.
+     */
     public function knowledgeRoot(): string
     {
-        return $this->knowledgeRoot;
+        $resolved = realpath($this->knowledgeRoot);
+        if ($resolved === false || ! is_dir($resolved)) {
+            throw new InvalidArgumentException('litb_assets.knowledge_root_missing');
+        }
+
+        return $resolved;
     }
 
+    /**
+     * Validated lazily: keyword import needs this directory to exist, but
+     * archiving and generation (quarterKey/archiveRoot only) do not.
+     */
     public function keywordRoot(): string
     {
-        return $this->keywordRoot;
+        $resolved = realpath($this->keywordRoot);
+        if ($resolved === false || ! is_dir($resolved)) {
+            throw new InvalidArgumentException('litb_assets.keyword_root_missing');
+        }
+
+        return $resolved;
     }
 
     public function quarterKey(): string
