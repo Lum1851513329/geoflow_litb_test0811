@@ -18,6 +18,7 @@
 /.vscode
 /.zed
 /.worktrees
+/content/litb-quarterly-2026-q3
 /auth.json
 /node_modules
 /public/build
