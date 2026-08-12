@@ -11,20 +11,36 @@ class SitemapController extends Controller
 {
     public function index(): Response
     {
+        $siteLastModified = Article::query()->published()->max('updated_at');
+        $siteLastModified = $siteLastModified !== null
+            ? (string) $siteLastModified
+            : now()->toDateString();
+        $siteLastModified = substr($siteLastModified, 0, 10);
+
         $urls = [
-            ['loc' => route('site.home'), 'lastmod' => now()->toDateString()],
-            ['loc' => route('site.about'), 'lastmod' => now()->toDateString()],
-            ['loc' => route('site.archive'), 'lastmod' => now()->toDateString()],
+            ['loc' => route('site.home'), 'lastmod' => $siteLastModified],
+            ['loc' => route('site.about'), 'lastmod' => $siteLastModified],
+            ['loc' => route('site.archive'), 'lastmod' => $siteLastModified],
         ];
 
-        foreach (Category::query()->orderBy('sort_order')->get() as $category) {
-            $urls[] = ['loc' => route('site.category', $category->slug), 'lastmod' => now()->toDateString()];
+        $categories = Category::query()
+            ->whereHas('articles', fn ($query) => $query->published())
+            ->withMax(['articles as latest_article_at' => fn ($query) => $query->published()], 'updated_at')
+            ->orderBy('sort_order')
+            ->get();
+        foreach ($categories as $category) {
+            $urls[] = [
+                'loc' => route('site.category', $category->slug),
+                'lastmod' => $category->latest_article_at !== null
+                    ? substr((string) $category->latest_article_at, 0, 10)
+                    : $siteLastModified,
+            ];
         }
 
         foreach (Article::query()->published()->orderByDesc('published_at')->get(['slug', 'updated_at']) as $article) {
             $urls[] = [
                 'loc' => route('site.article', $article->slug),
-                'lastmod' => optional($article->updated_at)->toDateString() ?? now()->toDateString(),
+                'lastmod' => optional($article->updated_at)->toDateString() ?? $siteLastModified,
             ];
         }
 

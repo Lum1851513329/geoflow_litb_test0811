@@ -40,9 +40,24 @@ final class ArticleHtmlPresenter
             return $content;
         }
 
-        $pattern = '/^\s*#\s*'.preg_quote($title, '/').'\s*(?:\r?\n)+/u';
+        // SEO titles commonly carry a " | Site Name" suffix that the
+        // article's own leading Markdown heading never repeats. Matching
+        // against the title verbatim then misses the heading entirely,
+        // leaving a second, duplicate <h1> once the page also renders the
+        // title itself. Compare against the title with any such suffix
+        // removed so the heading is still recognized as the title.
+        $bareTitle = trim((string) preg_replace('/\s*\|.*$/u', '', $title));
+        $candidates = array_unique(array_filter([$title, $bareTitle]));
 
-        return (string) preg_replace($pattern, '', $content, 1);
+        foreach ($candidates as $candidate) {
+            $pattern = '/^\s*#\s*'.preg_quote($candidate, '/').'\s*(?:\r?\n)+/u';
+            $result = preg_replace($pattern, '', $content, 1, $count);
+            if ($count > 0) {
+                return (string) $result;
+            }
+        }
+
+        return $content;
     }
 
     /**

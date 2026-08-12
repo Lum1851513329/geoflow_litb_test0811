@@ -43,6 +43,32 @@ class SeedLitbHomepageModulesCommandTest extends TestCase
         $this->assertSame(1, SiteSetting::where('setting_key', 'homepage_modules')->count());
     }
 
+    public function test_article_titles_with_the_seo_suffix_pipe_do_not_break_row_field_parsing(): void
+    {
+        $author = Author::query()->create(['name' => 'LightInTheBox Editorial Team', 'email' => 'editorial@lightinthebox.com']);
+        $category = Category::query()->create(['name' => 'Comparisons', 'slug' => 'comparisons', 'sort_order' => 2]);
+        $article = Article::query()->create([
+            'title' => 'How to Take Measurements for a Custom Suit | LightInTheBox',
+            'slug' => 'how-to-take-measurements-for-a-custom-suit',
+            'content' => 'Body', 'excerpt' => 'How should suit measurements be taken and checked? | LightInTheBox',
+            'category_id' => $category->id, 'author_id' => $author->id,
+            'status' => 'published', 'review_status' => 'approved', 'published_at' => now(),
+        ]);
+
+        $this->artisan('geoflow:litb-site:seed-homepage')->assertSuccessful();
+
+        $modules = json_decode(SiteSetting::where('setting_key', 'homepage_modules')->value('setting_value'), true);
+        $comparisonsModule = collect($modules)->firstWhere('title', 'Comparisons');
+        $this->assertNotNull($comparisonsModule);
+        $rows = explode("\n", trim($comparisonsModule['body']));
+        $this->assertCount(1, $rows);
+        $fields = explode('|', $rows[0]);
+        $this->assertCount(3, $fields, 'A row must have exactly 3 pipe-delimited fields: title, excerpt, url.');
+        $this->assertSame(route('site.article', $article->slug), trim($fields[2]));
+        $this->assertStringEndsNotWith('LightInTheBox', trim($fields[0]));
+        $this->assertStringEndsNotWith('LightInTheBox', trim($fields[1]));
+    }
+
     public function test_it_adds_a_newsletter_module_only_when_an_active_lead_form_exists(): void
     {
         $this->artisan('geoflow:litb-site:seed-homepage')->assertSuccessful();

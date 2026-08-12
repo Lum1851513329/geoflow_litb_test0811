@@ -17,7 +17,6 @@ class SeedLitbHomepageModulesCommand extends Command
     public function handle(): int
     {
         $modules = [];
-        $sortOrder = 0;
 
         $modules[] = [
             'type' => 'hero', 'layout' => 'single', 'title' => 'LightInTheBox Style & Shopping Guides',
@@ -44,8 +43,8 @@ class SeedLitbHomepageModulesCommand extends Command
                 continue;
             }
             $rows = $articles->map(fn (Article $a) => implode('|', [
-                $a->title,
-                (string) $a->excerpt,
+                $this->rowField($a->title),
+                $this->rowField((string) $a->excerpt),
                 route('site.article', $a->slug),
             ]))->implode("\n");
             $modules[] = [
@@ -59,7 +58,7 @@ class SeedLitbHomepageModulesCommand extends Command
             ->orderByDesc('view_count')->orderByDesc('published_at')->limit(6)->get(['title', 'excerpt', 'slug']);
         if ($trendingArticles->isNotEmpty()) {
             $rows = $trendingArticles->map(fn (Article $a) => implode('|', [
-                $a->title, (string) $a->excerpt, route('site.article', $a->slug),
+                $this->rowField($a->title), $this->rowField((string) $a->excerpt), route('site.article', $a->slug),
             ]))->implode("\n");
             $modules[] = [
                 'type' => 'feature_grid', 'layout' => 'grid', 'title' => 'Trending Guides',
@@ -83,7 +82,7 @@ class SeedLitbHomepageModulesCommand extends Command
             $faqArticles = Article::query()->published()->where('category_id', $faqCategory->id)
                 ->orderByDesc('published_at')->limit(6)->get(['title', 'excerpt', 'slug']);
             if ($faqArticles->isNotEmpty()) {
-                $rows = $faqArticles->map(fn (Article $a) => implode('|', [$a->title, '', route('site.article', $a->slug)]))->implode("\n");
+                $rows = $faqArticles->map(fn (Article $a) => implode('|', [$this->rowField($a->title), '', route('site.article', $a->slug)]))->implode("\n");
                 $modules[] = [
                     'type' => 'feature_grid', 'layout' => 'grid', 'title' => 'Frequently Asked Questions',
                     'subtitle' => '', 'body' => $rows, 'enabled' => true, 'alignment' => 'left',
@@ -122,5 +121,20 @@ class SeedLitbHomepageModulesCommand extends Command
         $this->info('Homepage modules written: '.count($modules));
 
         return self::SUCCESS;
+    }
+
+    /**
+     * The homepage-modules feature_grid row format is pipe-delimited
+     * (title|text|url), but every LITB article title carries the SEO
+     * suffix " | LightInTheBox" -- a literal pipe -- which shifts every
+     * field by one when the row is parsed. Strip that suffix and any
+     * remaining pipe characters before a title or excerpt is placed in a
+     * row.
+     */
+    private function rowField(string $value): string
+    {
+        $value = preg_replace('/\s*\|\s*LightInTheBox\s*$/i', '', $value) ?? $value;
+
+        return trim(str_replace('|', '-', $value));
     }
 }

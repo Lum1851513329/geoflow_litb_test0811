@@ -7,9 +7,23 @@ use Tests\TestCase;
 
 class PublishLitbRobotsTxtCommandTest extends TestCase
 {
+    private ?string $originalRobotsTxt = null;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+        $this->originalRobotsTxt = File::exists(public_path('robots.txt'))
+            ? File::get(public_path('robots.txt'))
+            : null;
+    }
+
     protected function tearDown(): void
     {
-        File::put(public_path('robots.txt'), "User-agent: *\nDisallow:\n");
+        if ($this->originalRobotsTxt !== null) {
+            File::put(public_path('robots.txt'), $this->originalRobotsTxt);
+        } else {
+            File::delete(public_path('robots.txt'));
+        }
         parent::tearDown();
     }
 
