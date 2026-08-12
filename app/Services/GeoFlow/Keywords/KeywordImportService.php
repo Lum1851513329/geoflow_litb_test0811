@@ -426,9 +426,17 @@ class KeywordImportService
         return $date;
     }
 
+    /** @var array<int,string> */
+    private const NULL_METRIC_TOKENS = ['--', '-', 'n/a', 'na'];
+
+    private function isNullMetricToken(mixed $value): bool
+    {
+        return is_string($value) && in_array(strtolower(trim($value)), self::NULL_METRIC_TOKENS, true);
+    }
+
     private function nullableUnsignedBigInteger(mixed $value): ?int
     {
-        if ($value === null || $value === '') {
+        if ($value === null || $value === '' || $this->isNullMetricToken($value)) {
             return null;
         }
         $normalized = $this->metricString($value);
@@ -448,7 +456,7 @@ class KeywordImportService
 
     private function nullableDecimal(mixed $value, int $precision, int $scale, bool $percent = false): ?string
     {
-        if ($value === null || $value === '') {
+        if ($value === null || $value === '' || $this->isNullMetricToken($value)) {
             return null;
         }
         $normalized = $this->metricString($value);

@@ -386,6 +386,33 @@ class KeywordImportServiceTest extends TestCase
         ]);
     }
 
+    public function test_google_ads_no_data_placeholders_are_treated_as_null_metrics_not_row_rejections(): void
+    {
+        Storage::fake('local');
+        $library = $this->library();
+        $source = $this->workbook([
+            ['Keyword', 'Clicks', 'CTR', 'Position', 'Cost'],
+            ['light in the box shoes', 5, '--', '--', '--'],
+        ]);
+        $batch = (new KeywordImportService)->createBatch($this->metadata($library, $source, [
+            'ctr' => 'ctr',
+            'position' => 'position',
+            'cost' => 'cost',
+        ]));
+
+        (new KeywordImportService)->import($batch);
+
+        $this->assertSame('completed', $batch->fresh()->status);
+        $this->assertSame(1, $batch->fresh()->imported_count);
+        $this->assertSame(0, $batch->fresh()->rejected_count);
+        $this->assertDatabaseHas('keyword_metrics', [
+            'clicks' => 5,
+            'ctr' => null,
+            'average_position' => null,
+            'cost' => null,
+        ]);
+    }
+
     public function test_metrics_are_unique_per_physical_import_row_but_other_batches_and_periods_can_append(): void
     {
         Storage::fake('local');
