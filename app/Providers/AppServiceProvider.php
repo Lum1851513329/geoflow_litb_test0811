@@ -4,6 +4,9 @@ namespace App\Providers;
 
 use App\Contracts\Outbound\HostResolver;
 use App\Contracts\Outbound\OutboundTransport;
+use App\Events\ContentGenerationCompleted;
+use App\Events\ContentGenerationFailed;
+use App\Listeners\ArchiveLitbContentGeneration;
 use App\Models\Admin;
 use App\Services\Admin\AdminUpdateMetadataService;
 use App\Services\Admin\AdminWelcomeModalService;
@@ -25,6 +28,7 @@ use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Http\Client\Factory as HttpFactory;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\Facades\View;
 use Illuminate\Support\ServiceProvider;
@@ -70,6 +74,9 @@ class AppServiceProvider extends ServiceProvider
      */
     public function boot(): void
     {
+        Event::listen(ContentGenerationCompleted::class, [ArchiveLitbContentGeneration::class, 'handleCompleted']);
+        Event::listen(ContentGenerationFailed::class, [ArchiveLitbContentGeneration::class, 'handleFailed']);
+
         RateLimiter::for('admin-login', function (Request $request): Limit {
             return Limit::perMinute(30)->by('admin-login-ip:'.$request->ip());
         });
