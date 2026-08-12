@@ -1,16 +1,16 @@
 :root {
-    --ne-red: #d71920;
-    --ne-red-dark: #a90f15;
-    --ne-green: #2bb79a;
-    --ne-coral: #f46f61;
-    --ne-ink: #222;
-    --ne-muted: #666;
-    --ne-subtle: #999;
-    --ne-line: #e6e6e6;
-    --ne-soft-line: #f1f1f1;
-    --ne-bg: #fff;
-    --ne-panel: #fff;
-    --ne-soft: #f7f8fa;
+    --ne-red: #b8896f;
+    --ne-red-dark: #96694f;
+    --ne-green: #7c8a6e;
+    --ne-coral: #c98f76;
+    --ne-ink: #2b2622;
+    --ne-muted: #6b5f56;
+    --ne-subtle: #94897e;
+    --ne-line: #e8ddd2;
+    --ne-soft-line: #f2e9df;
+    --ne-bg: #faf6f1;
+    --ne-panel: #ffffff;
+    --ne-soft: #f5efe6;
 }
 
 * {
@@ -21,7 +21,7 @@
     margin: 0;
     background: var(--ne-bg);
     color: var(--ne-ink);
-    font-family: Arial, "Microsoft YaHei", "PingFang SC", sans-serif;
+    font-family: "Inter", Arial, "PingFang SC", sans-serif;
     overflow-x: hidden;
 }
 
@@ -943,21 +943,21 @@
  * This file only applies public visual cues and does not copy proprietary assets or source code.
  */
 :root {
-    --ne-red: #1a8917;
-    --ne-red-dark: #1a8917;
-    --ne-green: #0f766e;
-    --ne-coral: #0f766e;
-    --ne-ink: #242424;
-    --ne-muted: #6b6b6b;
-    --ne-subtle: #9a9a9a;
-    --ne-line: #e6e6e6;
-    --ne-soft-line: #e6e6e6;
-    --ne-bg: #ffffff;
+    --ne-red: #b8896f;
+    --ne-red-dark: #96694f;
+    --ne-green: #7c8a6e;
+    --ne-coral: #c98f76;
+    --ne-ink: #2b2622;
+    --ne-muted: #6b5f56;
+    --ne-subtle: #94897e;
+    --ne-line: #e8ddd2;
+    --ne-soft-line: #f2e9df;
+    --ne-bg: #faf6f1;
     --ne-panel: #ffffff;
-    --ne-soft: #f7f7f7;
+    --ne-soft: #f5efe6;
 }
 
-.ne-body { background: #ffffff; color: #242424; font-family: Georgia, "Times New Roman", "Noto Serif SC", serif; }
+.ne-body { background: #ffffff; color: #242424; font-family: "Inter", Arial, "PingFang SC", sans-serif; }
 .ne-main { background: #ffffff; }
 .ne-shell { width: min(1080px, calc(100vw - 40px)); }
 .ne-globalbar { background: #191919; color: color-mix(in srgb, #ffffff 78%, #1a8917); font-family: Arial, "PingFang SC", sans-serif; }
@@ -1027,22 +1027,22 @@
 /* GEOFlow white editorial system v2: begin */
 /* GEOFlow 15 Reading Medium keeps a pure white content surface and borrows only high-level layout cues from Medium. */
 :root {
-    --ne-red: #1a8917;
-    --ne-red-dark: #111111;
-    --ne-green: #1a8917;
-    --ne-coral: #111111;
-    --ne-ink: #111827;
-    --ne-muted: #4b5563;
-    --ne-subtle: #6b7280;
-    --ne-line: #e5e7eb;
-    --ne-soft-line: #eef2f7;
-    --ne-bg: #ffffff;
+    --ne-red: #b8896f;
+    --ne-red-dark: #96694f;
+    --ne-green: #7c8a6e;
+    --ne-coral: #c98f76;
+    --ne-ink: #2b2622;
+    --ne-muted: #6b5f56;
+    --ne-subtle: #94897e;
+    --ne-line: #e8ddd2;
+    --ne-soft-line: #f2e9df;
+    --ne-bg: #faf6f1;
     --ne-panel: #ffffff;
-    --ne-soft: #ffffff;
-    --geo-template-accent: #1a8917;
-    --geo-template-accent-2: #111111;
-    --geo-template-title-font: Georgia, "Times New Roman", "Noto Serif SC", serif;
-    --geo-template-ui-font: Arial, "PingFang SC", sans-serif;
+    --ne-soft: #f5efe6;
+    --geo-template-accent: #b8896f;
+    --geo-template-accent-2: #2b2622;
+    --geo-template-title-font: "Playfair Display", Georgia, "Noto Serif SC", serif;
+    --geo-template-ui-font: "Inter", Arial, "PingFang SC", sans-serif;
     --geo-template-radius: 999px;
 }
 
