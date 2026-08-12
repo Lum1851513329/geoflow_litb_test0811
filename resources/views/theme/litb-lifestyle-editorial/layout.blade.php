@@ -29,6 +29,16 @@
         ];
     @endphp
     <x-json-ld :data="$websiteSchema" />
+    @php
+        $organizationSchema = array_filter([
+            $schemaAtContext => 'https://schema.org',
+            $schemaAtType => 'Organization',
+            'name' => $siteName,
+            'url' => route('site.home'),
+            'logo' => trim(\App\Support\Site\SiteSettingsBag::get('site_logo', '')) ?: null,
+        ], fn ($value) => $value !== null);
+    @endphp
+    <x-json-ld :data="$organizationSchema" />
 </head>
 <body class="ne-body">
     @include('theme.litb-lifestyle-editorial.partials.header')

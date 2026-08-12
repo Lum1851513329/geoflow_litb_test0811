@@ -24,8 +24,17 @@
                 'itemListElement' => $schemaItems,
             ],
         ];
+        $breadcrumbSchema = [
+            $schemaAtContext => 'https://schema.org',
+            $schemaAtType => 'BreadcrumbList',
+            'itemListElement' => [
+                [$schemaAtType => 'ListItem', 'position' => 1, 'name' => __('front.nav.home'), 'item' => route('site.home')],
+                [$schemaAtType => 'ListItem', 'position' => 2, 'name' => $category->name, 'item' => route('site.category', $category->slug)],
+            ],
+        ];
     @endphp
     <x-json-ld :data="$collectionSchema" />
+    <x-json-ld :data="$breadcrumbSchema" />
 @endpush
 
 @section('content')

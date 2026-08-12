@@ -5,9 +5,17 @@
         $schemaAtContext = chr(64).'context';
         $schemaAtType = chr(64).'type';
         $schemaAtId = chr(64).'id';
-        $articleSchema = [
+        $isFaqCategory = $article->category?->slug === 'faq-help-center';
+        $isNewsCategory = $article->category?->slug === 'about-lightinthebox' && str_contains(mb_strtolower((string) $article->title), 'update');
+        $siteLogo = trim(\App\Support\Site\SiteSettingsBag::get('site_logo', ''));
+        $publisher = array_filter([
+            $schemaAtType => 'Organization',
+            'name' => $siteTitle,
+            'logo' => $siteLogo !== '' ? $siteLogo : null,
+        ]);
+        $articleSchema = array_filter([
             $schemaAtContext => 'https://schema.org',
-            $schemaAtType => 'NewsArticle',
+            $schemaAtType => $isNewsCategory ? 'NewsArticle' : 'BlogPosting',
             'headline' => $article->title,
             'description' => $pageDescription,
             'datePublished' => optional($article->published_at ?? $article->created_at)->toAtomString(),
@@ -16,22 +24,46 @@
                 $schemaAtType => 'WebPage',
                 $schemaAtId => $canonicalUrl ?? route('site.article', $article->slug),
             ],
-            'author' => [
+            'author' => array_filter([
                 $schemaAtType => 'Person',
                 'name' => $article->author?->name ?? $siteTitle,
-            ],
-            'publisher' => [
-                $schemaAtType => 'Organization',
-                'name' => $siteTitle,
-            ],
+                'url' => $article->author ? route('site.home') : null,
+            ]),
+            'publisher' => $publisher,
             'articleSection' => $article->category?->name,
             'keywords' => $tags,
+        ], fn ($value) => $value !== null && $value !== []);
+        $breadcrumbItems = [
+            [$schemaAtType => 'ListItem', 'position' => 1, 'name' => __('front.nav.home'), 'item' => route('site.home')],
         ];
+        if ($article->category) {
+            $breadcrumbItems[] = [$schemaAtType => 'ListItem', 'position' => 2, 'name' => $article->category->name, 'item' => route('site.category', $article->category->slug)];
+        }
+        $breadcrumbItems[] = [$schemaAtType => 'ListItem', 'position' => count($breadcrumbItems) + 1, 'name' => $article->title, 'item' => $canonicalUrl ?? route('site.article', $article->slug)];
+        $breadcrumbSchema = [
+            $schemaAtContext => 'https://schema.org',
+            $schemaAtType => 'BreadcrumbList',
+            'itemListElement' => $breadcrumbItems,
+        ];
+        $faqPairs = $isFaqCategory ? \App\Support\Site\ArticleFaqSchema::extract((string) $article->content) : [];
+        $faqSchema = $faqPairs !== [] ? [
+            $schemaAtContext => 'https://schema.org',
+            $schemaAtType => 'FAQPage',
+            'mainEntity' => array_map(fn (array $pair) => [
+                $schemaAtType => 'Question',
+                'name' => $pair['question'],
+                'acceptedAnswer' => [$schemaAtType => 'Answer', 'text' => $pair['answer']],
+            ], $faqPairs),
+        ] : null;
     @endphp
     @if($article->category)
         <meta property="article:section" content="{{ $article->category->name }}">
     @endif
     <x-json-ld :data="$articleSchema" />
+    <x-json-ld :data="$breadcrumbSchema" />
+    @if($faqSchema)
+        <x-json-ld :data="$faqSchema" />
+    @endif
 @endpush
 
 @section('content')
