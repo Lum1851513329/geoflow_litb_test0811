@@ -1,2 +1,19 @@
 User-agent: *
 Disallow:
+
+User-agent: GPTBot
+Allow: /
+
+User-agent: ClaudeBot
+Allow: /
+
+User-agent: Google-Extended
+Allow: /
+
+User-agent: PerplexityBot
+Allow: /
+
+User-agent: Meta-ExternalAgent
+Allow: /
+
+Sitemap: http://localhost:18082/sitemap.xml
