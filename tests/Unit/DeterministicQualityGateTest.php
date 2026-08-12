@@ -48,6 +48,25 @@ class DeterministicQualityGateTest extends TestCase
         $this->assertSame('Add an H2 heading named "Care" and include its planned guidance.', array_values($issues)[0]['repair_instruction']);
     }
 
+    public function test_gate_matches_a_heading_that_extends_the_blueprint_heading_with_extra_words(): void
+    {
+        $markdown = '## Sizing for Every Foot Shape and Arch Type'."\n".$this->words(80)
+            ."\n\n## Care and Maintenance Tips for Daily Runners\n".$this->words(80);
+
+        $result = $this->gate->inspect($markdown, $this->blueprint(), []);
+
+        $this->assertNotContains('missing_section', array_column($result->issuesAsArray(), 'code'));
+    }
+
+    public function test_gate_does_not_match_a_heading_that_merely_contains_the_blueprint_word_mid_string(): void
+    {
+        $result = $this->gate->inspect("## Resizing Your Order\n".$this->words(80)."\n\n## Care\n".$this->words(80), $this->blueprint(), []);
+
+        $issues = array_filter($result->issuesAsArray(), fn (array $issue): bool => $issue['code'] === 'missing_section');
+
+        $this->assertSame(['sizing'], array_values(array_column($issues, 'section_key')));
+    }
+
     public function test_gate_flags_duplicate_normalized_paragraphs(): void
     {
         $paragraph = 'Measure both feet at the end of the day and choose the larger measurement for a comfortable fit.';

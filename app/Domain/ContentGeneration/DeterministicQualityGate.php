@@ -300,7 +300,7 @@ final class DeterministicQualityGate
                 $flushParagraph();
                 $level = strlen($matches[1]);
                 $text = trim($matches[2]);
-                $sectionKey = $headingKeys[$this->normalize($text)] ?? null;
+                $sectionKey = $this->matchSectionKey($this->normalize($text), $headingKeys);
                 $headings[] = ['level' => $level, 'text' => $text, 'section_key' => $sectionKey];
 
                 if ($sectionKey !== null) {
@@ -808,6 +808,38 @@ final class DeterministicQualityGate
         preg_match_all('/[\p{L}\p{N}]+/u', $this->normalize($text), $matches);
 
         return $matches[0] ?? [];
+    }
+
+    /**
+     * Models routinely extend a blueprint heading with descriptive words
+     * ("Sizing" -> "Sizing for Every Foot Shape"). Match on the longest
+     * normalized blueprint heading/key that is a whole-word prefix of the
+     * actual heading, so an extension matches but an unrelated heading that
+     * merely contains the same word mid-string does not.
+     *
+     * @param  array<string, string>  $headingKeys
+     */
+    private function matchSectionKey(string $normalizedText, array $headingKeys): ?string
+    {
+        if (isset($headingKeys[$normalizedText])) {
+            return $headingKeys[$normalizedText];
+        }
+
+        $bestKey = null;
+        $bestLength = 0;
+        foreach ($headingKeys as $normalizedHeading => $key) {
+            $length = strlen($normalizedHeading);
+            if ($length <= $bestLength || $length === 0) {
+                continue;
+            }
+            if (str_starts_with($normalizedText, $normalizedHeading)
+                && $normalizedText[$length] === ' ') {
+                $bestKey = $key;
+                $bestLength = $length;
+            }
+        }
+
+        return $bestKey;
     }
 
     private function normalize(string $value): string

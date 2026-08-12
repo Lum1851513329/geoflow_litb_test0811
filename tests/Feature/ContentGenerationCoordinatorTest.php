@@ -84,7 +84,7 @@ class ContentGenerationCoordinatorTest extends TestCase
     {
         Event::fake();
         $this->fakeGenerator->queue(
-            '## Fit\nToo thin.',
+            '## Wrong Heading\nToo thin.',
             $this->substantiveArticle(),
             $this->semanticPass(),
         );
@@ -118,7 +118,7 @@ class ContentGenerationCoordinatorTest extends TestCase
             $fresh->steps()->pluck('prompt')->implode("\n"),
         );
         $this->assertSame($this->substantiveArticle(), $fresh->raw_output);
-        $this->assertSame('## Fit\nToo thin.', $fresh->steps()
+        $this->assertSame('## Wrong Heading\nToo thin.', $fresh->steps()
             ->where('step_type', ContentGenerationRunStep::TYPE_INITIAL_GENERATION)
             ->sole()->output);
         $this->assertSame(array_fill(0, 3, $ambientTransactionLevel), $this->fakeGenerator->transactionLevels);
@@ -127,7 +127,7 @@ class ContentGenerationCoordinatorTest extends TestCase
             ->where('step_type', ContentGenerationRunStep::TYPE_TARGETED_REVISION)
             ->sole()
             ->prompt;
-        $this->assertStringContainsString('## Fit\\nToo thin.', $revisionPrompt);
+        $this->assertStringContainsString('## Wrong Heading\\nToo thin.', $revisionPrompt);
         $this->assertStringContainsString('Add an H2 heading named \\"Fit\\"', $revisionPrompt);
         $this->assertStringNotContainsString('Rewrite the whole article', $revisionPrompt);
         $semanticPrompt = $fresh->steps()->where('step_type', ContentGenerationRunStep::TYPE_SEMANTIC_QUALITY)->sole()->prompt;
