@@ -202,10 +202,29 @@ final class LitbQuarterlyBriefCatalog
             'key' => Str::slug($heading),
             'heading' => $heading,
             'purpose' => $index === 0 ? "Answer: {$question}" : "Give evidence-backed {$keyword} guidance for {$heading}.",
-            'questions_to_answer' => $index === 0 ? [$question] : ["What should a shopper know about {$keyword} before deciding?"],
+            'questions_to_answer' => [$index === 0 ? $question : $this->sectionQuestion($heading, $keyword)],
             'minimum_words' => $index === 4 ? 220 : 280,
             'cta_allowed' => ! in_array($pillar, ['official_news'], true),
             'required_fact_ids' => [],
         ], $headings, array_keys($headings));
+    }
+
+    /**
+     * Each non-lead heading gets its own naturally worded question instead of
+     * one generic "what should a shopper know" question reused everywhere.
+     * The generic phrasing rarely occurs verbatim in well-written prose that
+     * answers it in different words, which made the deterministic quality
+     * gate's literal keyword-overlap check flag genuinely on-topic sections
+     * as uncovered.
+     */
+    private function sectionQuestion(string $heading, string $keyword): string
+    {
+        return match ($heading) {
+            'Key options and criteria' => "What options and criteria matter most when choosing {$keyword}?",
+            'How to check fit, compatibility, or terms' => "How can a shopper check fit, compatibility, or terms for {$keyword}?",
+            'Common mistakes and verification checklist' => "What common mistakes should shoppers avoid with {$keyword}?",
+            'Frequently asked questions' => "What do shoppers commonly ask about {$keyword}?",
+            default => "What should a shopper know about {$keyword} before deciding?",
+        };
     }
 }
