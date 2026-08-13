@@ -61,3 +61,41 @@ function litb_sitewide_json_ld(): void {
     litb_json_ld( $organization_schema );
 }
 add_action( 'wp_head', 'litb_sitewide_json_ld' );
+
+function litb_customize_register( WP_Customize_Manager $wp_customize ): void {
+    $wp_customize->add_panel( 'litb_homepage_panel', [
+        'title' => __( 'Homepage Banner & Activities', 'litb-lifestyle-editorial' ),
+        'priority' => 30,
+    ] );
+
+    // --- Banner ---
+    $wp_customize->add_section( 'litb_banner_section', [
+        'title' => __( 'Banner', 'litb-lifestyle-editorial' ),
+        'panel' => 'litb_homepage_panel',
+    ] );
+    $wp_customize->add_setting( 'litb_banner_title', [ 'default' => '', 'sanitize_callback' => 'sanitize_text_field' ] );
+    $wp_customize->add_control( 'litb_banner_title', [ 'label' => __( 'Banner title', 'litb-lifestyle-editorial' ), 'section' => 'litb_banner_section', 'type' => 'text' ] );
+    $wp_customize->add_setting( 'litb_banner_subtitle', [ 'default' => '', 'sanitize_callback' => 'sanitize_text_field' ] );
+    $wp_customize->add_control( 'litb_banner_subtitle', [ 'label' => __( 'Banner subtitle', 'litb-lifestyle-editorial' ), 'section' => 'litb_banner_section', 'type' => 'text' ] );
+    $wp_customize->add_setting( 'litb_banner_image', [ 'default' => '', 'sanitize_callback' => 'esc_url_raw' ] );
+    $wp_customize->add_control( new WP_Customize_Image_Control( $wp_customize, 'litb_banner_image', [ 'label' => __( 'Banner image', 'litb-lifestyle-editorial' ), 'section' => 'litb_banner_section' ] ) );
+    $wp_customize->add_setting( 'litb_banner_link', [ 'default' => '', 'sanitize_callback' => 'esc_url_raw' ] );
+    $wp_customize->add_control( 'litb_banner_link', [ 'label' => __( 'Banner link URL', 'litb-lifestyle-editorial' ), 'section' => 'litb_banner_section', 'type' => 'url' ] );
+
+    // --- Activity carousel (5 fixed slots) ---
+    $wp_customize->add_section( 'litb_activity_section', [
+        'title' => __( 'Activity carousel', 'litb-lifestyle-editorial' ),
+        'panel' => 'litb_homepage_panel',
+    ] );
+    for ( $i = 1; $i <= 5; $i++ ) {
+        $wp_customize->add_setting( "litb_activity_{$i}_title", [ 'default' => '', 'sanitize_callback' => 'sanitize_text_field' ] );
+        $wp_customize->add_control( "litb_activity_{$i}_title", [ 'label' => sprintf( __( 'Slide %d title', 'litb-lifestyle-editorial' ), $i ), 'section' => 'litb_activity_section', 'type' => 'text' ] );
+        $wp_customize->add_setting( "litb_activity_{$i}_description", [ 'default' => '', 'sanitize_callback' => 'sanitize_text_field' ] );
+        $wp_customize->add_control( "litb_activity_{$i}_description", [ 'label' => sprintf( __( 'Slide %d description', 'litb-lifestyle-editorial' ), $i ), 'section' => 'litb_activity_section', 'type' => 'text' ] );
+        $wp_customize->add_setting( "litb_activity_{$i}_image", [ 'default' => '', 'sanitize_callback' => 'esc_url_raw' ] );
+        $wp_customize->add_control( new WP_Customize_Image_Control( $wp_customize, "litb_activity_{$i}_image", [ 'label' => sprintf( __( 'Slide %d image', 'litb-lifestyle-editorial' ), $i ), 'section' => 'litb_activity_section' ] ) );
+        $wp_customize->add_setting( "litb_activity_{$i}_link", [ 'default' => '', 'sanitize_callback' => 'esc_url_raw' ] );
+        $wp_customize->add_control( "litb_activity_{$i}_link", [ 'label' => sprintf( __( 'Slide %d link URL', 'litb-lifestyle-editorial' ), $i ), 'section' => 'litb_activity_section', 'type' => 'url' ] );
+    }
+}
+add_action( 'customize_register', 'litb_customize_register' );

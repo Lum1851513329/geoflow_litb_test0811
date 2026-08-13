@@ -2095,3 +2095,88 @@ body,
     text-align: center;
     color: var(--ne-subtle);
 }
+
+.ne-banner {
+    display: block;
+    margin-top: 16px;
+    border-radius: 12px;
+    background-size: cover;
+    background-position: center;
+    min-height: 220px;
+    padding: 32px;
+    display: flex;
+    align-items: flex-end;
+}
+
+.ne-banner-copy {
+    background: linear-gradient(180deg, transparent, rgba(43, 38, 34, 0.75));
+    padding: 20px;
+    border-radius: 8px;
+    color: #fff;
+    max-width: 480px;
+}
+
+.ne-banner-copy h2 {
+    font-family: var(--ne-title-font, Georgia, serif);
+    font-size: 28px;
+    margin: 0 0 8px;
+}
+
+.ne-activity-carousel {
+    position: relative;
+    margin: 20px 0;
+    border-radius: 12px;
+    overflow: hidden;
+    min-height: 180px;
+}
+
+.ne-activity-slide {
+    display: none;
+    background-size: cover;
+    background-position: center;
+    min-height: 180px;
+    align-items: flex-end;
+    padding: 20px;
+}
+
+.ne-activity-slide.is-active {
+    display: flex;
+}
+
+.ne-activity-copy {
+    background: rgba(43, 38, 34, 0.7);
+    color: #fff;
+    padding: 12px 16px;
+    border-radius: 8px;
+}
+
+.ne-activity-copy h3 {
+    margin: 0 0 4px;
+    font-size: 18px;
+}
+
+.ne-activity-copy p {
+    margin: 0;
+    font-size: 14px;
+}
+
+.ne-activity-dots {
+    position: absolute;
+    bottom: 12px;
+    right: 16px;
+    display: flex;
+    gap: 6px;
+}
+
+.ne-activity-dots button {
+    width: 8px;
+    height: 8px;
+    border: 0;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.6);
+}
+
+.ne-activity-dots button.is-active {
+    width: 20px;
+    background: #fff;
+}

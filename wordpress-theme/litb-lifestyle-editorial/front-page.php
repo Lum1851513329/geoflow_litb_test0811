@@ -35,6 +35,20 @@ litb_json_ld( [
     'mainEntity' => [ '@type' => 'ItemList', 'itemListElement' => $litb_schema_items ],
 ] );
 ?>
+<?php
+$litb_banner_image = get_theme_mod( 'litb_banner_image', '' );
+if ( $litb_banner_image !== '' ) :
+    $litb_banner_link = get_theme_mod( 'litb_banner_link', '' ) ?: home_url( '/' );
+?>
+<a href="<?php echo esc_url( $litb_banner_link ); ?>" class="ne-shell ne-banner" style="background-image:url('<?php echo esc_url( $litb_banner_image ); ?>')">
+    <div class="ne-banner-copy">
+        <?php $litb_banner_title = get_theme_mod( 'litb_banner_title', '' ); ?>
+        <?php if ( $litb_banner_title !== '' ) : ?><h2><?php echo esc_html( $litb_banner_title ); ?></h2><?php endif; ?>
+        <?php $litb_banner_subtitle = get_theme_mod( 'litb_banner_subtitle', '' ); ?>
+        <?php if ( $litb_banner_subtitle !== '' ) : ?><p><?php echo esc_html( $litb_banner_subtitle ); ?></p><?php endif; ?>
+    </div>
+</a>
+<?php endif; ?>
 <div class="ne-shell ne-layout">
     <section class="ne-feed">
         <?php if ( $litb_lead ) : ?>
@@ -69,6 +83,41 @@ litb_json_ld( [
                 <?php endif; ?>
             </div>
         </section>
+
+        <?php
+        $litb_activity_slides = [];
+        for ( $i = 1; $i <= 5; $i++ ) {
+            $image = get_theme_mod( "litb_activity_{$i}_image", '' );
+            if ( $image === '' ) {
+                continue;
+            }
+            $litb_activity_slides[] = [
+                'title' => get_theme_mod( "litb_activity_{$i}_title", '' ),
+                'description' => get_theme_mod( "litb_activity_{$i}_description", '' ),
+                'image' => $image,
+                'link' => get_theme_mod( "litb_activity_{$i}_link", '' ) ?: home_url( '/' ),
+            ];
+        }
+        ?>
+        <?php if ( $litb_activity_slides !== [] ) : ?>
+            <div class="ne-activity-carousel" data-activity-carousel>
+                <?php foreach ( $litb_activity_slides as $litb_index => $litb_slide ) : ?>
+                    <a href="<?php echo esc_url( $litb_slide['link'] ); ?>" class="ne-activity-slide <?php echo $litb_index === 0 ? 'is-active' : ''; ?>" data-activity-slide style="background-image:url('<?php echo esc_url( $litb_slide['image'] ); ?>')">
+                        <div class="ne-activity-copy">
+                            <?php if ( $litb_slide['title'] !== '' ) : ?><h3><?php echo esc_html( $litb_slide['title'] ); ?></h3><?php endif; ?>
+                            <?php if ( $litb_slide['description'] !== '' ) : ?><p><?php echo esc_html( $litb_slide['description'] ); ?></p><?php endif; ?>
+                        </div>
+                    </a>
+                <?php endforeach; ?>
+                <?php if ( count( $litb_activity_slides ) > 1 ) : ?>
+                    <div class="ne-activity-dots" aria-hidden="true">
+                        <?php foreach ( $litb_activity_slides as $litb_index => $litb_slide ) : ?>
+                            <button type="button" class="<?php echo $litb_index === 0 ? 'is-active' : ''; ?>" data-activity-dot></button>
+                        <?php endforeach; ?>
+                    </div>
+                <?php endif; ?>
+            </div>
+        <?php endif; ?>
 
         <div class="mt-3">
             <?php
