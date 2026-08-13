@@ -14,7 +14,8 @@
 - No change to GEOFlow itself, the sync pipeline (`app/Services/GeoFlow/DistributionOrchestrator.php` etc.), or `docker-compose.yml`.
 - No fabricated data: omit fields WordPress has no real data for (view counts, "hot" ranking) rather than inventing numbers.
 - Reuse `theme.css`'s existing class names/tokens (`--ne-bg:#faf6f1`, `--ne-ink:#2b2622`, `--ne-red:#b8896f`, `--ne-green:#7c8a6e`, `--ne-line:#e8ddd2`) — do not introduce a second color/typography system.
-- The theme has no automated test runner (no PHPUnit/WP-CLI test harness in this repo, and adding one is out of scope). Every task's verification step is a manual check against the live WordPress site over SSH — see each task's Step 2 and the repo-root `CLAUDE.md`-equivalent conventions established earlier in this project (SSH as `lym@47.103.117.122`, `sudo` password `185151`, WordPress runs in the `geoflow-wp` podman container, database in `geoflow-wp-db`).
+- The theme has no automated test runner (no PHPUnit/WP-CLI test harness in this repo, and adding one is out of scope). Every task's verification step is a manual check against the live WordPress site over SSH — see each task's Step 2 and the conventions established earlier in this project (SSH as `lym@47.103.117.122`, WordPress runs in the `geoflow-wp` podman container, database in `geoflow-wp-db`).
+- **Never write the server's `sudo` password as a literal string anywhere — not in commands, not in files, not in commit messages.** Every deploy/verification command in this plan reads it from the `LITB_WP_SUDO_PASS` environment variable (`echo \"$LITB_WP_SUDO_PASS\" | sudo -S ...`). Export it in your own shell before running any step that needs it (`export LITB_WP_SUDO_PASS='...'`); never paste the value into a Bash tool call itself, since that value is retained in tool-call history.
 - Repo location: commit the theme source under `wordpress-theme/litb-lifestyle-editorial/` at the repo root (a new top-level directory, parallel to `app/`, `resources/`) — this is WordPress theme code, not a Laravel resource, so it does not belong under `resources/views/`. Each task's deploy step copies the relevant files from there to the server's `wp-content/themes/litb-lifestyle-editorial/` via `scp`.
 
 ---
@@ -143,21 +144,21 @@ add_action( 'wp_head', 'litb_sitewide_json_ld' );
 - [ ] **Step 4: Deploy and activate on the server**
 
 ```bash
-ssh lym@47.103.117.122 "echo '185151' | sudo -S docker exec geoflow-wp mkdir -p /var/www/html/wp-content/themes/litb-lifestyle-editorial"
+ssh lym@47.103.117.122 "echo \"$LITB_WP_SUDO_PASS\" | sudo -S docker exec geoflow-wp mkdir -p /var/www/html/wp-content/themes/litb-lifestyle-editorial"
 scp wordpress-theme/litb-lifestyle-editorial/style.css wordpress-theme/litb-lifestyle-editorial/index.php wordpress-theme/litb-lifestyle-editorial/functions.php lym@47.103.117.122:/tmp/
-ssh lym@47.103.117.122 "echo '185151' | sudo -S docker cp /tmp/style.css geoflow-wp:/var/www/html/wp-content/themes/litb-lifestyle-editorial/style.css && echo '185151' | sudo -S docker cp /tmp/index.php geoflow-wp:/var/www/html/wp-content/themes/litb-lifestyle-editorial/index.php && echo '185151' | sudo -S docker cp /tmp/functions.php geoflow-wp:/var/www/html/wp-content/themes/litb-lifestyle-editorial/functions.php"
+ssh lym@47.103.117.122 "echo \"$LITB_WP_SUDO_PASS\" | sudo -S docker cp /tmp/style.css geoflow-wp:/var/www/html/wp-content/themes/litb-lifestyle-editorial/style.css && echo \"$LITB_WP_SUDO_PASS\" | sudo -S docker cp /tmp/index.php geoflow-wp:/var/www/html/wp-content/themes/litb-lifestyle-editorial/index.php && echo \"$LITB_WP_SUDO_PASS\" | sudo -S docker cp /tmp/functions.php geoflow-wp:/var/www/html/wp-content/themes/litb-lifestyle-editorial/functions.php"
 ```
 
 `assets/theme.css`, `assets/theme.js`, `assets/lucide.min.js` don't exist yet (Task 2 creates the first two, this step copies a bundled Lucide script) — `functions.php`'s `filemtime()` calls will fatal-error without them, so create empty placeholders now so the theme can activate without error, to be overwritten in Task 2:
 
 ```bash
-ssh lym@47.103.117.122 "echo '185151' | sudo -S docker exec geoflow-wp mkdir -p /var/www/html/wp-content/themes/litb-lifestyle-editorial/assets && echo '185151' | sudo -S docker exec geoflow-wp touch /var/www/html/wp-content/themes/litb-lifestyle-editorial/assets/theme.css /var/www/html/wp-content/themes/litb-lifestyle-editorial/assets/theme.js /var/www/html/wp-content/themes/litb-lifestyle-editorial/assets/lucide.min.js"
+ssh lym@47.103.117.122 "echo \"$LITB_WP_SUDO_PASS\" | sudo -S docker exec geoflow-wp mkdir -p /var/www/html/wp-content/themes/litb-lifestyle-editorial/assets && echo \"$LITB_WP_SUDO_PASS\" | sudo -S docker exec geoflow-wp touch /var/www/html/wp-content/themes/litb-lifestyle-editorial/assets/theme.css /var/www/html/wp-content/themes/litb-lifestyle-editorial/assets/theme.js /var/www/html/wp-content/themes/litb-lifestyle-editorial/assets/lucide.min.js"
 ```
 
 Activate the theme:
 
 ```bash
-ssh lym@47.103.117.122 "echo '185151' | sudo -S docker exec geoflow-wp bash -c \"cat > /tmp/activate.php <<'PHP'
+ssh lym@47.103.117.122 "echo \"$LITB_WP_SUDO_PASS\" | sudo -S docker exec geoflow-wp bash -c \"cat > /tmp/activate.php <<'PHP'
 <?php
 define('WP_USE_THEMES', false);
 require '/var/www/html/wp-load.php';
@@ -377,11 +378,11 @@ Ported from `footer.blade.php`:
 ```bash
 scp wordpress-theme/litb-lifestyle-editorial/header.php wordpress-theme/litb-lifestyle-editorial/footer.php lym@47.103.117.122:/tmp/
 scp wordpress-theme/litb-lifestyle-editorial/assets/theme.css wordpress-theme/litb-lifestyle-editorial/assets/theme.js wordpress-theme/litb-lifestyle-editorial/assets/lucide.min.js lym@47.103.117.122:/tmp/assets/
-ssh lym@47.103.117.122 "echo '185151' | sudo -S docker cp /tmp/header.php geoflow-wp:/var/www/html/wp-content/themes/litb-lifestyle-editorial/header.php
-echo '185151' | sudo -S docker cp /tmp/footer.php geoflow-wp:/var/www/html/wp-content/themes/litb-lifestyle-editorial/footer.php
-echo '185151' | sudo -S docker cp /tmp/assets/theme.css geoflow-wp:/var/www/html/wp-content/themes/litb-lifestyle-editorial/assets/theme.css
-echo '185151' | sudo -S docker cp /tmp/assets/theme.js geoflow-wp:/var/www/html/wp-content/themes/litb-lifestyle-editorial/assets/theme.js
-echo '185151' | sudo -S docker cp /tmp/assets/lucide.min.js geoflow-wp:/var/www/html/wp-content/themes/litb-lifestyle-editorial/assets/lucide.min.js"
+ssh lym@47.103.117.122 "echo \"$LITB_WP_SUDO_PASS\" | sudo -S docker cp /tmp/header.php geoflow-wp:/var/www/html/wp-content/themes/litb-lifestyle-editorial/header.php
+echo \"$LITB_WP_SUDO_PASS\" | sudo -S docker cp /tmp/footer.php geoflow-wp:/var/www/html/wp-content/themes/litb-lifestyle-editorial/footer.php
+echo \"$LITB_WP_SUDO_PASS\" | sudo -S docker cp /tmp/assets/theme.css geoflow-wp:/var/www/html/wp-content/themes/litb-lifestyle-editorial/assets/theme.css
+echo \"$LITB_WP_SUDO_PASS\" | sudo -S docker cp /tmp/assets/theme.js geoflow-wp:/var/www/html/wp-content/themes/litb-lifestyle-editorial/assets/theme.js
+echo \"$LITB_WP_SUDO_PASS\" | sudo -S docker cp /tmp/assets/lucide.min.js geoflow-wp:/var/www/html/wp-content/themes/litb-lifestyle-editorial/assets/lucide.min.js"
 ```
 
 (Create `/tmp/assets/` on the remote host first with `ssh lym@47.103.117.122 "mkdir -p /tmp/assets"` if it doesn't already exist from Task 1.)
@@ -496,9 +497,9 @@ $litb_sidebar_posts = get_posts( [ 'numberposts' => 6, 'post_status' => 'publish
 ```bash
 ssh lym@47.103.117.122 "mkdir -p /tmp/template-parts"
 scp wordpress-theme/litb-lifestyle-editorial/template-parts/article-card.php wordpress-theme/litb-lifestyle-editorial/template-parts/sidebar.php lym@47.103.117.122:/tmp/template-parts/
-ssh lym@47.103.117.122 "echo '185151' | sudo -S docker exec geoflow-wp mkdir -p /var/www/html/wp-content/themes/litb-lifestyle-editorial/template-parts
-echo '185151' | sudo -S docker cp /tmp/template-parts/article-card.php geoflow-wp:/var/www/html/wp-content/themes/litb-lifestyle-editorial/template-parts/article-card.php
-echo '185151' | sudo -S docker cp /tmp/template-parts/sidebar.php geoflow-wp:/var/www/html/wp-content/themes/litb-lifestyle-editorial/template-parts/sidebar.php"
+ssh lym@47.103.117.122 "echo \"$LITB_WP_SUDO_PASS\" | sudo -S docker exec geoflow-wp mkdir -p /var/www/html/wp-content/themes/litb-lifestyle-editorial/template-parts
+echo \"$LITB_WP_SUDO_PASS\" | sudo -S docker cp /tmp/template-parts/article-card.php geoflow-wp:/var/www/html/wp-content/themes/litb-lifestyle-editorial/template-parts/article-card.php
+echo \"$LITB_WP_SUDO_PASS\" | sudo -S docker cp /tmp/template-parts/sidebar.php geoflow-wp:/var/www/html/wp-content/themes/litb-lifestyle-editorial/template-parts/sidebar.php"
 ```
 
 - [ ] **Step 4: Verify (via `index.php`'s fallback loop from Task 1, which already calls `article-card`)**
@@ -608,7 +609,7 @@ function litb_extract_faq_pairs( string $html ): array {
 Deploy the file first:
 
 ```bash
-ssh lym@47.103.117.122 "echo '185151' | sudo -S docker cp /tmp/template-parts/faq-schema.php geoflow-wp:/var/www/html/wp-content/themes/litb-lifestyle-editorial/template-parts/faq-schema.php"
+ssh lym@47.103.117.122 "echo \"$LITB_WP_SUDO_PASS\" | sudo -S docker cp /tmp/template-parts/faq-schema.php geoflow-wp:/var/www/html/wp-content/themes/litb-lifestyle-editorial/template-parts/faq-schema.php"
 ```
 
 (Copy it to `/tmp/template-parts/` via `scp` first, same pattern as Task 3 Step 3.)
@@ -616,7 +617,7 @@ ssh lym@47.103.117.122 "echo '185151' | sudo -S docker cp /tmp/template-parts/fa
 Then run it against a real FAQ post's stored content, using the same "temp debug script via `docker exec`" pattern already used earlier in this project (e.g. the `authtest.php`/`debugauth.php` checks during Application Password setup):
 
 ```bash
-ssh lym@47.103.117.122 "echo '185151' | sudo -S docker exec geoflow-wp bash -c \"cat > /tmp/faqtest.php <<'PHP'
+ssh lym@47.103.117.122 "echo \"$LITB_WP_SUDO_PASS\" | sudo -S docker exec geoflow-wp bash -c \"cat > /tmp/faqtest.php <<'PHP'
 <?php
 define('WP_USE_THEMES', false);
 require '/var/www/html/wp-load.php';
@@ -804,7 +805,7 @@ while ( have_posts() ) :
 
 ```bash
 scp wordpress-theme/litb-lifestyle-editorial/single.php lym@47.103.117.122:/tmp/
-ssh lym@47.103.117.122 "echo '185151' | sudo -S docker cp /tmp/single.php geoflow-wp:/var/www/html/wp-content/themes/litb-lifestyle-editorial/single.php"
+ssh lym@47.103.117.122 "echo \"$LITB_WP_SUDO_PASS\" | sudo -S docker cp /tmp/single.php geoflow-wp:/var/www/html/wp-content/themes/litb-lifestyle-editorial/single.php"
 ```
 
 - [ ] **Step 3: Verify — FAQ article**
@@ -937,8 +938,8 @@ litb_json_ld( [
 ```bash
 scp wordpress-theme/litb-lifestyle-editorial/category.php lym@47.103.117.122:/tmp/
 scp wordpress-theme/litb-lifestyle-editorial/assets/theme.css lym@47.103.117.122:/tmp/assets/
-ssh lym@47.103.117.122 "echo '185151' | sudo -S docker cp /tmp/category.php geoflow-wp:/var/www/html/wp-content/themes/litb-lifestyle-editorial/category.php
-echo '185151' | sudo -S docker cp /tmp/assets/theme.css geoflow-wp:/var/www/html/wp-content/themes/litb-lifestyle-editorial/assets/theme.css"
+ssh lym@47.103.117.122 "echo \"$LITB_WP_SUDO_PASS\" | sudo -S docker cp /tmp/category.php geoflow-wp:/var/www/html/wp-content/themes/litb-lifestyle-editorial/category.php
+echo \"$LITB_WP_SUDO_PASS\" | sudo -S docker cp /tmp/assets/theme.css geoflow-wp:/var/www/html/wp-content/themes/litb-lifestyle-editorial/assets/theme.css"
 ```
 
 - [ ] **Step 4: Verify**
@@ -1064,13 +1065,13 @@ litb_json_ld( [
 
 ```bash
 scp wordpress-theme/litb-lifestyle-editorial/front-page.php lym@47.103.117.122:/tmp/
-ssh lym@47.103.117.122 "echo '185151' | sudo -S docker cp /tmp/front-page.php geoflow-wp:/var/www/html/wp-content/themes/litb-lifestyle-editorial/front-page.php"
+ssh lym@47.103.117.122 "echo \"$LITB_WP_SUDO_PASS\" | sudo -S docker cp /tmp/front-page.php geoflow-wp:/var/www/html/wp-content/themes/litb-lifestyle-editorial/front-page.php"
 ```
 
 WordPress only uses `front-page.php` when the reading setting "Your homepage displays" is set to "A static page," OR — for a "Your latest posts" setting — `front-page.php` is used automatically if present, taking priority over `home.php`/`index.php`. No settings change needed; confirm the current setting doesn't override this:
 
 ```bash
-ssh lym@47.103.117.122 "echo '185151' | sudo -S docker exec geoflow-wp bash -c \"cat > /tmp/checksetting.php <<'PHP'
+ssh lym@47.103.117.122 "echo \"$LITB_WP_SUDO_PASS\" | sudo -S docker exec geoflow-wp bash -c \"cat > /tmp/checksetting.php <<'PHP'
 <?php
 define('WP_USE_THEMES', false);
 require '/var/www/html/wp-load.php';
@@ -1308,9 +1309,9 @@ for ( $i = 1; $i <= 5; $i++ ) {
 ```bash
 scp wordpress-theme/litb-lifestyle-editorial/functions.php wordpress-theme/litb-lifestyle-editorial/front-page.php lym@47.103.117.122:/tmp/
 scp wordpress-theme/litb-lifestyle-editorial/assets/theme.css lym@47.103.117.122:/tmp/assets/
-ssh lym@47.103.117.122 "echo '185151' | sudo -S docker cp /tmp/functions.php geoflow-wp:/var/www/html/wp-content/themes/litb-lifestyle-editorial/functions.php
-echo '185151' | sudo -S docker cp /tmp/front-page.php geoflow-wp:/var/www/html/wp-content/themes/litb-lifestyle-editorial/front-page.php
-echo '185151' | sudo -S docker cp /tmp/assets/theme.css geoflow-wp:/var/www/html/wp-content/themes/litb-lifestyle-editorial/assets/theme.css"
+ssh lym@47.103.117.122 "echo \"$LITB_WP_SUDO_PASS\" | sudo -S docker cp /tmp/functions.php geoflow-wp:/var/www/html/wp-content/themes/litb-lifestyle-editorial/functions.php
+echo \"$LITB_WP_SUDO_PASS\" | sudo -S docker cp /tmp/front-page.php geoflow-wp:/var/www/html/wp-content/themes/litb-lifestyle-editorial/front-page.php
+echo \"$LITB_WP_SUDO_PASS\" | sudo -S docker cp /tmp/assets/theme.css geoflow-wp:/var/www/html/wp-content/themes/litb-lifestyle-editorial/assets/theme.css"
 ```
 
 - [ ] **Step 5: Verify — empty state (no Customizer values set yet)**
@@ -1347,7 +1348,7 @@ git commit -m "feat: add Customizer-driven banner and activity carousel to homep
 - [ ] **Step 1: Confirm no PHP errors/warnings**
 
 ```bash
-ssh lym@47.103.117.122 "echo '185151' | sudo -S docker exec geoflow-wp bash -c \"tail -50 /var/www/html/wp-content/debug.log 2>/dev/null || echo 'no debug log (WP_DEBUG likely off, which is fine for this test env)'\""
+ssh lym@47.103.117.122 "echo \"$LITB_WP_SUDO_PASS\" | sudo -S docker exec geoflow-wp bash -c \"tail -50 /var/www/html/wp-content/debug.log 2>/dev/null || echo 'no debug log (WP_DEBUG likely off, which is fine for this test env)'\""
 ```
 
 If the log shows theme-related fatal errors or warnings (filter for `litb-lifestyle-editorial` in the path), fix them before proceeding — this is the same kind of check used throughout this project (grep-based log inspection) rather than assuming success.
