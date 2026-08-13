@@ -80,6 +80,15 @@ Schedule::command('geoflow:recover-knowledge-syncs')
     ->onOneServer()
     ->withoutOverlapping(10);
 
+/**
+ * 将已发布但未挂载 Task 的文章（如 LITB 批量生成内容）同步到活跃的
+ * WordPress REST 分发渠道。
+ */
+Schedule::command('geoflow:distribution:sync-channel')
+    ->everyFiveMinutes()
+    ->onOneServer()
+    ->withoutOverlapping(10);
+
 Schedule::command('geoflow:recover-content-generation-dispatches', [
     '--stale' => (int) config('geoflow.content_generation_dispatch_stale_seconds', 300),
 ])

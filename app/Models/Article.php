@@ -121,6 +121,20 @@ class Article extends Model
     }
 
     /**
+     * The public URL of this article's synced WordPress copy, if one exists.
+     * Used to point GEOFlow's own article page at the WordPress copy as the
+     * canonical URL, avoiding duplicate-content across the two public sites.
+     */
+    public function wordpressCanonicalUrl(): ?string
+    {
+        $remoteUrl = $this->syncedRemoteDistributions()
+            ->whereHas('channel', fn ($query) => $query->where('channel_type', 'wordpress_rest'))
+            ->value('remote_url');
+
+        return $remoteUrl !== null ? (string) $remoteUrl : null;
+    }
+
+    /**
      * @param  Builder<Article>  $query
      * @return Builder<Article>
      */
