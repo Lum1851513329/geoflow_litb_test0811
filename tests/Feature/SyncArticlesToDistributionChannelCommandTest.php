@@ -82,6 +82,25 @@ class SyncArticlesToDistributionChannelCommandTest extends TestCase
         $this->assertSame(1, ArticleDistribution::query()->where('article_id', (int) $article->id)->count());
     }
 
+    public function test_an_article_already_synced_to_the_channel_is_not_re_enqueued(): void
+    {
+        $channel = $this->createChannel(['status' => 'active', 'channel_type' => 'wordpress_rest']);
+        $article = $this->createArticle(['status' => 'published', 'published_at' => now(), 'task_id' => null]);
+        ArticleDistribution::query()->create([
+            'article_id' => (int) $article->id,
+            'distribution_channel_id' => (int) $channel->id,
+            'action' => 'publish',
+            'status' => 'synced',
+            'remote_id' => '123',
+            'remote_url' => 'https://sync-command-target.example.com/already-synced/',
+            'idempotency_key' => uniqid('already-synced-'),
+        ]);
+
+        $this->artisan('geoflow:distribution:sync-channel')->expectsOutputToContain('articles considered: 0')->assertExitCode(0);
+
+        Queue::assertNothingPushed();
+    }
+
     private function createArticle(array $overrides): Article
     {
         $category = Category::query()->create([

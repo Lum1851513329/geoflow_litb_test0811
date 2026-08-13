@@ -23,10 +23,17 @@ class SyncArticlesToDistributionChannelCommand extends Command
             return self::SUCCESS;
         }
 
-        $articles = Article::query()->published()->whereNull('task_id')->get();
+        $considered = 0;
         $enqueued = 0;
 
         foreach ($channels as $channel) {
+            $articles = Article::query()
+                ->published()
+                ->whereNull('task_id')
+                ->whereDoesntHave('distributions', fn ($query) => $query->where('distribution_channel_id', $channel->id))
+                ->get();
+            $considered += $articles->count();
+
             foreach ($articles as $article) {
                 $orchestrator->enqueueForArticleToChannel($article, $channel);
                 $enqueued++;
@@ -36,7 +43,7 @@ class SyncArticlesToDistributionChannelCommand extends Command
         $this->info(sprintf(
             'Channels: %d, articles considered: %d, enqueue calls made: %d',
             $channels->count(),
-            $articles->count(),
+            $considered,
             $enqueued,
         ));
 

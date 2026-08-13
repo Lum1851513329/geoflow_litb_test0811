@@ -114,29 +114,29 @@ Behavior:
   `status = active` and `channel_type = wordpress_rest`.
 - If no channels resolve, print a message and exit `0` (not an error — this
   is expected before any channel is configured).
-- For each resolved channel, iterate `Article::published()->whereNull('task_id')->get()`
-  and call `$orchestrator->enqueueForArticleToChannel($article, $channel)` for
-  each. (`enqueueForArticleToChannel`'s own upsert logic makes re-running this
-  safe — already-`sending` distributions are skipped, everything else is
-  re-queued, so running this command twice in a row is a no-op for articles
-  whose remote copy is already up to date... actually: re-queuing is *not* a
-  no-op today — see the "Known limitation" note below.)
+- For each resolved channel, iterate published, task-less articles that have
+  **no existing `ArticleDistribution` row at all for that channel** (any
+  status), and call `$orchestrator->enqueueForArticleToChannel($article, $channel)`
+  for each. This is the corrected behavior after an incident during rollout
+  (see below) — the command only ever enqueues an article to a channel once;
+  it does not re-publish already-synced articles.
 - Print a summary: channels processed, articles considered, articles enqueued.
 
-**Known limitation (accepted for this design):** `enqueueForArticleToChannel`
-enqueues a fresh `ArticleDistribution` row (`status = queued`) for *every*
-published, task-less article on *every* run, including ones already
-successfully `synced`. This means each scheduled run re-sends every LITB
-article to WordPress, not just new/changed ones. This matches
-`enqueueForArticle`'s existing behavior (it has the same "always re-queue"
-characteristic — there's no local staleness check in the current codebase
-either), so it's consistent with the existing system rather than a new gap.
-Given LITB's volume (currently 69 articles, low-frequency publishing), the
-resulting REST calls are cheap and `WordPressRestPublisher::publish()`/`update()`
-already handles "post already exists remotely" via the stored `remote_id`
-(update instead of duplicate-create). We are not adding change detection in
-this plan; a future iteration could skip articles whose `updated_at` is older
-than their last successful distribution's `updated_at`.
+**Incident during rollout, and why the design changed:** the first version of
+this command re-enqueued *every* published, task-less article on *every* run,
+regardless of prior sync status. `WordPressRestPublisher::publish()` always
+`POST`s to `/wp/v2/posts` (create) unconditionally — it has no "does this
+already exist remotely" check, unlike `::update()` (which requires the
+distribution row to already carry a `remote_id`, and falls back to `publish()`
+if it doesn't). Because the scheduler was live and fired every 5 minutes
+during rollout, this produced duplicate WordPress posts per article before
+the bug was caught and fixed (cleaned up after the fact). The corrected
+design — only enqueue articles with no distribution history for the channel —
+sidesteps the create-vs-update ambiguity entirely: an article is sent to a
+given channel exactly once, ever, by this command. A future iteration that
+wants to *update* an already-synced article's remote copy after a content
+edit would need to explicitly pass `action = 'update'`, which is out of scope
+here (no LITB content is edited after publishing today).
 
 ## Component 3: Scheduler entry
 
