@@ -2086,3 +2086,12 @@ body,
 /* Utility classes for Blade-referencing classes without Tailwind */
 .ne-utility-text-sm { font-size: 14px; line-height: 1.75; color: #4b5563; }
 .ne-icon-sm { width: 16px; height: 16px; }
+
+.ne-empty-state {
+    border: 1px dashed var(--ne-line);
+    border-radius: 16px;
+    background: #fff;
+    padding: 40px;
+    text-align: center;
+    color: var(--ne-subtle);
+}
