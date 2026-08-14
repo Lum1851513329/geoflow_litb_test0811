@@ -109,9 +109,9 @@ In scope:
   Component 1). Extend the `/prompt-presets` create/edit UI with a JSON
   editor for this field (mirroring the existing blueprint JSON editor on
   the content-brief blueprint screen).
-- Migrate the 8 existing LITB pillar section-templates
+- Migrate the 9 existing LITB pillar section-templates
   (`LitbQuarterlyBriefCatalog::sections()`/`pillar()`) into this new
-  `blueprint_template` field on their 8 corresponding existing Presets
+  `blueprint_template` field on their 9 corresponding existing Presets
   (`litb.geo_category_authority.en`, `litb.product_comparison.en`, etc.) —
   reusing their already-validated structure and business-goal/CTA/risk-flag
   metadata verbatim, not redesigning it.
@@ -136,16 +136,39 @@ In scope:
   `ready_for_review` — auto-adopts it via a dedicated system `Admin` actor.
   The resulting `Article` (`draft`/`pending`) flows into Task's existing
   `need_review`/`draft_limit`/`publish_interval` logic unchanged.
+- A one-off (non-Task, non-scheduled) spreadsheet import for bulk content
+  requests, potentially spanning multiple `DistributionChannel`s/sites,
+  building on Component 3's simplified creation and reusing the existing
+  `DistributionOrchestrator::enqueueForArticleToChannel()` sync mechanism
+  (Component 5).
+- A `show_references_section` flag on the Preset blueprint template and a
+  URL-fetch-and-extract step so imported `reference_urls` become real
+  writing material (not just decorative links) and, for Presets that opt
+  in, a rendered "References" section at the end of the article (also
+  Component 5).
 
 Out of scope (explicitly deferred, not silently dropped):
 - Fixing the 4 generic (non-LITB) presets' stale module bindings — a
   pre-existing bug unrelated to this merge; flagged to the user separately.
 - Any change to `SemanticQualityReviewer`, `ArticleWorkflowTransitionService`,
-  `DistributionOrchestrator`, or anything downstream of `Article` creation.
-- A brief-creation UI for bulk/spreadsheet import beyond what
-  `LitbQuarterlyBriefImporter`-style catalogs already do — Task-driven
-  generation replaces the need for one-off bulk imports for anything Task
-  now covers, and this design doesn't build a *new* generic bulk-import UI.
+  or `DistributionOrchestrator`'s existing sync logic itself (Component 5
+  only *calls* the existing `enqueueForArticleToChannel()`, it doesn't
+  modify it).
+- Bulk-confirming the 36,923 already-imported LightInTheBox keywords into
+  `KeywordCluster` rows via `KeywordClusterSuggestionService` (currently 0
+  confirmed clusters — the suggestion engine and single-cluster
+  confirmation UI already exist; only a bulk-confirm action is missing). A
+  real, separate gap surfaced while designing this, but it's about cleaning
+  up existing keyword data, not about the Task/pipeline merge or multi-site
+  content requests. Flagged to the user as a follow-up, not addressed here.
+- Onboarding entirely new sites/brands (their own keyword imports,
+  knowledge bases, categories, Presets). Nothing in this design is
+  LightInTheBox-specific at the schema level (Task/Preset/ContentBrief/
+  KnowledgeBase are already generic, reusable entities, and Component 5's
+  spreadsheet already supports routing rows to different
+  `DistributionChannel`s), so this design doesn't block that future work —
+  but building an actual "add a new site" onboarding workflow is separate
+  future effort.
 - Migrating already-published LITB articles or re-running them through the
   new heading-matching logic — this only affects newly generated content.
 
@@ -216,12 +239,11 @@ production version).
   textarea (mirrors the existing pattern at
   `resources/views/admin/content-briefs/blueprint.blade.php`'s JSON editor —
   reuse the same client-side validation approach).
-- Data migration: for each of the 8 pillar `content_type`s already present
+- Data migration: for each of the 9 pillar `content_type`s already present
   in `LitbQuarterlyBriefCatalog::pillar()` (`category_authority`,
   `product_comparison`, `style_occasion`, `new_arrivals`,
   `product_education`, `customer_education`, `brand_company`,
-  `official_news`, `faq` — 9 pillars, not 8; corrected count from the live
-  DB check earlier in this design work), find that pillar's corresponding
+  `official_news`, `faq`), find that pillar's corresponding
   Preset (matched by the `preset` key already recorded in
   `LitbQuarterlyBriefCatalog::pillar()`, e.g. `litb.geo_category_authority.en`)
   and set its current `PromptPresetVersion.blueprint_template` to the
@@ -326,6 +348,96 @@ production version).
   `need_review` gates review, `publishDueDraftArticle()` releases it on
   `publish_interval`, `DistributionOrchestrator` syncs it out.
 
+## Component 5: Bulk multi-site content import
+
+A one-off batch job (spreadsheet upload, not a scheduled/autonomous Task) for
+requesting a batch of new articles at once, potentially for several
+different sites. Distinct from Component 4: no continuous scheduling, no
+draft pooling/pacing — each row becomes exactly one `ContentGenerationRun`,
+generated and (if it passes) synced out as soon as it's ready, not paced
+over time.
+
+**Import format** (one row = one requested article):
+
+Required columns:
+- `site` — the target `DistributionChannel` (matched by `name` or `domain`,
+  resolved during import; a row referencing an unknown channel fails
+  validation before any generation is attempted, not after).
+- `preset` — a `PromptPreset.preset_key`, must resolve to a Preset whose
+  current version has a `blueprint_template` (Component 2) — same
+  requirement as Component 3's simplified creation form.
+- `topic` — becomes `ContentBrief.topic`.
+- `category` — resolved to a `Category` (by name or id); becomes
+  `ContentBrief.category_id`.
+
+Optional columns (omit → Preset/derived defaults apply, same as Component 3):
+- `core_question` — if blank, derived from `topic` the same way
+  `ContentStrategyService`'s existing baseline-strategy logic already
+  derives a fallback.
+- `primary_keyword`, `market`, `language`, `cta_strength`,
+  `required_mentions`, `prohibited_information`, `planned_publish_at`.
+- `reference_urls` — one or more URLs (delimited, exact format decided
+  during planning — e.g. one per line within the cell, matching
+  `StoreContentBriefRequest`'s existing `reference_urls` line-splitting
+  convention).
+
+**Reference URL fetching**: for each `reference_urls` entry, a new fetch
+step (reusing the project's existing SSRF-safe outbound HTTP pattern —
+`SafeOutboundHttpClient`/`SafeOutboundRequest`, the same mechanism
+`WordPressRestRequestFactory` already uses, not a new unguarded HTTP call)
+retrieves the page and extracts readable body text (strip nav/boilerplate —
+exact extraction approach, e.g. a readability-style algorithm vs. a simpler
+heuristic, decided during planning). Extracted text is attached to the
+generation run as evidence, alongside (not replacing) any `KnowledgeChunk`
+evidence the Preset's own knowledge-base linkage already supplies — treated
+as pre-approved for this specific import (the person who curated the
+spreadsheet is the review step, not the existing `KnowledgeBase.review_status
+= reviewed` gate, which stays scoped to persistent knowledge bases as
+today). A URL that fails to fetch (dead link, blocked, non-HTML response) is
+not treated as a fatal error for the row — generation proceeds without that
+URL's content as evidence, but the URL is still retained for the citation
+list described below, so a temporarily-unreachable-but-valid source doesn't
+silently disappear from the published article.
+
+**References section**: new `show_references_section` boolean on the
+Preset's `blueprint_template` (Component 2's JSON shape), set per-Preset by
+whoever edits that Preset — not inferred automatically. Recommended
+defaults, based on the 9 migrated LITB pillar Presets' existing
+`risk_flags`/purpose (final call is an editorial decision, not enforced by
+code): **on** for `official_news`, `brand_company`, `product_comparison`,
+`customer_education`, `new_arrivals` (all already carry an
+evidence-related `risk_flag` or make dated/comparative claims); **off** for
+`category_authority`, `product_education`, `style_occasion`, `faq`
+(instructional/inspirational content not making sourced factual claims).
+When a Preset has this flag on and the brief has at least one successfully-
+resolved `reference_urls` entry, the compiled article gets one appended
+section (rendered the same way any other blueprint section would be,
+positioned after the blueprint's own last section) listing each reference
+as a plain link — this section is **not** subject to
+`DeterministicQualityGate`'s per-section `minimum_words`/`questions_to_answer`
+checks (it's a citation list, not prose content), so the quality gate's
+section-count check (Component 1) needs to treat it as an acknowledged extra
+section rather than a mismatch.
+
+**Generation and distribution flow per row**: create Brief + auto-confirmed
+Strategy + auto-confirmed Blueprint (Component 3's service, with fetched
+reference-URL text attached as evidence) → `ContentGenerationRequestService::reserve()`
+→ dispatch → quality-gated generation (Component 1's heading matching, same
+as everywhere else) → on `ready_for_review`, auto-adopt via the same system
+`Admin` actor Component 4 uses → on successful adoption
+(`Article.status=draft`), immediately call
+`DistributionOrchestrator::enqueueForArticleToChannel($article, $channel)`
+for the row's resolved `site` channel — this bypasses Task's
+`need_review`/`publish_interval` gating entirely, since this path has no
+`Task` in the loop at all; if review-before-sync is wanted for a given
+import batch, that's a review step the operator performs before uploading
+the spreadsheet (curating which rows/URLs go in), not something this
+pipeline enforces after the fact. Rows whose run doesn't reach
+`ready_for_review` (needs evidence, quality-failed) are reported back to the
+uploader (exact reporting mechanism — a results page listing per-row
+outcome, a downloadable report — decided during planning) rather than
+silently dropped.
+
 ## Testing
 
 - `DeterministicQualityGate`: existing tests for section-heading matching
@@ -357,6 +469,17 @@ production version).
   `generation_engine=legacy` Tasks and for manually-created (non-Preset-
   required) briefs — this design must not remove either pipeline's current
   behavior for existing users of either.
+- Bulk import (Component 5): feature test for a multi-row import spanning
+  more than one `DistributionChannel`, asserting each row's Article ends up
+  synced to its own specified channel and not any other row's; a test for
+  an unknown `site`/`preset` value failing validation before any row is
+  processed; a test for a `reference_urls` fetch failure not blocking that
+  row's generation, with the failed URL still appearing in the rendered
+  references list; a test confirming a Preset with
+  `show_references_section=false` never renders a references section even
+  when `reference_urls` were supplied; a test confirming the references
+  section is excluded from `DeterministicQualityGate`'s per-section content
+  checks but still counted correctly by the section-count check.
 
 ## Global Constraints
 
@@ -376,3 +499,12 @@ production version).
   pattern rather than inventing a new one, and reuse
   `ContentStrategyService::suggest()`'s baseline-strategy logic rather than
   duplicating it.
+- Any new outbound HTTP call this design introduces (reference-URL fetching)
+  must go through the project's existing SSRF-safe outbound client
+  (`SafeOutboundHttpClient`/`SafeOutboundRequest`), never a raw HTTP call —
+  this is a general project convention, not new to this design, but worth
+  stating explicitly since Component 5 is the first place in this design
+  that fetches arbitrary user-supplied URLs.
+- `show_references_section` is an explicit per-Preset editorial toggle, not
+  an auto-inferred behavior — no code should silently decide whether a
+  content type "should" cite sources based on heuristics.
