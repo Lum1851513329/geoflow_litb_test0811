@@ -828,9 +828,14 @@
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 24px;
+    padding-top: 34px;
     padding-bottom: 26px;
     border-bottom: 1px solid var(--ne-line);
     margin-bottom: 18px;
+}
+
+.ne-footer-tagline + .ne-footer-columns {
+    padding-top: 0;
 }
 
 .ne-footer-col {
