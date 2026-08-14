@@ -98,6 +98,7 @@ design depends on:
 ## Scope
 
 In scope:
+
 - Loosen `DeterministicQualityGate`'s section matching from
   literal-heading-text-prefix to declared-section-count-and-order, so a
   blueprint's sections can carry a `purpose` instead of (or in addition to)
@@ -136,11 +137,11 @@ In scope:
   `ready_for_review` — auto-adopts it via a dedicated system `Admin` actor.
   The resulting `Article` (`draft`/`pending`) flows into Task's existing
   `need_review`/`draft_limit`/`publish_interval` logic unchanged.
-- A one-off (non-Task, non-scheduled) spreadsheet import for bulk content
-  requests, potentially spanning multiple `DistributionChannel`s/sites,
-  building on Component 3's simplified creation and reusing the existing
-  `DistributionOrchestrator::enqueueForArticleToChannel()` sync mechanism
-  (Component 5).
+- A spreadsheet import for bulk content requests, potentially spanning
+  multiple `DistributionChannel`s/sites, that groups rows into
+  auto-created `Task`s (one per `(site, preset, category)` group) so the
+  requests run through Component 4's Task-driven automation rather than a
+  separate distribution path (Component 5).
 - A `show_references_section` flag on the Preset blueprint template and a
   URL-fetch-and-extract step so imported `reference_urls` become real
   writing material (not just decorative links) and, for Presets that opt
@@ -148,6 +149,7 @@ In scope:
   Component 5).
 
 Out of scope (explicitly deferred, not silently dropped):
+
 - Fixing the 4 generic (non-LITB) presets' stale module bindings — a
   pre-existing bug unrelated to this merge; flagged to the user separately.
 - Any change to `SemanticQualityReviewer`, `ArticleWorkflowTransitionService`,
@@ -222,6 +224,47 @@ identify the exact module during implementation and update its content
 (this creates a new `PromptModuleVersion` per the existing versioning
 convention, published to `production`, not an edit-in-place of the current
 production version).
+
+**Title crafting**: the same "reproduce the input verbatim" problem exists
+one level up — today's flow treats `ContentBrief.topic` (or a Task's picked
+`Title.title`) as effectively the published title. Going forward, `topic`/
+`Title.title` is reframed as **directional input for the AI** (the subject
+and angle to write about), not the final headline. A new mandatory
+`PromptModule` (`title_crafting`, marked `is_mandatory=true` the same way
+the other 18 existing mandatory modules are) instructs the model to write a
+genuine headline as the very
+first line of its Markdown output (`# Title`), grounded in real
+headline-writing practice rather than placeholder guidance: lead with the
+concrete benefit or answer, keep it specific rather than generic (name the
+product/category/comparison, not "A Guide to X"), match the register the
+Preset's purpose calls for (a news headline for `official_news`, a
+how-to/decision framing for `buying_guide`, a direct question-answer framing
+for `faq`), stay within normal SEO title length (roughly 50–60 characters,
+stated in the module as guidance, not a hard quality-gate check), and avoid
+clickbait or unverifiable superlatives given `DeterministicQualityGate`'s
+existing prohibited-information and required-entity checks still apply to
+it like any other content. This becomes a 19th always-applicable mandatory
+module, so it inherits the same pre-existing staleness the Background
+section and Global Constraints already flag for the 4 generic presets (they
+bind only 6 of today's 18 mandatory modules) — not a new problem introduced
+here, but this design makes it one module wider.
+
+**Title extraction on adoption**: both Component 4's auto-adopt command and
+Component 5's per-row import currently would otherwise fall back to
+`brief.topic`/`blueprint.working_title` for `Article.title` — instead, both
+extract the AI-written `# Title` line from the generated Markdown as
+`Article.title` (extending the existing `stripLeadingTitleHeading()`-
+adjacent parsing that already separates a leading H1 from body content, so
+this reuses established parsing rather than adding a new one), stripping
+that line from the body before it's stored/rendered as the article's first
+section. If a run's Markdown has no leading H1 (malformed generation), that
+is itself a `DeterministicQualityGate` failure under the existing heading-
+hierarchy check, not a silent fallback to `topic` — a missing AI title never
+reaches adoption. Manual adoption (a human reviewing a `ready_for_review`
+run through the existing UI) is unaffected: `AdoptContentGenerationRequest`
+still shows the extracted title as the default value of its already-required
+`title` field, and a human can still edit it before confirming, same as
+today.
 
 ## Component 2: `blueprint_template` on `PromptPresetVersion`
 
@@ -350,54 +393,103 @@ production version).
 
 ## Component 5: Bulk multi-site content import
 
-A one-off batch job (spreadsheet upload, not a scheduled/autonomous Task) for
-requesting a batch of new articles at once, potentially for several
-different sites. Distinct from Component 4: no continuous scheduling, no
-draft pooling/pacing — each row becomes exactly one `ContentGenerationRun`,
-generated and (if it passes) synced out as soon as it's ready, not paced
-over time.
+A spreadsheet-driven bulk way to **create Tasks** (not a separate,
+Task-bypassing pipeline) — rows are grouped by `(site, preset, category)`,
+and each group becomes one auto-created `Task` (`generation_engine=
+quality_gated`, per Component 4) with its own new Title Library populated
+from that group's rows. Once created, the Task runs through Component 4's
+already-designed lifecycle exactly like a manually-created one — scheduled
+generation, quality gate, review gating, publish pacing, distribution sync
+— nothing in this component talks to `DistributionOrchestrator` or bypasses
+`need_review`/`publish_interval` directly.
 
 **Import format** (one row = one requested article):
 
 Required columns:
-- `site` — the target `DistributionChannel` (matched by `name` or `domain`,
-  resolved during import; a row referencing an unknown channel fails
-  validation before any generation is attempted, not after).
-- `preset` — a `PromptPreset.preset_key`, must resolve to a Preset whose
-  current version has a `blueprint_template` (Component 2) — same
-  requirement as Component 3's simplified creation form.
-- `topic` — becomes `ContentBrief.topic`.
-- `category` — resolved to a `Category` (by name or id); becomes
-  `ContentBrief.category_id`.
 
-Optional columns (omit → Preset/derived defaults apply, same as Component 3):
+- `site` — the target `DistributionChannel` (matched by `name` or `domain`).
+- `preset` — a `PromptPreset.preset_key`. A GEOFlow `category` can host more
+  than one Preset with a genuinely different structure (confirmed against
+  live data: "Style & Buying Guides" hosts both `litb.geo_category_authority.en`
+  and `litb.geo_product_buying_guide.en`; "About LightInTheBox" hosts both
+  `litb.brand_company_explainer.en` and `litb.official_news.en`), so `preset`
+  cannot be inferred from `category` alone and stays a separate required
+  column — the import UI presents it as a dropdown of presets *filtered to
+  the row's chosen category* (human-readable preset names, not raw keys) so
+  the operator never has to know or type a `preset_key` string directly.
+- `category` — resolved to a `Category` (by name or id).
+- `topic` — the selection/subject direction. Does **not** need to be a
+  polished headline (see the title-generation note under Component 1 below)
+  — a short phrase is enough; it seeds the Title Library entry and the
+  `ContentBrief`, and is what the model uses as its writing direction, not
+  the literal published title.
+- `knowledge_base` — which `KnowledgeBase` to attach. Explicit and required
+  for now because GEOFlow's knowledge bases aren't yet organized in a way
+  that lets this be inferred reliably (see the "Related, deferred" note
+  below) — once that reorganization happens, this column can become
+  optional with a site-based default.
+
+Rows sharing the same `(site, preset, category)` are merged into one Task;
+that Task's `article_limit`/`draft_limit` is set to the number of rows in
+the group. If `knowledge_base` differs across rows within the same group,
+import validation flags it as a same-group conflict rather than silently
+picking one row's value — unlike `knowledge_base`, the optional columns
+below are expected to differ row-by-row (each row becomes its own `Title`),
+so no conflict check applies to them.
+
+Optional columns — deliberately limited to the fields that vary **per row
+within a group** (`market`, `language`, `cta_strength`, and similar are
+already fixed once `preset` is chosen, per Component 3's "nothing the
+preset already implies is asked twice" principle, so they aren't import
+columns — they come from the Preset uniformly for every row in the group):
+
+- `primary_keyword` — stored on the existing `Title.keyword` column.
 - `core_question` — if blank, derived from `topic` the same way
   `ContentStrategyService`'s existing baseline-strategy logic already
-  derives a fallback.
-- `primary_keyword`, `market`, `language`, `cta_strength`,
-  `required_mentions`, `prohibited_information`, `planned_publish_at`.
-- `reference_urls` — one or more URLs (delimited, exact format decided
-  during planning — e.g. one per line within the cell, matching
-  `StoreContentBriefRequest`'s existing `reference_urls` line-splitting
-  convention).
+  derives a fallback; stored on the new `Title.core_question` column.
+- `reference_urls` — one or more URLs (one per line within the cell,
+  matching `StoreContentBriefRequest`'s existing `reference_urls`
+  line-splitting convention); stored on the new `Title.reference_urls`
+  column.
 
-**Reference URL fetching**: for each `reference_urls` entry, a new fetch
-step (reusing the project's existing SSRF-safe outbound HTTP pattern —
+**Downloadable import template**: a "Download template" action on the bulk
+import screen generates an `.xlsx` file (not a hand-maintained static file —
+generated fresh per download so it reflects current live Presets/Categories/
+Channels):
+
+- Row 1: the column keys above (what the importer actually parses).
+- Row 2: a Chinese instruction line per column (required/optional, format,
+  guidance — e.g. `site`: "【必填】发布到哪个站点，从"可选值参考"表中选，不要手打";
+  `topic`: "【必填】选题方向，写清楚主题即可，不用是完整标题（最终标题由AI生成）").
+  The importer skips this row when parsing — it's recognized by position
+  (always row 2), not by content-sniffing.
+- Rows 3–4: two example rows, visibly marked (e.g. in a `topic` prefix like
+  "示例——请删除后再填真实数据") so they're never mistaken for real data if
+  left in place, but still fail validation loudly (unresolvable `site`
+  value) rather than silently importing as real rows if someone forgets to
+  delete them.
+- A second sheet, "可选值参考" ("reference values"), listing current `site`
+  (channel name + domain), `preset` (name + key, grouped by category), and
+  `category` values, queried live at download time. The `site`/`preset`/
+  `category` columns on the main sheet use Excel data-validation dropdowns
+  sourced from this sheet, so those three fields can't be mistyped.
+
+**Reference URL fetching**: for each `reference_urls` entry, a fetch step
+(reusing the project's existing SSRF-safe outbound HTTP pattern —
 `SafeOutboundHttpClient`/`SafeOutboundRequest`, the same mechanism
 `WordPressRestRequestFactory` already uses, not a new unguarded HTTP call)
 retrieves the page and extracts readable body text (strip nav/boilerplate —
-exact extraction approach, e.g. a readability-style algorithm vs. a simpler
-heuristic, decided during planning). Extracted text is attached to the
-generation run as evidence, alongside (not replacing) any `KnowledgeChunk`
-evidence the Preset's own knowledge-base linkage already supplies — treated
-as pre-approved for this specific import (the person who curated the
-spreadsheet is the review step, not the existing `KnowledgeBase.review_status
-= reviewed` gate, which stays scoped to persistent knowledge bases as
-today). A URL that fails to fetch (dead link, blocked, non-HTML response) is
-not treated as a fatal error for the row — generation proceeds without that
-URL's content as evidence, but the URL is still retained for the citation
-list described below, so a temporarily-unreachable-but-valid source doesn't
-silently disappear from the published article.
+exact extraction approach decided during planning). Extracted text is
+attached to the generation run as evidence, alongside (not replacing) any
+`KnowledgeChunk` evidence the row's `knowledge_base` already supplies —
+treated as pre-approved for this specific import (the person who curated
+the spreadsheet is the review step, not the existing
+`KnowledgeBase.review_status = reviewed` gate, which stays scoped to
+persistent knowledge bases as today). A URL that fails to fetch (dead link,
+blocked, non-HTML response) is not fatal to that row — generation proceeds
+without that URL's content as evidence, but the URL is still retained for
+the citation list below, so a temporarily-unreachable-but-valid source
+doesn't silently disappear from the published article.
 
 **References section**: new `show_references_section` boolean on the
 Preset's `blueprint_template` (Component 2's JSON shape), set per-Preset by
@@ -419,24 +511,39 @@ checks (it's a citation list, not prose content), so the quality gate's
 section-count check (Component 1) needs to treat it as an acknowledged extra
 section rather than a mismatch.
 
-**Generation and distribution flow per row**: create Brief + auto-confirmed
-Strategy + auto-confirmed Blueprint (Component 3's service, with fetched
-reference-URL text attached as evidence) → `ContentGenerationRequestService::reserve()`
-→ dispatch → quality-gated generation (Component 1's heading matching, same
-as everywhere else) → on `ready_for_review`, auto-adopt via the same system
-`Admin` actor Component 4 uses → on successful adoption
-(`Article.status=draft`), immediately call
-`DistributionOrchestrator::enqueueForArticleToChannel($article, $channel)`
-for the row's resolved `site` channel — this bypasses Task's
-`need_review`/`publish_interval` gating entirely, since this path has no
-`Task` in the loop at all; if review-before-sync is wanted for a given
-import batch, that's a review step the operator performs before uploading
-the spreadsheet (curating which rows/URLs go in), not something this
-pipeline enforces after the fact. Rows whose run doesn't reach
-`ready_for_review` (needs evidence, quality-failed) are reported back to the
-uploader (exact reporting mechanism — a results page listing per-row
-outcome, a downloadable report — decided during planning) rather than
-silently dropped.
+**`Title` model extension**: add nullable `core_question` (string) and
+`reference_urls` (JSON) columns to `titles` (alongside the existing `title`/
+`keyword` columns), so each imported row's full detail survives at the
+per-title level inside the shared Title Library, not just Task-level
+config. Component 4's "generate a new draft" branch reads these (when
+present) the same way it reads the picked title, instead of only deriving
+`core_question` from `topic`.
+
+**Import flow, end to end**: parse the spreadsheet (skipping the
+instruction row) → validate every row (unresolvable `site`/`preset`/
+`category`/`knowledge_base`, same-group conflicts) before creating
+anything → group validated rows by `(site, preset, category)` → for each
+group, create a new `TitleLibrary` + one `Title` row per group member
+(`title`=topic, `keyword`=primary_keyword, `core_question`,
+`reference_urls`) → create one `Task` via the same creation path
+`/tasks/create` uses (`generation_engine=quality_gated`,
+`prompt_preset_id`=preset, `distribution_channel_ids`=[site's channel],
+`category_mode=fixed`, `fixed_category_id`=category,
+`knowledge_base_ids`=[group's knowledge_base], `title_library_id`=the new
+library, `article_limit`=`draft_limit`=row count in group, `is_loop=false`).
+`need_review` for the created Task(s) is a single setting asked once for
+the whole import batch, not per-row. From here, everything is Component 4's
+existing automation — no new distribution or adoption logic in this
+component.
+
+Related, deferred (not built here, noted so it isn't lost):
+
+- **Knowledge base reorganization**: the user's stated direction is a
+  directory structure — site as the top-level folder, containing multiple
+  knowledge bases, with the whole site's collection usable as one
+  aggregate knowledge base. Once that exists, `knowledge_base` on the
+  import sheet can become optional (default to the row's `site`'s
+  aggregate). Not designed or built as part of this work.
 
 ## Testing
 
