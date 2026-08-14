@@ -807,11 +807,31 @@
 }
 
 .ne-footer-inner {
-    padding: 26px 0;
+    padding: 0 0 26px;
     color: var(--ne-muted);
     font-size: 13px;
     line-height: 1.6;
     text-align: center;
+}
+
+.ne-footer-nav {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 8px 22px;
+    padding: 26px 0 18px;
+    border-bottom: 1px solid var(--ne-line);
+    margin-bottom: 18px;
+}
+
+.ne-footer-nav a {
+    color: var(--ne-ink);
+    font-size: 14px;
+    font-weight: 600;
+}
+
+.ne-footer-nav a:hover {
+    color: var(--ne-red);
 }
 
 .ne-feed nav[role="navigation"] {
