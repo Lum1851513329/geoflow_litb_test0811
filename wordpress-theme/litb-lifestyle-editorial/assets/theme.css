@@ -432,12 +432,17 @@
     display: grid;
     grid-template-columns: minmax(0, 1fr) 132px;
     gap: 18px;
-    border-bottom: 1px solid var(--ne-soft-line);
-    padding: 18px 0;
+    border: 1px solid var(--ne-line);
+    border-radius: 10px;
+    padding: 18px;
+    margin-bottom: 14px;
+    transition: border-color .15s ease, box-shadow .15s ease;
 }
 
 .ne-article-card:hover {
     background: #fafafa;
+    border-color: var(--ne-red);
+    box-shadow: 0 2px 10px rgba(43, 38, 34, 0.08);
 }
 
 .ne-card-meta {
