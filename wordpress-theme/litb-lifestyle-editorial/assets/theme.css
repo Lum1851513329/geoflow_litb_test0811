@@ -2180,3 +2180,11 @@ body,
     width: 20px;
     background: #fff;
 }
+
+.hidden {
+    display: none;
+}
+
+.pb-4 {
+    padding-bottom: 1rem;
+}

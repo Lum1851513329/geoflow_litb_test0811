@@ -31,7 +31,7 @@ add_action( 'wp_enqueue_scripts', 'litb_enqueue_assets' );
  */
 function litb_json_ld( array $data ): void {
     echo '<script type="application/ld+json">'
-        . wp_json_encode( $data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES )
+        . wp_json_encode( $data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_HEX_TAG )
         . '</script>' . "\n";
 }
 
@@ -61,6 +61,29 @@ function litb_sitewide_json_ld(): void {
     litb_json_ld( $organization_schema );
 }
 add_action( 'wp_head', 'litb_sitewide_json_ld' );
+
+/**
+ * Echo a per-page <meta name="description"> in <head>. wp_head() fires
+ * inside header.php, before single.php/category.php/front-page.php run,
+ * so the description has to be computed here via conditional tags rather
+ * than echoed directly from the templates.
+ */
+function litb_meta_description(): void {
+    if ( is_singular( 'post' ) ) {
+        $description = wp_trim_words( wp_strip_all_tags( get_the_excerpt() ?: get_the_content() ), 30, '…' );
+    } elseif ( is_category() ) {
+        $term = get_queried_object();
+        $description = $term->description ?: get_bloginfo( 'description' );
+    } else {
+        $description = get_bloginfo( 'description' );
+    }
+    $description = trim( (string) $description );
+    if ( $description === '' ) {
+        return;
+    }
+    echo '<meta name="description" content="' . esc_attr( $description ) . '">' . "\n";
+}
+add_action( 'wp_head', 'litb_meta_description' );
 
 function litb_customize_register( WP_Customize_Manager $wp_customize ): void {
     $wp_customize->add_panel( 'litb_homepage_panel', [
