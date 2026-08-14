@@ -431,11 +431,11 @@
 .ne-article-card {
     display: grid;
     grid-template-columns: minmax(0, 1fr) 132px;
-    gap: 18px;
+    gap: 20px;
     border: 1px solid var(--ne-line);
     border-radius: 10px;
-    padding: 18px;
-    margin-bottom: 14px;
+    padding: 24px;
+    margin-bottom: 16px;
     transition: border-color .15s ease, box-shadow .15s ease;
 }
 
@@ -461,7 +461,7 @@
 }
 
 .ne-article-title {
-    margin: 7px 0 0;
+    margin: 12px 0 0;
     color: var(--ne-ink);
     font-size: 21px;
     line-height: 1.38;
@@ -473,7 +473,7 @@
 }
 
 .ne-article-summary {
-    margin: 8px 0 0;
+    margin: 12px 0 0;
     color: var(--ne-muted);
     font-size: 14px;
     line-height: 1.72;
@@ -483,7 +483,7 @@
     display: inline-flex;
     align-items: center;
     gap: 5px;
-    margin-top: 10px;
+    margin-top: 16px;
     color: var(--ne-subtle);
     font-size: 13px;
     font-weight: 700;
