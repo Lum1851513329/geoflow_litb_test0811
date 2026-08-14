@@ -73,17 +73,6 @@ if ( $litb_banner_image !== '' ) :
             </section>
         <?php endif; ?>
 
-        <section class="ne-feed-card">
-            <div class="ne-section-title"><span class="ne-title-row">Latest articles</span></div>
-            <div class="ne-feed">
-                <?php if ( $litb_query->have_posts() ) : while ( $litb_query->have_posts() ) : $litb_query->the_post(); ?>
-                    <?php get_template_part( 'template-parts/article-card' ); ?>
-                <?php endwhile; wp_reset_postdata(); else : ?>
-                    <div class="ne-empty-state">No articles yet.</div>
-                <?php endif; ?>
-            </div>
-        </section>
-
         <?php
         $litb_activity_slides = [];
         for ( $i = 1; $i <= 5; $i++ ) {
@@ -118,6 +107,17 @@ if ( $litb_banner_image !== '' ) :
                 <?php endif; ?>
             </div>
         <?php endif; ?>
+
+        <section class="ne-feed-card">
+            <div class="ne-section-title"><span class="ne-title-row">Latest articles</span></div>
+            <div class="ne-feed">
+                <?php if ( $litb_query->have_posts() ) : while ( $litb_query->have_posts() ) : $litb_query->the_post(); ?>
+                    <?php get_template_part( 'template-parts/article-card' ); ?>
+                <?php endwhile; wp_reset_postdata(); else : ?>
+                    <div class="ne-empty-state">No articles yet.</div>
+                <?php endif; ?>
+            </div>
+        </section>
 
         <div class="mt-3">
             <?php
