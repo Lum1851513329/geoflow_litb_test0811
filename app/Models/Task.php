@@ -136,6 +136,11 @@ class Task extends Model
         return $this->hasMany(Article::class, 'task_id');
     }
 
+    public function contentBriefs(): HasMany
+    {
+        return $this->hasMany(ContentBrief::class, 'task_id');
+    }
+
     public function taskSchedules(): HasMany
     {
         return $this->hasMany(TaskSchedule::class, 'task_id');

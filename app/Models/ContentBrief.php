@@ -37,6 +37,7 @@ final class ContentBrief extends Model
             'reference_urls' => 'array',
             'created_by_admin_id' => 'integer',
             'asset_provenance' => 'array',
+            'task_id' => 'integer',
         ];
     }
 
@@ -48,6 +49,16 @@ final class ContentBrief extends Model
     public function blueprintVersions(): HasMany
     {
         return $this->hasMany(ContentBlueprintVersion::class, 'content_brief_id');
+    }
+
+    public function generationRuns(): HasMany
+    {
+        return $this->hasMany(ContentGenerationRun::class, 'content_brief_id');
+    }
+
+    public function task(): BelongsTo
+    {
+        return $this->belongsTo(Task::class, 'task_id');
     }
 
     public function keywordCluster(): BelongsTo
