@@ -2,8 +2,8 @@
 
 namespace App\Services\GeoFlow\LitbAssets;
 
-use Illuminate\Support\Str;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Str;
 
 final class LitbQuarterlyBriefCatalog
 {
@@ -168,8 +168,15 @@ final class LitbQuarterlyBriefCatalog
         return $definitions;
     }
 
-    /** @return array<string, mixed> */
-    private function pillar(string $pillar): array
+    /**
+     * Widened from private to public so `SeedPresetBlueprintTemplatesCommand`
+     * (a legitimate second caller) can reuse the same business_goal/content_type/
+     * cta/preset lookup this class already uses internally in definitions().
+     * Pure lookup, no side effects — behavior is unchanged.
+     *
+     * @return array<string, mixed>
+     */
+    public function pillar(string $pillar): array
     {
         return match ($pillar) {
             'category_authority' => ['content_type' => 'category_guide', 'preset' => 'litb.geo_category_authority.en', 'business_goal' => 'Build durable topical authority and help consumers choose a relevant category.', 'funnel_stage' => 'consideration', 'evidence' => ['product-category'], 'store_target' => 'category', 'cta' => 'medium', 'refresh_days' => 180, 'risk_flags' => []],
