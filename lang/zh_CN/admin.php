@@ -15,6 +15,7 @@ return [
     'content_strategy' => [
         'index' => ['title' => '内容策略', 'subtitle' => '规划、生成、审核并采纳全链路可追溯内容。', 'empty' => '当前筛选条件下没有内容简报。'],
         'create' => ['title' => '创建内容简报', 'subtitle' => '在制定策略前明确受众、市场、核心问题和业务约束。'],
+        'quick_create' => ['label' => '从预设快速创建（可选）', 'manual_option' => '—— 手动策略/蓝图（当前流程）——', 'hint' => '选择预设将跳过策略/蓝图审核环节——主题和核心问题将直接决定文章方向，可立即请求生成。'],
         'wizard' => ['label' => '内容生成流程', 'steps' => [1 => '简报', 2 => '策略', 3 => '蓝图', 4 => '生成', 5 => '审核']],
         'strategy' => ['title' => '确认内容策略', 'suggestion' => '系统建议', 'confidence' => '置信度 :value%', 'suggestion_hint' => '请审核分类；仅在证据支持不同判断时进行修正。', 'evidence' => '建议依据', 'correction_hint' => '修正低置信度的意图建议时必须填写原因。', 'latest_version' => '最新已确认策略：v:version'],
         'blueprint' => ['title' => '确认内容蓝图', 'subtitle' => ':topic · 策略 v:version', 'editor_title' => '结构化蓝图', 'editor_hint' => '请审核 JSON 结构。章节键是稳定标识；每个章节都需要用途、问题、最低字数、CTA 策略和证据引用。', 'latest_version' => '最新已确认蓝图：v:version'],
