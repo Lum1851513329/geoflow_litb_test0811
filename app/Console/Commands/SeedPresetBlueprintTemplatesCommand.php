@@ -177,6 +177,8 @@ final class SeedPresetBlueprintTemplatesCommand extends Command
             'prompt_module_version_id' => (int) $binding->prompt_module_version_id,
             'sort_order' => (int) $binding->sort_order,
             'is_required' => (bool) $binding->is_required,
+            'selection_source' => $binding->selection_source,
+            'configuration' => $binding->configuration,
         ])->all();
         if (! $alreadyBound) {
             $bindings[] = [

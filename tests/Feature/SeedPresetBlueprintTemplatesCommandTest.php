@@ -65,12 +65,19 @@ final class SeedPresetBlueprintTemplatesCommandTest extends TestCase
             'lifecycle_status' => PromptPresetVersion::STATUS_DRAFT,
             'created_by_admin_id' => $actor->id,
         ]);
+        // selection_source is explicitly 'system' here (not the column's 'preset'
+        // default) to mirror real seeded data — PromptCompositionSeeder and
+        // LitbPromptLibrarySeeder both stamp their bindings 'system' (or 'legacy'),
+        // never 'preset' — so the migrated-binding assertion below actually proves
+        // the command preserves original provenance rather than merely matching a
+        // coincidental default.
         foreach ($mandatoryModuleVersions->values() as $index => $moduleVersion) {
             PromptPresetModuleVersion::query()->create([
                 'prompt_preset_version_id' => $version->id,
                 'prompt_module_version_id' => $moduleVersion->id,
                 'sort_order' => $index + 1,
                 'is_required' => true,
+                'selection_source' => 'system',
             ]);
         }
         $version->forceFill(['lifecycle_status' => PromptPresetVersion::STATUS_PRODUCTION])->save();
@@ -91,12 +98,18 @@ final class SeedPresetBlueprintTemplatesCommandTest extends TestCase
                 ->where('prompt_module_version_id', $titleCraftingVersionId)
                 ->exists()
         );
-        $this->assertTrue(
-            PromptPresetModuleVersion::query()
-                ->where('prompt_preset_version_id', $newVersion->id)
-                ->where('prompt_module_version_id', $seoStructureVersion->id)
-                ->exists(),
+        $migratedSeoStructureBinding = PromptPresetModuleVersion::query()
+            ->where('prompt_preset_version_id', $newVersion->id)
+            ->where('prompt_module_version_id', $seoStructureVersion->id)
+            ->first();
+        $this->assertNotNull(
+            $migratedSeoStructureBinding,
             'Existing module bindings must be preserved in the new version, not dropped.'
+        );
+        $this->assertSame(
+            'system',
+            $migratedSeoStructureBinding->selection_source,
+            'Migrated bindings must keep their original selection_source provenance, not fall back to createVersionForLockedPreset()\'s "preset" default.'
         );
     }
 
