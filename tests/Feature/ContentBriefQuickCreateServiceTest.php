@@ -9,6 +9,7 @@ use App\Models\ContentBrief;
 use App\Models\ContentStrategyVersion;
 use App\Models\PromptPreset;
 use App\Models\PromptPresetVersion;
+use App\Models\Task;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
 
@@ -61,14 +62,19 @@ final class ContentBriefQuickCreateServiceTest extends TestCase
         ]);
         $preset->forceFill(['current_version_id' => $version->id])->save();
 
+        $task = Task::query()->create(['name' => 'quick-create-source-task', 'status' => 'active']);
+
         $service = $this->app->make(ContentBriefQuickCreateService::class);
         $brief = $service->create([
             'topic' => 'How to Choose Running Shoes',
             'core_question' => 'What should a first-time buyer check before ordering running shoes online?',
+            'task_id' => $task->id,
         ], $preset, $actor);
 
         $this->assertSame(ContentBrief::STATUS_STRATEGY_READY, $brief->status);
         $this->assertSame('How to Choose Running Shoes', $brief->topic);
+        $this->assertSame($task->id, $brief->task_id, 'task_id must survive create() — it is excluded from $fillable and requires forceCreate() (or explicit assignment) to persist.');
+        $this->assertDatabaseHas('content_briefs', ['id' => $brief->id, 'task_id' => $task->id]);
 
         $strategy = $brief->strategyVersions()->firstOrFail();
         $this->assertSame(ContentStrategyVersion::STATUS_CONFIRMED, $strategy->lifecycle_status);

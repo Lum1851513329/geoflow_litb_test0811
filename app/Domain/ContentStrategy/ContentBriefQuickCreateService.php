@@ -34,7 +34,7 @@ final class ContentBriefQuickCreateService
         $defaults = (array) ($presetVersion->default_brief_fields ?? []);
 
         return DB::transaction(function () use ($data, $presetVersion, $actor, $topic, $coreQuestion, $defaults): ContentBrief {
-            $brief = ContentBrief::query()->create([
+            $brief = ContentBrief::forceCreate([
                 'topic' => $topic,
                 'market_code' => (string) ($defaults['market_code'] ?? 'GLOBAL'),
                 'language_code' => (string) ($defaults['language_code'] ?? 'en'),
