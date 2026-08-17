@@ -18,7 +18,9 @@ class DeterministicQualityGateTest extends TestCase
 
     public function test_gate_rejects_thin_sections_and_unresolved_variables(): void
     {
-        $result = $this->gate->inspect("## Sizing\nChoose the right size.\n{{product_name}}", $this->blueprint(), []);
+        $markdown = "## Sizing\nChoose the right size.\n{{product_name}}\n\n## Care\nChoose the right size.\n{{product_name}}";
+
+        $result = $this->gate->inspect($markdown, $this->blueprint(), []);
 
         $this->assertFalse($result->passed);
         $this->assertContains('section_too_thin', array_column($result->issuesAsArray(), 'code'));
@@ -37,34 +39,73 @@ class DeterministicQualityGateTest extends TestCase
         $this->assertSame('sections.0.heading.required', $this->issue($result, 'invalid_blueprint')['section_key']);
     }
 
-    public function test_gate_reports_each_blueprint_section_missing_from_markdown(): void
+    public function test_gate_reports_a_section_count_mismatch_when_a_section_is_missing(): void
     {
         $result = $this->gate->inspect("## Sizing\n".$this->words(80), $this->blueprint(), []);
 
-        $issues = array_filter($result->issuesAsArray(), fn (array $issue): bool => $issue['code'] === 'missing_section');
+        $issues = array_filter($result->issuesAsArray(), fn (array $issue): bool => $issue['code'] === 'section_count_mismatch');
 
         $this->assertFalse($result->passed);
-        $this->assertSame(['care'], array_values(array_column($issues, 'section_key')));
-        $this->assertSame('Add an H2 heading named "Care" and include its planned guidance.', array_values($issues)[0]['repair_instruction']);
+        $this->assertCount(1, $issues);
+        $this->assertSame(
+            'Article has 1 top-level sections; blueprint requires 2.',
+            array_values($issues)[0]['message'],
+        );
     }
 
-    public function test_gate_matches_a_heading_that_extends_the_blueprint_heading_with_extra_words(): void
+    public function test_gate_matches_sections_by_position_regardless_of_heading_wording(): void
     {
-        $markdown = '## Sizing for Every Foot Shape and Arch Type'."\n".$this->words(80)
-            ."\n\n## Care and Maintenance Tips for Daily Runners\n".$this->words(80);
+        $markdown = '## How to Pick the Right Fit'."\n".$this->words(80)
+            ."\n\n## Keeping Them Looking New\n".$this->words(80);
 
         $result = $this->gate->inspect($markdown, $this->blueprint(), []);
 
-        $this->assertNotContains('missing_section', array_column($result->issuesAsArray(), 'code'));
+        $this->assertNotContains('section_count_mismatch', array_column($result->issuesAsArray(), 'code'));
+        $this->assertNotContains('section_too_thin', array_column($result->issuesAsArray(), 'code'));
     }
 
-    public function test_gate_does_not_match_a_heading_that_merely_contains_the_blueprint_word_mid_string(): void
+    public function test_gate_flags_an_article_that_does_not_open_with_an_h1_title(): void
     {
-        $result = $this->gate->inspect("## Resizing Your Order\n".$this->words(80)."\n\n## Care\n".$this->words(80), $this->blueprint(), []);
+        $markdown = '## Sizing'."\n".$this->words(80)."\n\n## Care\n".$this->words(80);
 
-        $issues = array_filter($result->issuesAsArray(), fn (array $issue): bool => $issue['code'] === 'missing_section');
+        $result = $this->gate->inspect($markdown, $this->blueprint(), []);
 
-        $this->assertSame(['sizing'], array_values(array_column($issues, 'section_key')));
+        $this->assertContains('missing_title_heading', array_column($result->issuesAsArray(), 'code'));
+    }
+
+    public function test_gate_does_not_flag_missing_title_when_the_article_opens_with_an_h1(): void
+    {
+        $markdown = "# A Great Title\n\n## Sizing\n".$this->words(80)."\n\n## Care\n".$this->words(80);
+
+        $result = $this->gate->inspect($markdown, $this->blueprint(), []);
+
+        $this->assertNotContains('missing_title_heading', array_column($result->issuesAsArray(), 'code'));
+    }
+
+    public function test_section_scoped_question_coverage_is_suppressed_on_a_section_count_mismatch(): void
+    {
+        // Only 1 heading found but the blueprint expects 2 — position zip is unreliable, so per-section
+        // checks (thin/question/cta) are suppressed in favor of the single section_count_mismatch signal.
+        $markdown = "# Title\n\n## Sizing\n".$this->words(80);
+
+        $result = $this->gate->inspect($markdown, $this->blueprint(), []);
+
+        $codes = array_column($result->issuesAsArray(), 'code');
+        $this->assertContains('section_count_mismatch', $codes);
+        $this->assertNotContains('section_too_thin', $codes);
+        $this->assertNotContains('missing_question_coverage', $codes);
+    }
+
+    public function test_global_faq_question_coverage_still_checks_even_on_a_section_count_mismatch(): void
+    {
+        $blueprint = $this->blueprint();
+        $blueprint['faq_questions'] = ['What is the return window?'];
+        $markdown = "# Title\n\n## Sizing\n".$this->words(80);
+
+        $result = $this->gate->inspect($markdown, $blueprint, []);
+
+        $issues = array_filter($result->issuesAsArray(), fn (array $issue): bool => $issue['code'] === 'missing_question_coverage');
+        $this->assertNotEmpty($issues);
     }
 
     public function test_gate_flags_duplicate_normalized_paragraphs(): void
@@ -167,8 +208,7 @@ class DeterministicQualityGateTest extends TestCase
         $result = $this->gate->inspect($markdown, $this->blueprint(), ['primary_keyword' => 'running shoes']);
 
         $this->assertNotContains('section_too_thin', array_column(array_filter($result->issuesAsArray(), fn (array $issue): bool => $issue['section_key'] === 'sizing'), 'code'));
-        $this->assertContains('missing_section', array_column($result->issuesAsArray(), 'code'));
-        $this->assertContains('missing_question_coverage', array_column($result->issuesAsArray(), 'code'));
+        $this->assertContains('section_count_mismatch', array_column($result->issuesAsArray(), 'code'));
         $this->assertNotContains('unresolved_variable', array_column($result->issuesAsArray(), 'code'));
         $this->assertNotContains('keyword_stuffing', array_column($result->issuesAsArray(), 'code'));
     }
@@ -224,7 +264,7 @@ class DeterministicQualityGateTest extends TestCase
     public function test_chinese_content_uses_han_characters_as_content_units_for_section_minimums(): void
     {
         $short = $this->gate->inspect("## 尺码\n".str_repeat('跑', 79), $this->chineseBlueprint(80), ['language_code' => 'zh']);
-        $substantive = $this->gate->inspect("## 尺码\n".str_repeat('跑', 80), $this->chineseBlueprint(80), ['language_code' => 'zh']);
+        $substantive = $this->gate->inspect("# 标题\n\n## 尺码\n".str_repeat('跑', 80), $this->chineseBlueprint(80), ['language_code' => 'zh']);
 
         $this->assertContains('section_too_thin', array_column($short->issuesAsArray(), 'code'));
         $this->assertTrue($substantive->passed);
@@ -345,7 +385,7 @@ class DeterministicQualityGateTest extends TestCase
 
     public function test_gate_enforces_total_target_length_tolerance(): void
     {
-        $markdown = "## Sizing\n".$this->words(80)."\n\n## Care\n".$this->words(80);
+        $markdown = "# A Great Title\n\n## Sizing\n".$this->words(80)."\n\n## Care\n".$this->words(80);
 
         $result = $this->gate->inspect($markdown, $this->blueprint(), []);
 
@@ -416,7 +456,7 @@ class DeterministicQualityGateTest extends TestCase
     {
         $entitySentence = $entity === '' ? '' : " {$entity} recommends recording this fit check before a first outdoor run.";
 
-        return "## Sizing\n"
+        return "# A Great Title\n\n## Sizing\n"
             .'Running shoes should fit with a thumb-width of room in front of the longest toe. Check the heel first: it should stay secure while you walk, jog, and turn. Try both shoes while wearing the socks you expect to use, because a thick sock changes the usable volume. Measure later in the day when feet are slightly larger, then choose the size that protects your toes on downhill routes. A roomy toe box and stable midfoot make it easier to adjust laces without numbing the forefoot.'
             .$entitySentence
             ."\n\n## Care\n"

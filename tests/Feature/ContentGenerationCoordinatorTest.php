@@ -128,7 +128,7 @@ class ContentGenerationCoordinatorTest extends TestCase
             ->sole()
             ->prompt;
         $this->assertStringContainsString('## Wrong Heading\\nToo thin.', $revisionPrompt);
-        $this->assertStringContainsString('Add an H2 heading named \\"Fit\\"', $revisionPrompt);
+        $this->assertStringContainsString('Expand \\"Fit\\" with', $revisionPrompt);
         $this->assertStringNotContainsString('Rewrite the whole article', $revisionPrompt);
         $semanticPrompt = $fresh->steps()->where('step_type', ContentGenerationRunStep::TYPE_SEMANTIC_QUALITY)->sole()->prompt;
         $this->assertStringContainsString('Allow a thumb width in front of the longest toe.', $semanticPrompt);
@@ -990,7 +990,7 @@ class ContentGenerationCoordinatorTest extends TestCase
 
     private function substantiveArticle(string $extra = ''): string
     {
-        return "## Fit\nHow should running shoes fit? Running shoes should hold the heel securely while leaving a thumb width ahead of the longest toe. The midfoot should feel supported without pressure, and toes should spread naturally. Walk and jog to check for slipping, rubbing, numbness, or pinching before choosing the size. {$extra}";
+        return "# How Running Shoes Should Fit\n\n## Fit\nHow should running shoes fit? Running shoes should hold the heel securely while leaving a thumb width ahead of the longest toe. The midfoot should feel supported without pressure, and toes should spread naturally. Walk and jog to check for slipping, rubbing, numbness, or pinching before choosing the size. {$extra}";
     }
 
     private function semanticPass(): string

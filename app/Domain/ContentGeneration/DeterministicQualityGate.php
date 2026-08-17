@@ -58,29 +58,40 @@ final class DeterministicQualityGate
             );
         }
 
-        foreach ($sections as $section) {
-            $sectionKey = $section['key'];
-            if (! array_key_exists($sectionKey, $document['section_content'])) {
-                $issues[] = new QualityIssue(
-                    code: 'missing_section',
-                    severity: QualityIssue::SEVERITY_ERROR,
-                    sectionKey: $sectionKey,
-                    message: "Blueprint section \"{$section['heading']}\" is missing from the Markdown.",
-                    repairInstruction: "Add an H2 heading named \"{$section['heading']}\" and include its planned guidance.",
-                );
+        if ($document['headings'] === [] || $document['headings'][0]['level'] !== 1) {
+            $issues[] = new QualityIssue(
+                code: 'missing_title_heading',
+                severity: QualityIssue::SEVERITY_ERROR,
+                sectionKey: null,
+                message: 'The article does not open with a single H1 title heading.',
+                repairInstruction: 'Add exactly one H1 heading as the very first line, containing the article title.',
+            );
+        }
 
-                continue;
-            }
-
-            $actualUnits = $this->contentUnitCount($document['section_content'][$sectionKey], $language);
-            if ($actualUnits < $section['minimum_words']) {
-                $issues[] = new QualityIssue(
-                    code: 'section_too_thin',
-                    severity: QualityIssue::SEVERITY_ERROR,
-                    sectionKey: $sectionKey,
-                    message: "Section \"{$section['heading']}\" has {$actualUnits} content units; it requires at least {$section['minimum_words']}.",
-                    repairInstruction: "Expand \"{$section['heading']}\" with ".($section['minimum_words'] - $actualUnits).' more substantive content units that address its planned question.',
-                );
+        $expectedSectionCount = count($sections);
+        $foundSectionCount = $document['section_count_found'];
+        $sectionCountsMatch = $foundSectionCount === $expectedSectionCount;
+        if (! $sectionCountsMatch) {
+            $issues[] = new QualityIssue(
+                code: 'section_count_mismatch',
+                severity: QualityIssue::SEVERITY_ERROR,
+                sectionKey: null,
+                message: "Article has {$foundSectionCount} top-level sections; blueprint requires {$expectedSectionCount}.",
+                repairInstruction: "Add or remove top-level sections so the article has exactly {$expectedSectionCount} sections, matching the blueprint order.",
+            );
+        } else {
+            foreach ($sections as $section) {
+                $sectionKey = $section['key'];
+                $actualUnits = $this->contentUnitCount($document['section_content'][$sectionKey] ?? '', $language);
+                if ($actualUnits < $section['minimum_words']) {
+                    $issues[] = new QualityIssue(
+                        code: 'section_too_thin',
+                        severity: QualityIssue::SEVERITY_ERROR,
+                        sectionKey: $sectionKey,
+                        message: "Section \"{$section['heading']}\" has {$actualUnits} content units; it requires at least {$section['minimum_words']}.",
+                        repairInstruction: "Expand \"{$section['heading']}\" with ".($section['minimum_words'] - $actualUnits).' more substantive content units that address its planned question.',
+                    );
+                }
             }
         }
 
@@ -123,6 +134,9 @@ final class DeterministicQualityGate
         }
 
         foreach ($this->questions($sections, $blueprint, $requirements) as $question) {
+            if ($question['section_key'] !== null && ! $sectionCountsMatch) {
+                continue;
+            }
             $content = $question['section_key'] === null
                 ? $document['body']
                 : ($document['section_content'][$question['section_key']] ?? '');
@@ -196,15 +210,17 @@ final class DeterministicQualityGate
             );
         }
 
-        foreach ($sections as $section) {
-            if (! $section['cta_allowed'] && $this->containsCallToAction($document['section_markdown'][$section['key']] ?? '')) {
-                $issues[] = new QualityIssue(
-                    code: 'cta_not_allowed',
-                    severity: QualityIssue::SEVERITY_ERROR,
-                    sectionKey: $section['key'],
-                    message: "Section \"{$section['heading']}\" contains a call to action that its blueprint forbids.",
-                    repairInstruction: "Remove promotional calls to action from \"{$section['heading']}\".",
-                );
+        if ($sectionCountsMatch) {
+            foreach ($sections as $section) {
+                if (! $section['cta_allowed'] && $this->containsCallToAction($document['section_markdown'][$section['key']] ?? '')) {
+                    $issues[] = new QualityIssue(
+                        code: 'cta_not_allowed',
+                        severity: QualityIssue::SEVERITY_ERROR,
+                        sectionKey: $section['key'],
+                        message: "Section \"{$section['heading']}\" contains a call to action that its blueprint forbids.",
+                        repairInstruction: "Remove promotional calls to action from \"{$section['heading']}\".",
+                    );
+                }
             }
         }
 
@@ -269,14 +285,46 @@ final class DeterministicQualityGate
 
     /**
      * @param  list<array{key: string, heading: string, minimum_words: int, questions: list<string>}>  $sections
-     * @return array{headings: list<array{level: int, text: string, section_key: string|null}>, paragraphs: list<array{text: string, section_key: string|null}>, section_content: array<string, string>, section_markdown: array<string, string>, body: string}
+     * @return array{headings: list<array{level: int, text: string, section_key: string|null}>, paragraphs: list<array{text: string, section_key: string|null}>, section_content: array<string, string>, section_markdown: array<string, string>, body: string, section_count_found: int}
      */
     private function parseMarkdown(string $markdown, array $sections): array
     {
-        $headingKeys = [];
-        foreach ($sections as $section) {
-            $headingKeys[$this->normalize($section['heading'])] = $section['key'];
-            $headingKeys[$this->normalize($section['key'])] = $section['key'];
+        $lines = preg_split('/\R/u', $markdown) ?: [];
+
+        $rawHeadings = [];
+        foreach ($lines as $index => $line) {
+            if (preg_match('/^\s*(#{1,6})\s+(.+?)\s*#*\s*$/u', $line, $matches) === 1) {
+                $rawHeadings[] = ['line' => $index, 'level' => strlen($matches[1]), 'text' => trim($matches[2])];
+            }
+        }
+
+        // The model is instructed to open with a single H1 title (the title-crafting
+        // module); that H1 is the article title, never a section boundary.
+        $sectionCandidates = $rawHeadings;
+        if ($sectionCandidates !== [] && $sectionCandidates[0]['level'] === 1) {
+            array_shift($sectionCandidates);
+        }
+
+        $topLevel = null;
+        foreach ($sectionCandidates as $heading) {
+            if ($topLevel === null || $heading['level'] < $topLevel) {
+                $topLevel = $heading['level'];
+            }
+        }
+
+        $sectionHeadingLines = [];
+        foreach ($sectionCandidates as $heading) {
+            if ($heading['level'] === $topLevel) {
+                $sectionHeadingLines[] = $heading['line'];
+            }
+        }
+
+        // Zip section-level headings 1:1, in document order, against the blueprint's
+        // sections, in blueprint order. A count mismatch is handled by the caller.
+        $lineToSectionKey = [];
+        $matchedCount = min(count($sectionHeadingLines), count($sections));
+        for ($i = 0; $i < $matchedCount; $i++) {
+            $lineToSectionKey[$sectionHeadingLines[$i]] = $sections[$i]['key'];
         }
 
         $headings = [];
@@ -295,19 +343,21 @@ final class DeterministicQualityGate
             }
         };
 
-        foreach (preg_split('/\R/u', $markdown) ?: [] as $line) {
+        foreach ($lines as $index => $line) {
             if (preg_match('/^\s*(#{1,6})\s+(.+?)\s*#*\s*$/u', $line, $matches) === 1) {
                 $flushParagraph();
                 $level = strlen($matches[1]);
                 $text = trim($matches[2]);
-                $sectionKey = $this->matchSectionKey($this->normalize($text), $headingKeys);
+                $sectionKey = $lineToSectionKey[$index] ?? null;
                 $headings[] = ['level' => $level, 'text' => $text, 'section_key' => $sectionKey];
 
-                if ($sectionKey !== null) {
+                if ($level === $topLevel) {
                     $currentSectionKey = $sectionKey;
                     $currentSectionLevel = $level;
-                    $sectionContent[$sectionKey] ??= '';
-                    $sectionMarkdown[$sectionKey] ??= '';
+                    if ($sectionKey !== null) {
+                        $sectionContent[$sectionKey] ??= '';
+                        $sectionMarkdown[$sectionKey] ??= '';
+                    }
                 } elseif ($currentSectionLevel !== null && $level <= $currentSectionLevel) {
                     $currentSectionKey = null;
                     $currentSectionLevel = null;
@@ -345,6 +395,7 @@ final class DeterministicQualityGate
             'section_content' => $sectionContent,
             'section_markdown' => $sectionMarkdown,
             'body' => trim(implode(' ', $bodyLines)),
+            'section_count_found' => count($sectionHeadingLines),
         ];
     }
 
@@ -808,38 +859,6 @@ final class DeterministicQualityGate
         preg_match_all('/[\p{L}\p{N}]+/u', $this->normalize($text), $matches);
 
         return $matches[0] ?? [];
-    }
-
-    /**
-     * Models routinely extend a blueprint heading with descriptive words
-     * ("Sizing" -> "Sizing for Every Foot Shape"). Match on the longest
-     * normalized blueprint heading/key that is a whole-word prefix of the
-     * actual heading, so an extension matches but an unrelated heading that
-     * merely contains the same word mid-string does not.
-     *
-     * @param  array<string, string>  $headingKeys
-     */
-    private function matchSectionKey(string $normalizedText, array $headingKeys): ?string
-    {
-        if (isset($headingKeys[$normalizedText])) {
-            return $headingKeys[$normalizedText];
-        }
-
-        $bestKey = null;
-        $bestLength = 0;
-        foreach ($headingKeys as $normalizedHeading => $key) {
-            $length = strlen($normalizedHeading);
-            if ($length <= $bestLength || $length === 0) {
-                continue;
-            }
-            if (str_starts_with($normalizedText, $normalizedHeading)
-                && $normalizedText[$length] === ' ') {
-                $bestKey = $key;
-                $bestLength = $length;
-            }
-        }
-
-        return $bestKey;
     }
 
     private function normalize(string $value): string
