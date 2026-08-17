@@ -2,16 +2,23 @@
 
 namespace App\Services\GeoFlow;
 
+use App\Domain\ContentGeneration\ContentGenerationRequestService;
+use App\Domain\ContentGeneration\ReferenceEvidenceFetcher;
+use App\Domain\ContentStrategy\ContentBriefQuickCreateService;
 use App\Exceptions\ArticleRiskGateException;
+use App\Models\Admin;
 use App\Models\AiModel;
 use App\Models\Article;
 use App\Models\ArticleImage;
 use App\Models\Author;
 use App\Models\Category;
+use App\Models\ContentBrief;
+use App\Models\ContentGenerationRun;
 use App\Models\Image;
 use App\Models\KnowledgeBase;
 use App\Models\KnowledgeChunk;
 use App\Models\Prompt;
+use App\Models\PromptPreset;
 use App\Models\Task;
 use App\Models\Title;
 use App\Support\GeoFlow\ArticleWorkflow;
@@ -40,6 +47,9 @@ class WorkerExecutionService
         private readonly ArticleWorkflowTransitionService $articleWorkflowTransitionService,
         private readonly ArticleContentPromptRenderer $articleContentPromptRenderer,
         private readonly ArticleContentGenerationService $articleContentGenerationService,
+        private readonly ContentBriefQuickCreateService $briefQuickCreateService,
+        private readonly ContentGenerationRequestService $generationRequests,
+        private readonly ReferenceEvidenceFetcher $referenceEvidenceFetcher,
     ) {}
 
     /**
@@ -79,8 +89,13 @@ class WorkerExecutionService
         }
 
         $titleRow = $this->pickTitle($task);
-        $author = $this->pickAuthor($task);
         $category = $this->pickCategory($task);
+
+        if ((string) ($task->generation_engine ?? 'legacy') === 'quality_gated') {
+            return $this->generateQualityGatedDraft($task, $titleRow, $category);
+        }
+
+        $author = $this->pickAuthor($task);
         $prompt = $task->prompt_id ? Prompt::query()->find((int) $task->prompt_id) : null;
 
         $keyword = (string) ($titleRow->keyword ?? '');
@@ -201,6 +216,107 @@ class WorkerExecutionService
     }
 
     /**
+     * 质量门禁任务分支：创建 ContentBrief 并预约一次异步 ContentGenerationRun，
+     * 不再像旧逻辑那样同步调用模型并直接创建 Article。
+     *
+     * @return array{article_id:int|null, title:string, message:string, meta:array<string,mixed>}
+     */
+    private function generateQualityGatedDraft(Task $task, Title $titleRow, ?Category $category): array
+    {
+        $presetId = (int) ($task->prompt_preset_id ?? 0);
+        if ($presetId <= 0) {
+            throw new RuntimeException('任务未配置质量门禁内容模板');
+        }
+        $preset = PromptPreset::query()->find($presetId);
+        if (! $preset) {
+            throw new RuntimeException('任务配置的内容模板不存在');
+        }
+
+        $systemAdmin = Admin::query()->where('username', 'geoflow-system')->first();
+        if (! $systemAdmin) {
+            throw new RuntimeException('系统管理员账户不存在，请先运行 geoflow:content-strategy:seed-system-admin');
+        }
+
+        $referenceUrls = (array) ($titleRow->reference_urls ?? []);
+        $fetchedReferences = $referenceUrls !== [] ? $this->referenceEvidenceFetcher->fetch($referenceUrls) : [];
+
+        $brief = $this->briefQuickCreateService->create([
+            'topic' => (string) $titleRow->title,
+            'core_question' => $titleRow->core_question,
+            'category_id' => $category?->id,
+            'reference_urls' => $referenceUrls,
+            'task_id' => (int) $task->id,
+        ], $preset, $systemAdmin);
+
+        $strategyVersion = $brief->strategyVersions()->latest('version')->firstOrFail();
+        $blueprintVersion = $brief->blueprintVersions()->latest('version')->firstOrFail();
+        $presetVersion = $preset->currentVersion;
+        if ($presetVersion === null) {
+            throw new RuntimeException('任务配置的内容模板没有可用版本');
+        }
+
+        $reservation = $this->generationRequests->reserve($brief, [
+            'strategy_version_id' => $strategyVersion->id,
+            'blueprint_version_id' => $blueprintVersion->id,
+            'preset_version_id' => $presetVersion->id,
+            'ai_model_id' => (int) $task->ai_model_id,
+            'evidence' => $this->mapFetchedReferencesToEvidence($fetchedReferences),
+        ], $systemAdmin);
+
+        Title::query()->whereKey($titleRow->id)->increment('used_count');
+        Title::query()->whereKey($titleRow->id)->increment('usage_count');
+
+        return [
+            'article_id' => null,
+            'title' => (string) $titleRow->title,
+            'message' => '质量门禁生成任务已提交',
+            'meta' => [
+                'task_id' => (int) $task->id,
+                'action' => 'generate_quality_gated_draft',
+                'title_id' => (int) $titleRow->id,
+                'content_brief_id' => (int) $brief->id,
+                'content_generation_run_id' => (int) $reservation['run']->id,
+            ],
+        ];
+    }
+
+    /**
+     * `ReferenceEvidenceFetcher::fetch()` 返回 `{url,status,content}` 形状，
+     * 但 `GenerationEvidenceSnapshotter::snapshot()` 的显式 evidence 需要
+     * `{fact_id,title?,content,source_url?}` 形状（见该类 docblock及其对
+     * `$item['fact_id']`/`$item['content']` 的读取）。两者不兼容，必须在
+     * 这里做一次形状转换，不能把抓取结果原样透传给 reserve()。
+     *
+     * 只保留成功抓取到内容的引用；抓取失败（status=failed，content=null）
+     * 的条目会被丢弃，因为 snapshotter 要求 content 非空。
+     *
+     * @param  list<array{url:string,status:'fetched'|'failed',content:?string}>  $fetchedReferences
+     * @return list<array{fact_id:string,title:string,content:string,source_url:string}>
+     */
+    private function mapFetchedReferencesToEvidence(array $fetchedReferences): array
+    {
+        $evidence = [];
+        foreach ($fetchedReferences as $reference) {
+            if (($reference['status'] ?? null) !== 'fetched') {
+                continue;
+            }
+            $content = trim((string) ($reference['content'] ?? ''));
+            if ($content === '') {
+                continue;
+            }
+            $url = (string) ($reference['url'] ?? '');
+            $evidence[] = [
+                'fact_id' => 'reference-url:'.sha1($url),
+                'title' => $url,
+                'content' => $content,
+                'source_url' => $url,
+            ];
+        }
+
+        return $evidence;
+    }
+
+    /**
      * 发布一个已审核草稿。生成与发布解耦后，Worker 每次执行优先释放到期草稿。
      *
      * @return array{article_id:int, title:string, message:string, meta:array<string,mixed>}|null
@@ -288,14 +404,24 @@ class WorkerExecutionService
         }
 
         $draftLimit = max(1, (int) ($task->draft_limit ?? 10));
-        $draftQuery = Article::query()
+        $draftCount = Article::query()
             ->where('task_id', (int) $task->id)
             ->where('status', 'draft')
-            ->whereNull('deleted_at');
+            ->whereNull('deleted_at')
+            ->count();
         // PostgreSQL 不允许在 count(*) 聚合查询上追加 FOR UPDATE。
         // 这里的并发保护由任务行锁和 task_runs 的单任务串行队列保证，草稿计数不需要再单独加锁。
 
-        if ($draftQuery->count() >= $draftLimit) {
+        if ((string) ($task->generation_engine ?? 'legacy') === 'quality_gated') {
+            // 质量门禁任务在 run 被采纳前不会创建 Article，需要把进行中的 run 也计入草稿池，
+            // 否则会在 run 处于 pending/generating/待审时放任任务超量生成。
+            $draftCount += ContentGenerationRun::query()
+                ->whereIn('content_brief_id', ContentBrief::query()->where('task_id', (int) $task->id)->select('id'))
+                ->whereNotIn('status', [ContentGenerationRun::STATUS_ADOPTED, ContentGenerationRun::STATUS_FAILED])
+                ->count();
+        }
+
+        if ($draftCount >= $draftLimit) {
             return '草稿池已满，等待审核或按间隔发布';
         }
 

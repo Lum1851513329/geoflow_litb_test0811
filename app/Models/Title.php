@@ -16,6 +16,8 @@ class Title extends Model
         'library_id',
         'title',
         'keyword',
+        'core_question',
+        'reference_urls',
         'is_ai_generated',
         'used_count',
         'usage_count',
@@ -25,6 +27,7 @@ class Title extends Model
     {
         return [
             'library_id' => 'integer',
+            'reference_urls' => 'array',
             'is_ai_generated' => 'boolean',
             'used_count' => 'integer',
             'usage_count' => 'integer',
