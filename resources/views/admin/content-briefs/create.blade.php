@@ -16,6 +16,16 @@
 
     <form method="POST" action="{{ route('admin.content-briefs.store') }}" class="grid gap-5 rounded-lg bg-white p-6 shadow lg:grid-cols-2">
         @csrf
+        <div class="mb-6 rounded-md border border-blue-200 bg-blue-50 p-4 lg:col-span-2">
+            <label class="block text-sm font-medium text-gray-700">Quick create from a preset (optional)</label>
+            <select name="prompt_preset_id" class="mt-1 w-full rounded-md border-gray-300">
+                <option value="">— Manual strategy/blueprint (today's flow) —</option>
+                @foreach ($quickCreatePresets as $preset)
+                    <option value="{{ $preset->id }}" @selected((string) old('prompt_preset_id') === (string) $preset->id)>{{ $preset->display_name }}</option>
+                @endforeach
+            </select>
+            <p class="mt-1 text-xs text-gray-500">Choosing a preset skips the strategy/blueprint review screens — topic and core question become the article's direction and generation is ready to request immediately.</p>
+        </div>
         <label class="text-sm font-medium text-gray-700 lg:col-span-2">{{ __('admin.content_strategy.fields.topic') }}<input required name="topic" value="{{ old('topic') }}" class="mt-1 w-full rounded-md border-gray-300"></label>
         <label class="text-sm font-medium text-gray-700">{{ __('admin.content_strategy.fields.market_code') }}<input required name="market_code" value="{{ old('market_code') }}" placeholder="US" class="mt-1 w-full rounded-md border-gray-300"></label>
         <label class="text-sm font-medium text-gray-700">{{ __('admin.content_strategy.fields.language_code') }}<input required name="language_code" value="{{ old('language_code') }}" placeholder="en" class="mt-1 w-full rounded-md border-gray-300"></label>

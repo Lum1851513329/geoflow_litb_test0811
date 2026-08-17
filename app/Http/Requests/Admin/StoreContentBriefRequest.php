@@ -23,12 +23,12 @@ final class StoreContentBriefRequest extends FormRequest
     {
         return [
             'topic' => ['required', 'string', 'max:300'],
-            'market_code' => ['required', 'string', 'max:10', 'regex:/^[A-Za-z0-9_-]+$/'],
-            'language_code' => ['required', 'string', 'max:35', 'regex:/^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{1,8})*$/'],
-            'audience' => ['required', 'string', 'max:5000'],
+            'market_code' => ['sometimes', 'required_without:prompt_preset_id', 'string', 'max:10', 'regex:/^[A-Za-z0-9_-]+$/'],
+            'language_code' => ['sometimes', 'required_without:prompt_preset_id', 'string', 'max:35', 'regex:/^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{1,8})*$/'],
+            'audience' => ['sometimes', 'required_without:prompt_preset_id', 'string', 'max:5000'],
             'core_question' => ['required', 'string', 'max:5000'],
-            'business_goal' => ['required', 'string', 'max:5000'],
-            'content_type' => ['required', 'string', 'max:50'],
+            'business_goal' => ['sometimes', 'required_without:prompt_preset_id', 'string', 'max:5000'],
+            'content_type' => ['sometimes', 'required_without:prompt_preset_id', 'string', 'max:50'],
             'planned_publish_at' => ['nullable', 'date'],
             'keyword_cluster_id' => ['nullable', 'integer', 'exists:keyword_clusters,id'],
             'primary_keyword_id' => ['nullable', 'integer', 'exists:keywords,id'],
@@ -43,6 +43,7 @@ final class StoreContentBriefRequest extends FormRequest
             'reference_urls' => ['nullable', 'array', 'max:100'],
             'reference_urls.*' => ['url:http,https', 'max:1000'],
             'cta_strength' => ['nullable', Rule::in(['none', 'soft', 'medium', 'strong'])],
+            'prompt_preset_id' => ['nullable', 'integer', 'exists:prompt_presets,id'],
         ];
     }
 
@@ -62,12 +63,21 @@ final class StoreContentBriefRequest extends FormRequest
     protected function prepareForValidation(): void
     {
         $this->merge([
-            'market_code' => strtoupper(trim((string) $this->input('market_code'))),
-            'language_code' => $this->canonicalLanguageTag((string) $this->input('language_code')),
             'required_mentions' => $this->lines($this->input('required_mentions')),
             'prohibited_information' => $this->lines($this->input('prohibited_information')),
             'reference_urls' => $this->lines($this->input('reference_urls')),
         ]);
+
+        // Only normalize market_code/language_code when actually submitted: the quick-create
+        // (prompt_preset_id) path omits them entirely, and forcing them to a coerced empty
+        // string here would make the `sometimes` rule engage and fail regex validation even
+        // though these fields are optional on that path.
+        if ($this->has('market_code')) {
+            $this->merge(['market_code' => strtoupper(trim((string) $this->input('market_code')))]);
+        }
+        if ($this->has('language_code')) {
+            $this->merge(['language_code' => $this->canonicalLanguageTag((string) $this->input('language_code'))]);
+        }
     }
 
     /** @return list<mixed>|null */

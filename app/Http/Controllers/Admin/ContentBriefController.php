@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Admin;
 
+use App\Domain\ContentStrategy\ContentBriefQuickCreateService;
 use App\Domain\ContentStrategy\ContentStrategyService;
 use App\Domain\PromptComposition\PromptModuleResolver;
 use App\Domain\PromptComposition\PromptPresetSelector;
@@ -20,6 +21,7 @@ use App\Models\Keyword;
 use App\Models\KeywordCluster;
 use App\Models\KnowledgeChunk;
 use App\Models\PromptModuleVersion;
+use App\Models\PromptPreset;
 use App\Models\PromptPresetVersion;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -34,6 +36,7 @@ final class ContentBriefController extends Controller
         private readonly ContentStrategyService $strategies,
         private readonly PromptModuleResolver $moduleResolver,
         private readonly PromptPresetSelector $presetSelector,
+        private readonly ContentBriefQuickCreateService $quickCreate,
     ) {}
 
     public function index(Request $request): View
@@ -68,15 +71,38 @@ final class ContentBriefController extends Controller
             'categories' => Category::query()->orderBy('name')->get(['id', 'name']),
             'keywordClusters' => KeywordCluster::query()->orderBy('name')->get(['id', 'name']),
             'keywords' => Keyword::query()->orderBy('keyword')->limit(500)->get(['id', 'keyword']),
+            'quickCreatePresets' => PromptPreset::query()
+                ->whereHas('currentVersion', fn ($q) => $q->where('lifecycle_status', PromptPresetVersion::STATUS_PRODUCTION)->whereNotNull('blueprint_template'))
+                ->orderBy('display_name')
+                ->get(['id', 'display_name']),
         ]);
     }
 
     public function store(StoreContentBriefRequest $request): RedirectResponse
     {
+        $data = $request->validated();
+        $actor = $this->actor($request);
+
+        $presetId = (int) ($data['prompt_preset_id'] ?? 0);
+        if ($presetId > 0) {
+            $preset = PromptPreset::query()->findOrFail($presetId);
+            $brief = $this->quickCreate->create([
+                'topic' => (string) $data['topic'],
+                'core_question' => $data['core_question'] ?? null,
+                'category_id' => $data['category_id'] ?? null,
+                'primary_keyword_id' => $data['primary_keyword_id'] ?? null,
+                'keyword_cluster_id' => $data['keyword_cluster_id'] ?? null,
+                'reference_urls' => $data['reference_urls'] ?? [],
+            ], $preset, $actor);
+
+            return redirect()->route('admin.content-briefs.show', $brief)
+                ->with('message', __('admin.content_strategy.messages.brief_created'));
+        }
+
         $brief = ContentBrief::query()->create([
             ...$request->briefData(),
             'status' => ContentBrief::STATUS_READY,
-            'created_by_admin_id' => $this->actor($request)->id,
+            'created_by_admin_id' => $actor->id,
         ]);
 
         return redirect()->route('admin.content-briefs.strategy', $brief)
