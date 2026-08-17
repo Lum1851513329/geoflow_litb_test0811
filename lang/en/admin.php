@@ -79,6 +79,7 @@ return [
             'preset' => 'Preset', 'preset_key' => 'Preset key', 'display_name' => 'Display name', 'description' => 'Description',
             'current_version' => 'Current version', 'status' => 'Status', 'matching_rules' => 'Matching rules (JSON)',
             'generation_policy' => 'Generation policy (JSON)', 'conflict_policy' => 'Conflict policy (JSON)',
+            'blueprint_template' => 'Blueprint template (JSON, optional)', 'default_brief_fields' => 'Default brief fields (JSON, optional)',
             'change_note' => 'Change note', 'ordered_modules' => 'Ordered exact module versions', 'choose_version' => 'Choose an exact module version', 'search_versions' => 'Search module key or name',
             'required' => 'Required', 'optional' => 'Optional', 'enabled' => 'Enabled', 'system' => 'System preset', 'reason' => 'Required reason',
         ],

@@ -301,6 +301,8 @@ final class PromptPresetController extends Controller
             'matching_rules' => $data['matching_rules'],
             'generation_policy' => $data['generation_policy'],
             'conflict_policy' => $data['conflict_policy'] ?? null,
+            'blueprint_template' => $data['blueprint_template'] ?? null,
+            'default_brief_fields' => $data['default_brief_fields'] ?? null,
             'change_note' => $data['change_note'] ?? null,
         ];
     }

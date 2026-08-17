@@ -148,6 +148,8 @@ final class PromptPresetService
             'matching_rules' => $data['matching_rules'],
             'generation_policy' => $data['generation_policy'],
             'conflict_policy' => $data['conflict_policy'] ?? null,
+            'blueprint_template' => $data['blueprint_template'] ?? null,
+            'default_brief_fields' => $data['default_brief_fields'] ?? null,
             'lifecycle_status' => PromptPresetVersion::STATUS_DRAFT,
             'change_note' => $data['change_note'] ?? null,
             'created_by_admin_id' => $actor->id,

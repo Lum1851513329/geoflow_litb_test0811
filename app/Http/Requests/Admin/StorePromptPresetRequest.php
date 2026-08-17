@@ -42,6 +42,28 @@ final class StorePromptPresetRequest extends FormRequest
             'matching_rules' => ['present', 'array'],
             'generation_policy' => ['present', 'array'],
             'conflict_policy' => ['nullable', 'array'],
+            'blueprint_template' => ['nullable', 'array'],
+            'blueprint_template.target_length' => ['required_with:blueprint_template', 'integer', 'min:1'],
+            'blueprint_template.sections' => ['required_with:blueprint_template', 'array', 'min:1'],
+            'blueprint_template.sections.*.key' => ['required', 'string', 'regex:/^[a-z][a-z0-9-]*$/', 'distinct'],
+            'blueprint_template.sections.*.heading' => ['required', 'string', 'max:200'],
+            'blueprint_template.sections.*.purpose' => ['required', 'string', 'max:500'],
+            'blueprint_template.sections.*.questions_to_answer' => ['required', 'array', 'min:1'],
+            'blueprint_template.sections.*.questions_to_answer.*' => ['required', 'string'],
+            'blueprint_template.sections.*.minimum_words' => ['required', 'integer', 'min:1'],
+            'blueprint_template.sections.*.cta_allowed' => ['required', 'boolean'],
+            'blueprint_template.sections.*.required_fact_ids' => ['nullable', 'array'],
+            'blueprint_template.sections.*.required_fact_ids.*' => ['string', 'regex:/^[A-Za-z0-9][A-Za-z0-9._:-]*$/'],
+            'blueprint_template.required_entities' => ['nullable', 'array'],
+            'blueprint_template.required_entities.*' => ['string'],
+            'blueprint_template.show_references_section' => ['nullable', 'boolean'],
+            'default_brief_fields' => ['nullable', 'array'],
+            'default_brief_fields.market_code' => ['nullable', 'string', 'regex:/^[A-Za-z0-9_-]+$/'],
+            'default_brief_fields.language_code' => ['nullable', 'string', 'regex:/^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{1,8})*$/'],
+            'default_brief_fields.audience' => ['nullable', 'string', 'max:500'],
+            'default_brief_fields.business_goal' => ['nullable', 'string', 'max:500'],
+            'default_brief_fields.content_type' => ['nullable', 'string', 'max:50'],
+            'default_brief_fields.cta_strength' => ['nullable', 'string', 'max:30'],
             'change_note' => ['nullable', 'string', 'max:2000'],
             'module_versions' => ['required', 'array', 'min:1', 'max:100'],
             'module_versions.*.prompt_module_version_id' => [
@@ -55,7 +77,7 @@ final class StorePromptPresetRequest extends FormRequest
     protected function prepareForValidation(): void
     {
         $decoded = [];
-        foreach (['matching_rules', 'generation_policy', 'conflict_policy'] as $field) {
+        foreach (['matching_rules', 'generation_policy', 'conflict_policy', 'blueprint_template', 'default_brief_fields'] as $field) {
             $value = $this->input($field);
             if (! is_string($value)) {
                 continue;
