@@ -32,6 +32,8 @@ final class PromptPresetVersion extends Model
             'matching_rules' => 'array',
             'generation_policy' => 'array',
             'conflict_policy' => 'array',
+            'blueprint_template' => 'array',
+            'default_brief_fields' => 'array',
             'created_by_admin_id' => 'integer',
             'published_at' => 'datetime',
         ];
