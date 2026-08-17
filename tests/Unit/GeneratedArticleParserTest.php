@@ -58,4 +58,28 @@ final class GeneratedArticleParserTest extends TestCase
         $this->assertNull($result['title']);
         $this->assertSame($markdown, $result['content']);
     }
+
+    public function test_extracts_a_title_after_leading_blank_lines(): void
+    {
+        $result = $this->parser->extractTitle("\n\n# How to Choose Running Shoes\n\nBody text.");
+
+        $this->assertSame('How to Choose Running Shoes', $result['title']);
+        $this->assertSame("Body text.", $result['content']);
+    }
+
+    public function test_extracts_title_with_crlf_line_endings(): void
+    {
+        $result = $this->parser->extractTitle("# How to Choose Running Shoes\r\n\r\n## Sizing\r\nBody text.");
+
+        $this->assertSame('How to Choose Running Shoes', $result['title']);
+        $this->assertSame("## Sizing\r\nBody text.", $result['content']);
+    }
+
+    public function test_extracts_title_when_markdown_is_title_only(): void
+    {
+        $result = $this->parser->extractTitle("# Just a Title");
+
+        $this->assertSame('Just a Title', $result['title']);
+        $this->assertSame('', $result['content']);
+    }
 }
