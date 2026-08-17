@@ -14,7 +14,7 @@ final class ContentBriefPolicy
 
     public function view(Admin $admin, ContentBrief $brief): bool
     {
-        return $this->owns($admin, $brief);
+        return $this->owns($admin, $brief) || ($this->isActive($admin) && $brief->task_id !== null);
     }
 
     public function create(Admin $admin): bool

@@ -79,6 +79,12 @@ class GenerateLitbQuarterlyContentCommandTest extends TestCase
 
     public function test_no_active_admin_fails_a_real_batch_without_dispatching(): void
     {
+        // The 2026_08_15_000400 migration permanently seeds an active `geoflow-system`
+        // admin, so a real environment always has at least one active admin now. Disable
+        // it here to still exercise the command's guard for the (now edge-case) scenario
+        // where no active admin exists to attribute the batch to.
+        Admin::query()->where('username', 'geoflow-system')->update(['status' => 'disabled']);
+
         $this->activeModel();
         $this->readyBrief('003', 'faq');
 

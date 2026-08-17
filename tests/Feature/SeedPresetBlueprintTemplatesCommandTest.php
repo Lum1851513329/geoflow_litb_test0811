@@ -17,8 +17,10 @@ final class SeedPresetBlueprintTemplatesCommandTest extends TestCase
 
     public function test_backfills_a_litb_preset_with_blueprint_template_and_title_crafting(): void
     {
-        $actor = Admin::query()->create([
-            'username' => 'geoflow-system',
+        // The 2026_08_15_000400 migration now seeds this row permanently for every
+        // environment (including test DBs, via RefreshDatabase running all migrations),
+        // so reuse it instead of colliding with it on a fresh insert.
+        $actor = Admin::query()->firstOrCreate(['username' => 'geoflow-system'], [
             'password' => bcrypt(bin2hex(random_bytes(32))),
             'role' => 'system',
             'status' => 'active',
@@ -115,8 +117,8 @@ final class SeedPresetBlueprintTemplatesCommandTest extends TestCase
 
     public function test_does_not_touch_the_four_excluded_generic_presets(): void
     {
-        Admin::query()->create([
-            'username' => 'geoflow-system',
+        // See the comment above on firstOrCreate — the migration now seeds this row.
+        Admin::query()->firstOrCreate(['username' => 'geoflow-system'], [
             'password' => bcrypt(bin2hex(random_bytes(32))),
             'role' => 'system',
             'status' => 'active',

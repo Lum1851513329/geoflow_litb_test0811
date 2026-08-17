@@ -15,8 +15,10 @@ final class SeedTitleCraftingPromptModuleCommandTest extends TestCase
 
     public function test_creates_title_crafting_module_and_updates_seo_structure(): void
     {
-        Admin::query()->create([
-            'username' => 'geoflow-system',
+        // The 2026_08_15_000400 migration now seeds this row permanently for every
+        // environment (including test DBs, via RefreshDatabase running all migrations),
+        // so reuse it instead of colliding with it on a fresh insert.
+        Admin::query()->firstOrCreate(['username' => 'geoflow-system'], [
             'password' => bcrypt(bin2hex(random_bytes(32))),
             'role' => 'system',
             'status' => 'active',
@@ -38,8 +40,10 @@ final class SeedTitleCraftingPromptModuleCommandTest extends TestCase
 
     public function test_is_idempotent_on_a_second_run(): void
     {
-        Admin::query()->create([
-            'username' => 'geoflow-system',
+        // The 2026_08_15_000400 migration now seeds this row permanently for every
+        // environment (including test DBs, via RefreshDatabase running all migrations),
+        // so reuse it instead of colliding with it on a fresh insert.
+        Admin::query()->firstOrCreate(['username' => 'geoflow-system'], [
             'password' => bcrypt(bin2hex(random_bytes(32))),
             'role' => 'system',
             'status' => 'active',
