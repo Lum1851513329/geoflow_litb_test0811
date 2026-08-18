@@ -55,19 +55,38 @@ final class BulkContentImportParserTest extends TestCase
 
     public function test_reports_an_error_for_an_unresolvable_site_without_processing_any_row(): void
     {
+        $channel = DistributionChannel::query()->create([
+            'name' => 'LITB Style Blog', 'domain' => 'blog.lightinthebox.com',
+            'endpoint_url' => 'https://blog.lightinthebox.com', 'channel_type' => 'wordpress', 'status' => 'active',
+        ]);
         $preset = PromptPreset::query()->create(['preset_key' => 'litb.geo_category_authority.en', 'display_name' => 'x', 'is_system' => true, 'is_enabled' => true]);
+        $version = PromptPresetVersion::query()->forceCreate([
+            'prompt_preset_id' => $preset->id, 'version' => 1, 'matching_rules' => [], 'generation_policy' => [],
+            'blueprint_template' => ['target_length' => 1800, 'sections' => []],
+            'lifecycle_status' => PromptPresetVersion::STATUS_PRODUCTION,
+        ]);
+        $preset->forceFill(['current_version_id' => $version->id])->save();
         $category = Category::query()->create(['name' => 'Style & Buying Guides', 'slug' => 'style-and-buying-guides']);
         $knowledgeBase = KnowledgeBase::query()->create(['name' => 'KB', 'content' => 'x', 'review_status' => 'reviewed']);
 
+        // Row 3 is unresolvable (unknown site domain). Row 4 would resolve
+        // successfully entirely on its own using the same, valid channel/preset/
+        // category/knowledge_base as row 3 references correctly elsewhere — it
+        // exists here only to prove that a good row sitting alongside a bad row
+        // in the same batch is also rejected, not silently kept. A single-bad-row
+        // fixture can't distinguish "reject the whole batch on any error" (the
+        // correct behavior) from a buggy "drop only the bad row" implementation,
+        // since there'd be no other row available to wrongly survive.
         $path = $this->buildFixture([
-            ['site', 'preset', 'category', 'topic', 'knowledge_base'],
+            ['site', 'preset', 'category', 'topic', 'knowledge_base', 'core_question', 'primary_keyword', 'reference_urls'],
             ['instructions'],
-            ['Unknown Site (nowhere.example.com)', 'x (litb.geo_category_authority.en)', 'Style & Buying Guides', 'Topic', 'KB'],
+            ['Unknown Site (nowhere.example.com)', 'x (litb.geo_category_authority.en)', 'Style & Buying Guides', 'Topic', 'KB', '', '', ''],
+            ['LITB Style Blog (blog.lightinthebox.com)', 'x (litb.geo_category_authority.en)', 'Style & Buying Guides', 'Another Topic', 'KB', '', '', ''],
         ]);
 
         $result = $this->app->make(BulkContentImportParser::class)->parse($path);
 
-        $this->assertSame([], $result['rows']);
+        $this->assertSame([], $result['rows'], 'the good row (row 4) must also be rejected, not kept, when row 3 fails to resolve');
         $this->assertCount(1, $result['errors']);
         $this->assertSame(3, $result['errors'][0]['row']);
     }
