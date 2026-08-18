@@ -19,6 +19,7 @@ use App\Http\Controllers\Admin\ArticleController;
 use App\Http\Controllers\Admin\ArticleEditorAssetController;
 use App\Http\Controllers\Admin\ArticleEditorAssistantController;
 use App\Http\Controllers\Admin\AuthorController;
+use App\Http\Controllers\Admin\BulkContentImportController;
 use App\Http\Controllers\Admin\CategoryController;
 use App\Http\Controllers\Admin\ContentAnalyticsController;
 use App\Http\Controllers\Admin\ContentBriefController;
@@ -210,6 +211,12 @@ Route::prefix($adminPrefix)->name('admin.')->middleware(['admin.locale'])->group
             Route::put('{taskId}', [TaskController::class, 'update'])->name('update');
             Route::get('health-check', [TaskController::class, 'healthCheck'])->name('health');
             Route::post('batch/start', [TaskController::class, 'batchAction'])->name('batch');
+        });
+
+        // 批量导入：上传表格按 站点/内容模板/分类 分组创建任务
+        Route::prefix('bulk-content-import')->name('bulk-content-import.')->group(function () {
+            Route::get('/', [BulkContentImportController::class, 'index'])->name('index');
+            Route::post('/', [BulkContentImportController::class, 'store'])->name('store');
         });
 
         // 分发管理：集中管理外部站点 Agent 与文章分发队列
