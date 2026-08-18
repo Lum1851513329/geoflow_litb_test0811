@@ -22,6 +22,7 @@
         'dashboard' => ['route' => 'admin.dashboard', 'name' => __('admin.nav.dashboard')],
         'analytics' => ['route' => 'admin.analytics', 'name' => __('admin.nav.analytics')],
         'tasks' => ['route' => 'admin.tasks.index', 'name' => __('admin.nav.tasks')],
+        'bulk_content_import' => ['route' => 'admin.bulk-content-import.index', 'name' => __('admin.nav.bulk_content_import')],
         'distribution' => ['route' => 'admin.distribution.index', 'name' => __('admin.nav.distribution')],
         'articles' => ['route' => 'admin.articles.index', 'name' => __('admin.nav.articles')],
         'content_strategy' => ['route' => 'admin.content-briefs.index', 'name' => __('admin.nav.content_strategy')],
@@ -37,6 +38,9 @@
         || !(bool) config('geoflow.modular_prompts_enabled', false)
         || !(bool) config('geoflow.generation_quality_gate_enabled', false)) {
         unset($menu['content_strategy']);
+        // 批量导入的路由与内容策略挂同一组功能开关，开关关闭时路由不存在，
+        // 菜单项也必须一起隐藏，否则 route() 会直接抛错。
+        unset($menu['bulk_content_import']);
     }
     if ($isSuperAdmin) {
         $menu['admin_users'] = ['route' => 'admin.admin-users.index', 'name' => __('admin.nav.admin_users')];
@@ -54,6 +58,9 @@
         'admin.system-updates.backup' => 'dashboard',
         'admin.tasks.create' => 'tasks',
         'admin.tasks.edit' => 'tasks',
+        'admin.bulk-content-import.index' => 'bulk_content_import',
+        'admin.bulk-content-import.store' => 'bulk_content_import',
+        'admin.bulk-content-import.template' => 'bulk_content_import',
         'admin.distribution.index' => 'distribution',
         'admin.distribution.create' => 'distribution',
         'admin.distribution.store' => 'distribution',

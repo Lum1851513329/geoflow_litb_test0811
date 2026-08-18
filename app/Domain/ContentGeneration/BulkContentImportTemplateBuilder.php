@@ -8,6 +8,7 @@ use App\Models\PromptPreset;
 use App\Models\PromptPresetVersion;
 use PhpOffice\PhpSpreadsheet\Cell\DataValidation;
 use PhpOffice\PhpSpreadsheet\Spreadsheet;
+use PhpOffice\PhpSpreadsheet\Worksheet\Worksheet;
 
 final class BulkContentImportTemplateBuilder
 {
@@ -24,9 +25,19 @@ final class BulkContentImportTemplateBuilder
         'reference_urls' => '【选填】参考资料链接，一个单元格内每行一个链接。',
     ];
 
+    /**
+     * 示例行的 `site` 单元格**不能**带任何可解析的尾部括号。
+     * `BulkContentImportParser::resolveByParenthetical()` 只读结尾的 `(...)`，完全忽略
+     * 前缀里的"示例——请删除"提示；此前示例里放的是一个真实存在的渠道域名
+     * `(blog.lightinthebox.com)`，于是在示例中的分类/模板/知识库名称恰好也存在的环境上，
+     * 两行示例会被当成真实数据导入。这里改成一个永远不可能匹配任何渠道 domain 的
+     * 假括号内容，保证 `resolveByParenthetical()` 在任何环境下都返回 null、该行必定
+     * 校验失败。对应回归测试：`BulkContentImportTemplateBuilderTest`
+     * 的模板往返用例（build() → parse() 必须 0 行 + 至少 1 条错误）。
+     */
     private const EXAMPLE_ROWS = [
-        ['示例——请删除后再填真实数据：LITB Style Blog (blog.lightinthebox.com)', 'Category Authority Guide (litb.geo_category_authority.en)', 'Style & Buying Guides', 'How to Choose Running Shoes', 'LITB Product KB', 'What should a first-time buyer check?', 'running shoes', ''],
-        ['示例——请删除后再填真实数据：LITB Style Blog (blog.lightinthebox.com)', 'Category Authority Guide (litb.geo_category_authority.en)', 'Style & Buying Guides', 'Choosing the Right Duvet Cover', 'LITB Product KB', '', 'duvet cover', 'https://example.com/care-guide'],
+        ['示例——请删除后再填真实数据 (示例-请勿使用)', 'Category Authority Guide (litb.geo_category_authority.en)', 'Style & Buying Guides', 'How to Choose Running Shoes', 'LITB Product KB', 'What should a first-time buyer check?', 'running shoes', ''],
+        ['示例——请删除后再填真实数据 (示例-请勿使用)', 'Category Authority Guide (litb.geo_category_authority.en)', 'Style & Buying Guides', 'Choosing the Right Duvet Cover', 'LITB Product KB', '', 'duvet cover', 'https://example.com/care-guide'],
     ];
 
     public function build(): Spreadsheet
@@ -102,10 +113,10 @@ final class BulkContentImportTemplateBuilder
     }
 
     private function addDropdownValidation(
-        \PhpOffice\PhpSpreadsheet\Worksheet\Worksheet $sheet,
+        Worksheet $sheet,
         string $column,
         int $optionCount,
-        \PhpOffice\PhpSpreadsheet\Worksheet\Worksheet $referenceSheet,
+        Worksheet $referenceSheet,
         string $referenceColumn,
         int $referenceCount,
     ): void {

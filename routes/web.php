@@ -147,6 +147,16 @@ Route::prefix($adminPrefix)->name('admin.')->middleware(['admin.locale'])->group
             Route::get('{run}', [ContentGenerationController::class, 'show'])->can('view', 'run')->name('show');
             Route::post('{run}/adopt', [ContentGenerationController::class, 'adopt'])->can('adopt', 'run')->name('adopt');
         });
+        // 批量导入：上传表格按 站点/内容模板/分类 分组创建任务。
+        // 它无条件创建 generation_engine=quality_gated 的任务，因此必须和质量门禁
+        // 流水线的其余部分挂同一组开关：三个开关默认关闭时若不拦截，上传表格会在
+        // `TaskLifecycleService` 里抛出未捕获的 ApiException（裸 500），而不是给出
+        // 一个干净的"功能未启用"响应。
+        Route::prefix('bulk-content-import')->name('bulk-content-import.')->group(function (): void {
+            Route::get('/', [BulkContentImportController::class, 'index'])->name('index');
+            Route::post('/', [BulkContentImportController::class, 'store'])->name('store');
+            Route::get('template', [BulkContentImportController::class, 'template'])->name('template');
+        });
     });
 
     // 后台受保护路由
@@ -211,13 +221,6 @@ Route::prefix($adminPrefix)->name('admin.')->middleware(['admin.locale'])->group
             Route::put('{taskId}', [TaskController::class, 'update'])->name('update');
             Route::get('health-check', [TaskController::class, 'healthCheck'])->name('health');
             Route::post('batch/start', [TaskController::class, 'batchAction'])->name('batch');
-        });
-
-        // 批量导入：上传表格按 站点/内容模板/分类 分组创建任务
-        Route::prefix('bulk-content-import')->name('bulk-content-import.')->group(function () {
-            Route::get('/', [BulkContentImportController::class, 'index'])->name('index');
-            Route::post('/', [BulkContentImportController::class, 'store'])->name('store');
-            Route::get('template', [BulkContentImportController::class, 'template'])->name('template');
         });
 
         // 分发管理：集中管理外部站点 Agent 与文章分发队列

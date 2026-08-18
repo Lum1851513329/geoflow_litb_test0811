@@ -59,6 +59,7 @@ return array_replace_recursive($base, [
     'nav' => [
         'dashboard' => 'Painel',
         'tasks' => 'Tarefas',
+        'bulk_content_import' => 'Importação em massa',
         'articles' => 'Artigos',
         'materials' => 'Ativos de conteúdo',
         'ai_config' => 'Configuração de IA',

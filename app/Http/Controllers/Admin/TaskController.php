@@ -648,7 +648,7 @@ class TaskController extends Controller
         $knowledgeBaseIds = $this->selectedKnowledgeBaseIds($payload);
         $generationEngineIsQualityGated = (string) ($payload['generation_engine'] ?? 'legacy') === 'quality_gated';
 
-        return [
+        $taskData = [
             'name' => (string) $payload['task_name'],
             'title_library_id' => (int) $payload['title_library_id'],
             'image_library_id' => isset($payload['image_library_id']) ? (int) $payload['image_library_id'] : null,
@@ -673,9 +673,20 @@ class TaskController extends Controller
             'model_selection_mode' => (string) ($payload['model_selection_mode'] ?? 'fixed'),
             'auto_keywords' => $request->boolean('auto_keywords') ? 1 : 0,
             'auto_description' => $request->boolean('auto_description') ? 1 : 0,
-            'generation_engine' => (string) ($payload['generation_engine'] ?? 'legacy'),
-            'prompt_preset_id' => $generationEngineIsQualityGated ? (int) $payload['prompt_preset_id'] : null,
         ];
+
+        // generation_engine 只在本次请求真的提交了它时才写进 payload，与上面 prompt_id
+        // 的 isset 守卫同理。质量门禁三开关关闭时，表单根本不渲染引擎选择器，于是编辑
+        // 一个已有的 quality_gated 任务（哪怕只改个名字）也不会提交 generation_engine；
+        // 若在这里无条件补一个 'legacy' 默认值，`TaskLifecycleService::normalizeTaskInput()`
+        // 就会把它当成"用户主动切回 legacy"，顺手把 prompt_preset_id 清空，无声摧毁该
+        // 任务的质量门禁配置。字段缺席时保持缺席，服务层的"未提及即不变"语义才能生效。
+        if (array_key_exists('generation_engine', $payload)) {
+            $taskData['generation_engine'] = (string) $payload['generation_engine'];
+            $taskData['prompt_preset_id'] = $generationEngineIsQualityGated ? (int) $payload['prompt_preset_id'] : null;
+        }
+
+        return $taskData;
     }
 
     /**

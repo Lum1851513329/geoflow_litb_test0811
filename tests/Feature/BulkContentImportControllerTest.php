@@ -10,6 +10,8 @@ use App\Models\KnowledgeBase;
 use App\Models\PromptPreset;
 use App\Models\PromptPresetVersion;
 use App\Models\Task;
+use App\Models\Title;
+use App\Models\TitleLibrary;
 use App\Services\GeoFlow\DistributionOrchestrator;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -44,6 +46,44 @@ final class BulkContentImportControllerTest extends TestCase
                 $table->timestamps();
             });
         }
+    }
+
+    /**
+     * I3: bulk import unconditionally creates `quality_gated` Tasks, so it must sit
+     * behind the same three feature flags as the rest of that pipeline. Previously the
+     * route group carried no `geoflow.feature:*` middleware, so with the flags at their
+     * default `false` an upload threw an uncaught `ApiException` from
+     * `TaskLifecycleService` (a raw 500) instead of being undiscoverable.
+     */
+    public function test_bulk_import_routes_are_hidden_while_the_pipeline_flags_are_disabled(): void
+    {
+        config([
+            'geoflow.content_strategy_enabled' => false,
+            'geoflow.modular_prompts_enabled' => false,
+            'geoflow.generation_quality_gate_enabled' => false,
+        ]);
+        $admin = Admin::query()->create([
+            'username' => 'bulk-import-gate-tester', 'password' => bcrypt(bin2hex(random_bytes(32))),
+            'role' => 'super_admin', 'status' => 'active',
+        ]);
+
+        $this->actingAs($admin, 'admin');
+
+        $this->get($this->adminPath('bulk-content-import'))->assertNotFound();
+        $this->get($this->adminPath('bulk-content-import/template'))->assertNotFound();
+        $this->post($this->adminPath('bulk-content-import'), [])->assertNotFound();
+    }
+
+    /**
+     * Routes are resolved by path here rather than by name: with the feature flags off
+     * the named routes are not registered at all, so `route()` would throw before the
+     * request under test could be made.
+     */
+    private function adminPath(string $path): string
+    {
+        $prefix = trim((string) config('geoflow.admin_base_path', '/geo_admin'), '/');
+
+        return '/'.$prefix.'/'.ltrim($path, '/');
     }
 
     public function test_uploading_a_valid_spreadsheet_creates_one_task_per_group(): void
@@ -185,7 +225,7 @@ final class BulkContentImportControllerTest extends TestCase
         // though group one's Task looked fully created before group two failed, none of it survives.
         $response->assertStatus(500);
         $this->assertSame(0, Task::query()->count(), 'a runtime failure partway through the batch must roll back every group, not just the failing one');
-        $this->assertSame(0, \App\Models\TitleLibrary::query()->count());
-        $this->assertSame(0, \App\Models\Title::query()->count());
+        $this->assertSame(0, TitleLibrary::query()->count());
+        $this->assertSame(0, Title::query()->count());
     }
 }

@@ -113,6 +113,7 @@ return [
         'dashboard' => 'Dashboard',
         'analytics' => 'Growth Center',
         'tasks' => 'Tasks',
+        'bulk_content_import' => 'Bulk import',
         'distribution' => 'Distribution',
         'articles' => 'Content Management',
         'content_strategy' => 'Content Strategy',

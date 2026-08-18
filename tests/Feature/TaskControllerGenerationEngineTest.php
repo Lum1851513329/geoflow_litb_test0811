@@ -6,10 +6,12 @@ use App\Exceptions\ApiException;
 use App\Models\Admin;
 use App\Models\AiModel;
 use App\Models\Category;
+use App\Models\Prompt;
 use App\Models\PromptPreset;
 use App\Models\PromptPresetVersion;
 use App\Models\Task;
 use App\Models\TitleLibrary;
+use App\Services\GeoFlow\DistributionOrchestrator;
 use App\Services\GeoFlow\TaskLifecycleService;
 use App\Support\GeoFlow\ApiKeyCrypto;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -269,5 +271,73 @@ final class TaskControllerGenerationEngineTest extends TestCase
         $task = Task::query()->whereKey($taskId)->firstOrFail();
         $this->assertSame('quality_gated', $task->generation_engine);
         $this->assertSame($preset->id, $task->prompt_preset_id);
+    }
+
+    /**
+     * I5 回归用例：`TaskController::buildTaskPayload()` 之前无条件塞入
+     * `'generation_engine' => $payload['generation_engine'] ?? 'legacy'`。但质量门禁
+     * 三开关关闭时表单根本不渲染引擎选择器，于是对一个已存在的 quality_gated 任务做
+     * 任何编辑（哪怕只是改个名字）都不会提交 generation_engine，控制器却会补一个
+     * 'legacy' 默认值，`normalizeTaskInput()` 随即把 prompt_preset_id 清空——在管理员
+     * 毫无察觉的情况下摧毁该任务的质量门禁配置。
+     *
+     * 这里走真实的 HTTP 编辑路径（而不是直接调服务层），因为出问题的正是控制器那一层。
+     */
+    public function test_editing_a_quality_gated_task_with_the_flags_off_preserves_its_engine_and_preset(): void
+    {
+        config([
+            'geoflow.content_strategy_enabled' => true,
+            'geoflow.modular_prompts_enabled' => true,
+            'geoflow.generation_quality_gate_enabled' => true,
+        ]);
+
+        $admin = $this->makeAdmin('task-engine-tester-i5');
+        $category = Category::query()->create(['name' => '科技资讯', 'slug' => 'tech']);
+        $library = TitleLibrary::query()->create(['name' => 'Test library']);
+        $aiModel = $this->makeAiModel();
+        $preset = $this->makePresetWithProductionBlueprint();
+        $prompt = Prompt::query()->create(['name' => '正文提示词', 'type' => 'content', 'content' => '请写 {{title}}']);
+
+        $created = app(TaskLifecycleService::class)->createTask([
+            'name' => 'Quality gated task', 'title_library_id' => $library->id, 'ai_model_id' => $aiModel->id,
+            'status' => 'paused', 'generation_engine' => 'quality_gated', 'prompt_preset_id' => $preset->id,
+        ]);
+        $taskId = (int) $created['id'];
+
+        // 关掉开关：此时编辑页不再渲染引擎选择器，提交的表单里没有 generation_engine。
+        config([
+            'geoflow.content_strategy_enabled' => false,
+            'geoflow.modular_prompts_enabled' => false,
+            'geoflow.generation_quality_gate_enabled' => false,
+        ]);
+
+        $task = Task::query()->whereKey($taskId)->firstOrFail();
+        $revision = app(DistributionOrchestrator::class)->taskRevision($task);
+
+        $response = $this->actingAs($admin, 'admin')->put(route('admin.tasks.update', ['taskId' => $taskId]), [
+            // 只改名字。generation_engine / prompt_preset_id 都没有出现在提交里，
+            // 与开关关闭时表单的实际提交内容一致。引擎选择器不渲染时，表单退回旧版
+            // “内容配置”区块，因此 prompt_id 会被一并提交（required_unless 规则）。
+            'task_name' => 'Renamed while flags are off',
+            'title_library_id' => $library->id,
+            'prompt_id' => $prompt->id,
+            'ai_model_id' => $aiModel->id,
+            'fixed_category_id' => $category->id,
+            'status' => 'paused',
+            'publish_scope' => 'local_only',
+            'article_limit' => 3,
+            'draft_limit' => 2,
+            'publish_interval' => 60,
+            'category_mode' => 'fixed',
+            'model_selection_mode' => 'fixed',
+            'task_revision' => $revision,
+        ]);
+
+        $response->assertSessionHasNoErrors();
+
+        $task = Task::query()->whereKey($taskId)->firstOrFail();
+        $this->assertSame('Renamed while flags are off', $task->name);
+        $this->assertSame('quality_gated', $task->generation_engine, 'The engine must survive an edit made while the selector was not rendered.');
+        $this->assertSame($preset->id, $task->prompt_preset_id, 'The preset binding must not be silently destroyed.');
     }
 }

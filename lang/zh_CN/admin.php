@@ -86,6 +86,7 @@ return [
         'dashboard' => '首页',
         'analytics' => '增长中心',
         'tasks' => '任务管理',
+        'bulk_content_import' => '批量导入',
         'distribution' => '分发管理',
         'articles' => '内容管理',
         'content_strategy' => '内容策略',
