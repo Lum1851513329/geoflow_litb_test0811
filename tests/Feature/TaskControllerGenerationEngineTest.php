@@ -2,12 +2,15 @@
 
 namespace Tests\Feature;
 
+use App\Exceptions\ApiException;
 use App\Models\Admin;
 use App\Models\AiModel;
 use App\Models\Category;
 use App\Models\PromptPreset;
 use App\Models\PromptPresetVersion;
+use App\Models\Task;
 use App\Models\TitleLibrary;
+use App\Services\GeoFlow\TaskLifecycleService;
 use App\Support\GeoFlow\ApiKeyCrypto;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
@@ -42,6 +45,23 @@ final class TaskControllerGenerationEngineTest extends TestCase
             'api_url' => 'https://api.example.com/v1',
             'status' => 'active',
         ]);
+    }
+
+    /**
+     * 创建一个"current_version_id 已配置且带 blueprint_template 的生产态版本"预设，
+     * 供质量门禁引擎场景使用；quality_gated 校验通过所必需的最小可用预设。
+     */
+    private function makePresetWithProductionBlueprint(string $key = 'test.task-engine'): PromptPreset
+    {
+        $preset = PromptPreset::query()->create(['preset_key' => $key, 'display_name' => 'Test', 'is_system' => false, 'is_enabled' => true]);
+        $version = PromptPresetVersion::query()->forceCreate([
+            'prompt_preset_id' => $preset->id, 'version' => 1, 'matching_rules' => [], 'generation_policy' => [],
+            'blueprint_template' => ['target_length' => 1800, 'sections' => []],
+            'lifecycle_status' => PromptPresetVersion::STATUS_PRODUCTION,
+        ]);
+        $preset->forceFill(['current_version_id' => $version->id])->save();
+
+        return $preset;
     }
 
     public function test_creating_a_quality_gated_task_requires_the_pipeline_to_be_enabled(): void
@@ -110,5 +130,144 @@ final class TaskControllerGenerationEngineTest extends TestCase
         ]);
 
         $response->assertSessionHasErrors('prompt_id');
+    }
+
+    /**
+     * 回归用例：TaskController::store()/update() 并非唯一入口——API 侧
+     * App\Http\Controllers\Api\V1\TaskController::store()/update() 直接调用
+     * TaskLifecycleService::createTask()/updateTask()，且 tasks 相关路由没有挂
+     * EnsureGeoFlowFeatureEnabled 网关。因此 quality_gated 引擎的两项前置条件——
+     * 三个 geoflow.* 流水线开关全部开启、预设有一个带 blueprint_template 的生产态
+     * 当前版本——必须由 TaskLifecycleService::normalizeTaskInput() 自身强制执行，
+     * 不能依赖 TaskController（Blade 后台）层已经做过。这里绕开两个控制器，
+     * 直接调用服务层，模拟"任何拥有 tasks:write scope 的 API 调用方"。
+     */
+    public function test_service_layer_rejects_quality_gated_task_creation_when_pipeline_flags_are_disabled(): void
+    {
+        config([
+            'geoflow.content_strategy_enabled' => false,
+            'geoflow.modular_prompts_enabled' => false,
+            'geoflow.generation_quality_gate_enabled' => false,
+        ]);
+
+        Category::query()->create(['name' => '科技资讯', 'slug' => 'tech']);
+        $library = TitleLibrary::query()->create(['name' => 'Test library']);
+        $aiModel = $this->makeAiModel();
+        // 预设本身完全合格（有生产态版本 + blueprint_template）——用来隔离验证：
+        // 就算预设没问题，流水线开关关闭时服务层依然必须拒绝。
+        $preset = $this->makePresetWithProductionBlueprint();
+
+        $service = app(TaskLifecycleService::class);
+
+        try {
+            $service->createTask([
+                'name' => 'API bypass test', 'title_library_id' => $library->id, 'ai_model_id' => $aiModel->id,
+                'status' => 'paused', 'generation_engine' => 'quality_gated', 'prompt_preset_id' => $preset->id,
+            ]);
+            $this->fail('Expected ApiException was not thrown.');
+        } catch (ApiException $exception) {
+            $this->assertArrayHasKey('generation_engine', $exception->getDetails()['field_errors'] ?? []);
+        }
+
+        $this->assertDatabaseMissing('tasks', ['name' => 'API bypass test']);
+    }
+
+    public function test_service_layer_rejects_quality_gated_task_creation_when_preset_lacks_a_production_blueprint(): void
+    {
+        config([
+            'geoflow.content_strategy_enabled' => true,
+            'geoflow.modular_prompts_enabled' => true,
+            'geoflow.generation_quality_gate_enabled' => true,
+        ]);
+
+        Category::query()->create(['name' => '科技资讯', 'slug' => 'tech']);
+        $library = TitleLibrary::query()->create(['name' => 'Test library']);
+        $aiModel = $this->makeAiModel();
+        // 复现审阅者报告的场景：预设存在，但没有 current_version_id（没有任何版本、
+        // 更没有 blueprint_template）。
+        $presetWithoutVersion = PromptPreset::query()->create([
+            'preset_key' => 'test.task-engine-no-version', 'display_name' => 'No Version', 'is_system' => false, 'is_enabled' => true,
+        ]);
+
+        $service = app(TaskLifecycleService::class);
+
+        try {
+            $service->createTask([
+                'name' => 'API bypass test 2', 'title_library_id' => $library->id, 'ai_model_id' => $aiModel->id,
+                'status' => 'paused', 'generation_engine' => 'quality_gated', 'prompt_preset_id' => $presetWithoutVersion->id,
+            ]);
+            $this->fail('Expected ApiException was not thrown.');
+        } catch (ApiException $exception) {
+            $this->assertArrayHasKey('prompt_preset_id', $exception->getDetails()['field_errors'] ?? []);
+        }
+
+        $this->assertDatabaseMissing('tasks', ['name' => 'API bypass test 2']);
+    }
+
+    /**
+     * 回归用例：局部更新只提交 generation_engine=legacy、不重发 prompt_preset_id，
+     * 之前遗留的预设引用也必须被清空，而不是原样保留在库里。
+     */
+    public function test_switching_a_task_back_to_legacy_via_partial_update_nulls_the_stale_prompt_preset_id(): void
+    {
+        config([
+            'geoflow.content_strategy_enabled' => true,
+            'geoflow.modular_prompts_enabled' => true,
+            'geoflow.generation_quality_gate_enabled' => true,
+        ]);
+
+        Category::query()->create(['name' => '科技资讯', 'slug' => 'tech']);
+        $library = TitleLibrary::query()->create(['name' => 'Test library']);
+        $aiModel = $this->makeAiModel();
+        $preset = $this->makePresetWithProductionBlueprint();
+
+        $service = app(TaskLifecycleService::class);
+        $created = $service->createTask([
+            'name' => 'Stale preset test', 'title_library_id' => $library->id, 'ai_model_id' => $aiModel->id,
+            'status' => 'paused', 'generation_engine' => 'quality_gated', 'prompt_preset_id' => $preset->id,
+        ]);
+        $taskId = (int) $created['id'];
+
+        $this->assertDatabaseHas('tasks', ['id' => $taskId, 'generation_engine' => 'quality_gated', 'prompt_preset_id' => $preset->id]);
+
+        // 局部更新：只切换 generation_engine，故意不重发 prompt_preset_id。
+        $service->updateTask($taskId, ['generation_engine' => 'legacy']);
+
+        $task = Task::query()->whereKey($taskId)->firstOrFail();
+        $this->assertSame('legacy', $task->generation_engine);
+        $this->assertNull($task->prompt_preset_id);
+    }
+
+    /**
+     * 对照用例：完全不提交 generation_engine 的局部更新，不应触碰已存在的
+     * prompt_preset_id——这是"未提及字段即保持不变"的常规局部更新语义,
+     * 用来确认上面的"清空过期引用"修复没有过度触发。
+     */
+    public function test_partial_update_that_never_mentions_generation_engine_leaves_prompt_preset_id_untouched(): void
+    {
+        config([
+            'geoflow.content_strategy_enabled' => true,
+            'geoflow.modular_prompts_enabled' => true,
+            'geoflow.generation_quality_gate_enabled' => true,
+        ]);
+
+        Category::query()->create(['name' => '科技资讯', 'slug' => 'tech']);
+        $library = TitleLibrary::query()->create(['name' => 'Test library']);
+        $aiModel = $this->makeAiModel();
+        $preset = $this->makePresetWithProductionBlueprint();
+
+        $service = app(TaskLifecycleService::class);
+        $created = $service->createTask([
+            'name' => 'Untouched preset test', 'title_library_id' => $library->id, 'ai_model_id' => $aiModel->id,
+            'status' => 'paused', 'generation_engine' => 'quality_gated', 'prompt_preset_id' => $preset->id,
+        ]);
+        $taskId = (int) $created['id'];
+
+        // 局部更新：只改任务名，完全不提 generation_engine。
+        $service->updateTask($taskId, ['name' => 'Renamed']);
+
+        $task = Task::query()->whereKey($taskId)->firstOrFail();
+        $this->assertSame('quality_gated', $task->generation_engine);
+        $this->assertSame($preset->id, $task->prompt_preset_id);
     }
 }

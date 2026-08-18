@@ -11,6 +11,7 @@ use App\Models\ImageLibrary;
 use App\Models\KnowledgeBase;
 use App\Models\Prompt;
 use App\Models\PromptPreset;
+use App\Models\PromptPresetVersion;
 use App\Models\Task;
 use App\Models\TaskRun;
 use App\Models\TaskSchedule;
@@ -445,13 +446,35 @@ class TaskLifecycleService
         }
 
         if ($generationEngine === 'quality_gated') {
+            // 服务层是唯一保证被所有调用方（含 API TaskController，其路由未挂 EnsureGeoFlowFeatureEnabled 网关）
+            // 都会经过的入口，因此这里必须独立重复控制器层已做的两项校验，而不能假设调用方已经做过：
+            // 1) 三个 geoflow.* 流水线开关必须全部开启；
+            // 2) 预设必须有一个 lifecycle_status=production 且已配置 blueprint_template 的当前版本。
+            $pipelineEnabled = (bool) config('geoflow.content_strategy_enabled', false)
+                && (bool) config('geoflow.modular_prompts_enabled', false)
+                && (bool) config('geoflow.generation_quality_gate_enabled', false);
             $presetId = (int) ($data['prompt_preset_id'] ?? 0);
-            if ($presetId <= 0 || ! PromptPreset::query()->whereKey($presetId)->exists()) {
-                $fieldErrors['prompt_preset_id'] = '请选择内容模板';
+            $hasTemplate = $presetId > 0 && PromptPreset::query()
+                ->whereKey($presetId)
+                ->whereHas('currentVersion', fn ($q) => $q->where('lifecycle_status', PromptPresetVersion::STATUS_PRODUCTION)->whereNotNull('blueprint_template'))
+                ->exists();
+
+            if (! $pipelineEnabled) {
+                $fieldErrors['generation_engine'] = '质量门禁生成流水线当前未启用';
+            } elseif (! $hasTemplate) {
+                $fieldErrors['prompt_preset_id'] = '请选择一个已配置内容蓝图模板的预设';
             } else {
                 $output['prompt_preset_id'] = $presetId;
             }
-        } elseif (array_key_exists('prompt_preset_id', $data)) {
+        } elseif (array_key_exists('generation_engine', $data) || ! $isUpdate) {
+            // 只要本次请求确实切换/设置了 generation_engine（创建场景视为总是"设置"），且结果不是
+            // quality_gated，就无条件清空 prompt_preset_id——不能只在调用方恰好也重发了 prompt_preset_id
+            // 时才清空，否则局部更新（只提交 generation_engine=legacy、不重发 prompt_preset_id）会
+            // 在库里留下过期的预设引用。
+            //
+            // 但如果本次更新压根没有提交 generation_engine 字段（纯粹的局部更新，例如只改 task_name），
+            // 则不应触碰 prompt_preset_id——那属于"未提及即不变"的常规局部更新语义，与上面
+            // generation_engine 自身的 array_key_exists 判断保持一致。
             $output['prompt_preset_id'] = null;
         }
 
