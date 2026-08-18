@@ -510,6 +510,27 @@ class WorkerExecutionService
                     ContentGenerationRun::STATUS_MANUAL_REVIEW_REQUIRED,
                 ])
                 ->count();
+
+            // 上面把 needs_evidence / model_quality_failed / manual_review_required
+            // 从草稿池计数里排除，是为了不让它们永久占位（见上方注释）。但这三个
+            // 终态没有自动释放路径，加上 created_count 只在成功采纳后才自增
+            // （见 GenerationAdoptionService::recordTaskGeneration()），两者叠加会让
+            // 一个持续被质量门禁拒绝的任务彻底失去上限：草稿池不再计它、
+            // article_limit 也永远不会触发，调度器每个 tick 都会真实调用一次模型。
+            // 因此这里单独统计"卡在人工处理终态"的 run 数量，一旦达到
+            // draft_limit 就阻断新生成——但不影响已经卡住的 run 被人工在
+            // /content-generations/{run} 采纳，那是另一条独立的处理路径。
+            $parkedForHumanReviewCount = ContentGenerationRun::query()
+                ->whereIn('content_brief_id', ContentBrief::query()->where('task_id', (int) $task->id)->select('id'))
+                ->whereIn('status', [
+                    ContentGenerationRun::STATUS_NEEDS_EVIDENCE,
+                    ContentGenerationRun::STATUS_MODEL_QUALITY_FAILED,
+                    ContentGenerationRun::STATUS_MANUAL_REVIEW_REQUIRED,
+                ])
+                ->count();
+            if ($parkedForHumanReviewCount >= $draftLimit) {
+                return '质量门禁失败过多，等待人工处理';
+            }
         }
 
         if ($draftCount >= $draftLimit) {

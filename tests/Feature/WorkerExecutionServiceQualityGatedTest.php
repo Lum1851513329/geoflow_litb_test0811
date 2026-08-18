@@ -158,14 +158,22 @@ final class WorkerExecutionServiceQualityGatedTest extends TestCase
      * I1: `needs_evidence` / `model_quality_failed` / `manual_review_required` are
      * terminal-until-a-human-acts states with no automated release path. Counting
      * them against `draft_limit` permanently deadlocks the Task.
+     *
+     * `draft_limit` is 2 here (not 1): NEW-1's separate parked-run ceiling (see
+     * test_parked_runs_reaching_draft_limit_block_further_generation below) also
+     * blocks once the parked count *reaches* `draft_limit`, so a single parked run
+     * against `draft_limit=1` would now legitimately hit that ceiling too. Using 2
+     * keeps this test isolated to what it actually asserts — that one parked run
+     * does not occupy the in-flight draft pool — without colliding with the new,
+     * independent "too many parked failures" check.
      */
     #[DataProvider('humanBlockedRunStatuses')]
     public function test_human_blocked_runs_do_not_permanently_occupy_the_draft_pool(string $status): void
     {
         $context = $this->qualityGatedTask();
-        $context['task']->forceFill(['draft_limit' => 1])->save();
+        $context['task']->forceFill(['draft_limit' => 2])->save();
 
-        // First tick produces one run, filling the single draft slot.
+        // First tick produces one run, filling one of the two draft slots.
         $first = $this->app->make(WorkerExecutionService::class)->executeTask((int) $context['task']->id);
         ContentGenerationRun::query()
             ->whereKey($first['meta']['content_generation_run_id'])
@@ -175,7 +183,8 @@ final class WorkerExecutionServiceQualityGatedTest extends TestCase
             'library_id' => $context['library']->id, 'title' => 'A second topic', 'core_question' => 'And?',
         ]);
 
-        // With the run parked in a human-blocked state the slot must be free again.
+        // With the run parked in a human-blocked state the pool slot must be free
+        // again (only 1 parked run, below the draft_limit=2 ceiling either way).
         $second = $this->app->make(WorkerExecutionService::class)->executeTask((int) $context['task']->id);
 
         $this->assertSame('generate_quality_gated_draft', $second['meta']['action']);
@@ -189,6 +198,77 @@ final class WorkerExecutionServiceQualityGatedTest extends TestCase
             'model_quality_failed' => [ContentGenerationRun::STATUS_MODEL_QUALITY_FAILED],
             'manual_review_required' => [ContentGenerationRun::STATUS_MANUAL_REVIEW_REQUIRED],
         ];
+    }
+
+    /**
+     * NEW-1 (re-review of the fix wave): I1 excludes parked (needs_evidence /
+     * model_quality_failed / manual_review_required) runs from the draft-pool count
+     * so they stop deadlocking the Task — correct in isolation. But C2 only
+     * increments `created_count` at successful adoption, so `article_limit` never
+     * trips either. Together, a Task whose runs systematically fail the quality
+     * gate has no bound at all: parked runs free the slot, `created_count` stays 0,
+     * and the scheduler keeps generating forever. This drives `draft_limit`
+     * consecutive runs into `model_quality_failed` and asserts the Task genuinely
+     * stops generating instead of continuing indefinitely.
+     */
+    public function test_parked_runs_reaching_draft_limit_block_further_generation(): void
+    {
+        $context = $this->qualityGatedTask();
+        $context['task']->forceFill(['article_limit' => 1, 'draft_limit' => 1])->save();
+
+        $first = $this->app->make(WorkerExecutionService::class)->executeTask((int) $context['task']->id);
+        ContentGenerationRun::query()
+            ->whereKey($first['meta']['content_generation_run_id'])
+            ->update(['status' => ContentGenerationRun::STATUS_MODEL_QUALITY_FAILED]);
+
+        Title::query()->create([
+            'library_id' => $context['library']->id, 'title' => 'A second topic', 'core_question' => 'And?',
+        ]);
+
+        // With the one parked run already at draft_limit, the scheduler must stop —
+        // not because the draft pool is full (I1 explicitly excludes this status)
+        // and not because article_limit tripped (created_count is still 0), but
+        // because of the new, distinct parked-run ceiling.
+        $second = $this->app->make(WorkerExecutionService::class)->executeTask((int) $context['task']->id);
+
+        $this->assertSame('noop', $second['meta']['action']);
+        $this->assertStringContainsString('质量门禁失败过多', (string) $second['meta']['reason']);
+        $this->assertSame(0, (int) $context['task']->fresh()->created_count);
+        $this->assertSame(1, ContentGenerationRun::query()
+            ->whereIn('content_brief_id', ContentBrief::query()->where('task_id', $context['task']->id)->select('id'))
+            ->count());
+    }
+
+    /**
+     * I6 (re-review of the fix wave): the `:use:{used_count}` component of the
+     * idempotency key exists specifically so a second pass through a looping
+     * Task's title library produces a different key than the first — otherwise
+     * every `is_loop=1` Task would hard-fail its second generation with
+     * `idempotency_configuration_conflict` once it re-picks a title it already
+     * used. A single-pass assertion (see
+     * test_reserves_the_run_with_a_deterministic_idempotency_key above) cannot
+     * catch a regression to the simpler `task:{id}:title:{id}` form the original
+     * finding suggested — that form passes every other test in this file but
+     * breaks every real looping Task after one full pass through its library.
+     */
+    public function test_two_loop_passes_over_a_single_title_produce_distinct_runs_and_keys(): void
+    {
+        $context = $this->qualityGatedTask();
+        $context['task']->forceFill(['is_loop' => 1])->save();
+
+        $first = $this->app->make(WorkerExecutionService::class)->executeTask((int) $context['task']->id);
+        $second = $this->app->make(WorkerExecutionService::class)->executeTask((int) $context['task']->id);
+
+        $this->assertNotSame(
+            $first['meta']['content_generation_run_id'],
+            $second['meta']['content_generation_run_id']
+        );
+
+        $firstRun = ContentGenerationRun::query()->findOrFail($first['meta']['content_generation_run_id']);
+        $secondRun = ContentGenerationRun::query()->findOrFail($second['meta']['content_generation_run_id']);
+
+        $this->assertNotSame($firstRun->idempotency_key, $secondRun->idempotency_key);
+        $this->assertSame(2, (int) $context['title']->fresh()->used_count);
     }
 
     /**
