@@ -16,6 +16,7 @@ use App\Models\PromptPresetVersion;
 use App\Models\Task;
 use App\Models\TitleLibrary;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Log;
 use Tests\TestCase;
 
 final class AdoptTaskDrivenGenerationRunsCommandTest extends TestCase
@@ -115,7 +116,45 @@ final class AdoptTaskDrivenGenerationRunsCommandTest extends TestCase
         $this->assertSame((int) $category->id, $article->category_id);
     }
 
-    private function createReadyForReviewRun(ContentBrief $brief): ContentGenerationRun
+    public function test_does_not_adopt_a_run_whose_output_has_no_leading_h1_title(): void
+    {
+        // The spec forbids silently falling back to another title (e.g. `brief->topic`)
+        // when the AI's markdown doesn't open with a genuine H1 — such a run must be
+        // left for manual review instead of being adopted under a guessed title.
+        Log::spy();
+
+        $systemAdmin = Admin::query()->where('username', 'geoflow-system')->firstOrFail();
+        $author = Author::query()->create(['name' => 'Test Author']);
+        $category = Category::query()->create(['name' => 'Test Category', 'slug' => 'test-category-no-h1']);
+        $library = TitleLibrary::query()->create(['name' => 'Test library']);
+        $task = Task::query()->create([
+            'name' => 'Test task', 'title_library_id' => $library->id, 'status' => 'active',
+            'generation_engine' => 'quality_gated', 'schedule_enabled' => 1,
+            'author_id' => $author->id, 'category_mode' => 'fixed', 'fixed_category_id' => $category->id,
+        ]);
+        $brief = ContentBrief::forceCreate([
+            'topic' => 'Running shoes', 'market_code' => 'US', 'language_code' => 'en', 'audience' => 'x',
+            'core_question' => 'x', 'business_goal' => 'x', 'content_type' => 'x', 'category_id' => $category->id,
+            'status' => ContentBrief::STATUS_STRATEGY_READY, 'created_by_admin_id' => $systemAdmin->id,
+            'task_id' => $task->id,
+        ]);
+        $run = $this->createReadyForReviewRun($brief, "## Some Section\n\nBody text that never opens with an H1.");
+
+        $this->artisan('geoflow:content-strategy:adopt-task-driven-runs')->assertSuccessful();
+
+        $run->refresh();
+        $this->assertSame(ContentGenerationRun::STATUS_READY_FOR_REVIEW, $run->status);
+        $this->assertNull($run->article_id);
+        Log::shouldHaveReceived('warning')
+            ->once()
+            ->with(
+                'Task-driven run reached ready_for_review without a leading H1 title; leaving for manual review',
+                ['content_generation_run_id' => $run->id]
+            );
+        Log::shouldNotHaveReceived('error');
+    }
+
+    private function createReadyForReviewRun(ContentBrief $brief, ?string $rawOutput = null): ContentGenerationRun
     {
         $preset = PromptPreset::query()->create([
             'preset_key' => 'test.adopt-task-driven-runs', 'display_name' => 'Test', 'is_system' => false, 'is_enabled' => true,
@@ -143,7 +182,7 @@ final class AdoptTaskDrivenGenerationRunsCommandTest extends TestCase
             'content_brief_id' => $brief->id, 'strategy_version_id' => $strategy->id, 'blueprint_version_id' => $blueprint->id,
             'preset_version_id' => $presetVersion->id, 'ai_model_id' => $aiModel->id,
             'compiled_prompt' => 'test compiled prompt',
-            'raw_output' => "# How to Choose Running Shoes\n\nBody text about running shoes.",
+            'raw_output' => $rawOutput ?? "# How to Choose Running Shoes\n\nBody text about running shoes.",
             'status' => ContentGenerationRun::STATUS_READY_FOR_REVIEW,
             'idempotency_key' => 'test-'.uniqid('', true),
         ]);
