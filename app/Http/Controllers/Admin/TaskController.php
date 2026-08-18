@@ -11,6 +11,8 @@ use App\Models\DistributionChannel;
 use App\Models\ImageLibrary;
 use App\Models\KnowledgeBase;
 use App\Models\Prompt;
+use App\Models\PromptPreset;
+use App\Models\PromptPresetVersion;
 use App\Models\Task;
 use App\Models\TitleLibrary;
 use App\Services\GeoFlow\DistributionOrchestrator;
@@ -23,6 +25,7 @@ use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Validation\ValidationException;
 use Illuminate\View\View;
 use Throwable;
 
@@ -233,6 +236,8 @@ class TaskController extends Controller
                 'auto_keywords' => (int) ($task['auto_keywords'] ?? 1),
                 'auto_description' => (int) ($task['auto_description'] ?? 1),
                 'publish_scope' => (string) $taskModel->publish_scope,
+                'generation_engine' => (string) ($taskModel->generation_engine ?? 'legacy'),
+                'prompt_preset_id' => (string) (($taskModel->prompt_preset_id ?? '') ?: ''),
                 'distribution_strategy' => (string) ($task['distribution_strategy'] ?? TaskDistributionChannelSelector::STRATEGY_BROADCAST),
                 'distribution_channel_ids' => $this->taskDistributionChannelIds($taskId),
                 'task_revision' => $this->distributionOrchestrator->taskRevision($taskModel),
@@ -431,7 +436,9 @@ class TaskController extends Controller
      *     knowledgeBases: list<array{id:int,name:string}>,
      *     authors: list<array{id:int,name:string}>,
      *     categories: list<array{id:int,name:string}>,
-     *     distributionChannels: list<array{id:int,name:string,domain:string}>
+     *     distributionChannels: list<array{id:int,name:string,domain:string}>,
+     *     qualityGatedPresets: list<array{id:int,name:string}>,
+     *     qualityGatedEngineAvailable: bool
      * }
      */
     private function loadTaskFormOptions(): array
@@ -522,6 +529,18 @@ class TaskController extends Controller
             ])
             ->all();
 
+        // 仅当预设已有一个生产态版本、且已配置内容蓝图模板时，才允许在质量门禁引擎下选用。
+        $qualityGatedPresets = PromptPreset::query()
+            ->whereHas('currentVersion', fn ($q) => $q->where('lifecycle_status', PromptPresetVersion::STATUS_PRODUCTION)->whereNotNull('blueprint_template'))
+            ->orderBy('display_name')
+            ->get(['id', 'display_name'])
+            ->map(static fn (PromptPreset $row): array => ['id' => (int) $row->id, 'name' => (string) $row->display_name])
+            ->all();
+
+        $qualityGatedEngineAvailable = (bool) config('geoflow.content_strategy_enabled', false)
+            && (bool) config('geoflow.modular_prompts_enabled', false)
+            && (bool) config('geoflow.generation_quality_gate_enabled', false);
+
         return [
             'titleLibraries' => $titleLibraries,
             'prompts' => $prompts,
@@ -531,6 +550,8 @@ class TaskController extends Controller
             'authors' => $authors,
             'categories' => $categories,
             'distributionChannels' => $distributionChannels,
+            'qualityGatedPresets' => $qualityGatedPresets,
+            'qualityGatedEngineAvailable' => $qualityGatedEngineAvailable,
         ];
     }
 
@@ -538,7 +559,7 @@ class TaskController extends Controller
      * @return array{
      *     task_name: string,
      *     title_library_id: int,
-     *     prompt_id: int,
+     *     prompt_id: int|null,
      *     ai_model_id: int,
      *     author_id: int|null,
      *     image_library_id: int|null,
@@ -552,15 +573,20 @@ class TaskController extends Controller
      *     publish_interval: int|null,
      *     category_mode: string|null,
      *     model_selection_mode: string|null,
-     *     distribution_strategy: string|null
+     *     distribution_strategy: string|null,
+     *     generation_engine: string|null,
+     *     prompt_preset_id: int|null
      * }
      */
     private function validateTaskForm(Request $request): array
     {
-        return $request->validate([
+        $validated = $request->validate([
             'task_name' => ['required', 'string', 'max:200'],
             'title_library_id' => ['required', 'integer', 'min:1'],
-            'prompt_id' => ['required', 'integer', 'min:1'],
+            // required_if:generation_engine,legacy 无法覆盖 generation_engine 完全缺失（值为 null，不等于字符串 'legacy'）
+            // 的情况——这恰恰是现存请求/表单的默认形态，若用 required_if 会导致遗漏 prompt_id 时不再报错，属于行为回归。
+            // required_unless:generation_engine,quality_gated 才能在 generation_engine 缺失或显式为 legacy 时都要求 prompt_id。
+            'prompt_id' => ['required_unless:generation_engine,quality_gated', 'nullable', 'integer', 'min:1'],
             'ai_model_id' => ['required', 'integer', 'min:1'],
             'author_id' => ['nullable', 'integer', 'min:0'],
             'image_library_id' => ['nullable', 'integer', 'min:1'],
@@ -580,7 +606,32 @@ class TaskController extends Controller
             'distribution_channel_ids' => ['nullable', 'array'],
             'distribution_channel_ids.*' => ['integer', 'min:1'],
             'task_revision' => [$request->routeIs('admin.tasks.update') ? 'required' : 'nullable', 'string', 'size:64'],
+            'generation_engine' => ['nullable', 'string', 'in:legacy,quality_gated'],
+            'prompt_preset_id' => ['nullable', 'integer', 'min:1'],
         ]);
+
+        // 请求层的 in:legacy,quality_gated 规则无法表达"quality_gated 依赖流水线开关与预设选择"这一跨字段约束，
+        // 因此单独做一次后置校验；此处不使用 FormRequest 的 withValidator() 钩子，是因为 validateTaskForm() 只是
+        // 普通方法，直接返回校验后的数组。
+        $generationEngine = (string) ($validated['generation_engine'] ?? 'legacy');
+        if ($generationEngine === 'quality_gated') {
+            $pipelineEnabled = (bool) config('geoflow.content_strategy_enabled', false)
+                && (bool) config('geoflow.modular_prompts_enabled', false)
+                && (bool) config('geoflow.generation_quality_gate_enabled', false);
+            if (! $pipelineEnabled) {
+                throw ValidationException::withMessages(['generation_engine' => '质量门禁生成流水线当前未启用']);
+            }
+            $presetId = (int) ($validated['prompt_preset_id'] ?? 0);
+            $hasTemplate = $presetId > 0 && PromptPreset::query()
+                ->whereKey($presetId)
+                ->whereHas('currentVersion', fn ($q) => $q->where('lifecycle_status', PromptPresetVersion::STATUS_PRODUCTION)->whereNotNull('blueprint_template'))
+                ->exists();
+            if (! $hasTemplate) {
+                throw ValidationException::withMessages(['prompt_preset_id' => '请选择一个已配置内容蓝图模板的预设']);
+            }
+        }
+
+        return $validated;
     }
 
     /**
@@ -595,13 +646,16 @@ class TaskController extends Controller
         }
 
         $knowledgeBaseIds = $this->selectedKnowledgeBaseIds($payload);
+        $generationEngineIsQualityGated = (string) ($payload['generation_engine'] ?? 'legacy') === 'quality_gated';
 
         return [
             'name' => (string) $payload['task_name'],
             'title_library_id' => (int) $payload['title_library_id'],
             'image_library_id' => isset($payload['image_library_id']) ? (int) $payload['image_library_id'] : null,
             'image_count' => (int) ($payload['image_count'] ?? 0),
-            'prompt_id' => (int) $payload['prompt_id'],
+            // prompt_id 现在只在 generation_engine=legacy 时必填（见 validateTaskForm 的 required_if 规则），
+            // quality_gated 场景下表单不会提交它，故此处需 isset 守卫，不能再无条件 (int) 转换。
+            'prompt_id' => isset($payload['prompt_id']) ? (int) $payload['prompt_id'] : null,
             'ai_model_id' => (int) $payload['ai_model_id'],
             'author_id' => isset($payload['author_id']) && (int) $payload['author_id'] > 0 ? (int) $payload['author_id'] : null,
             'knowledge_base_id' => $knowledgeBaseIds[0] ?? null,
@@ -619,6 +673,8 @@ class TaskController extends Controller
             'model_selection_mode' => (string) ($payload['model_selection_mode'] ?? 'fixed'),
             'auto_keywords' => $request->boolean('auto_keywords') ? 1 : 0,
             'auto_description' => $request->boolean('auto_description') ? 1 : 0,
+            'generation_engine' => (string) ($payload['generation_engine'] ?? 'legacy'),
+            'prompt_preset_id' => $generationEngineIsQualityGated ? (int) $payload['prompt_preset_id'] : null,
         ];
     }
 

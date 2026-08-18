@@ -10,6 +10,7 @@ use App\Models\Category;
 use App\Models\ImageLibrary;
 use App\Models\KnowledgeBase;
 use App\Models\Prompt;
+use App\Models\PromptPreset;
 use App\Models\Task;
 use App\Models\TaskRun;
 use App\Models\TaskSchedule;
@@ -98,6 +99,8 @@ class TaskLifecycleService
                 'knowledge_base_id' => $normalized['knowledge_base_id'],
                 'category_mode' => $normalized['category_mode'],
                 'fixed_category_id' => $normalized['fixed_category_id'],
+                'generation_engine' => $normalized['generation_engine'] ?? 'legacy',
+                'prompt_preset_id' => $normalized['prompt_preset_id'] ?? null,
             ]);
 
             $taskId = (int) $task->id;
@@ -430,10 +433,32 @@ class TaskLifecycleService
             $fieldErrors['name'] = '任务名称不能为空';
         }
 
+        // generation_engine 是普通枚举字符串（非外键引用），单独处理；quality_gated 引擎下 prompt_id
+        // 不再必填，改为要求 prompt_preset_id 指向一个已配置内容蓝图模板的预设。
+        $generationEngine = (string) ($data['generation_engine'] ?? 'legacy');
+        if (array_key_exists('generation_engine', $data) || ! $isUpdate) {
+            if (! in_array($generationEngine, ['legacy', 'quality_gated'], true)) {
+                $fieldErrors['generation_engine'] = '生成引擎无效';
+            } else {
+                $output['generation_engine'] = $generationEngine;
+            }
+        }
+
+        if ($generationEngine === 'quality_gated') {
+            $presetId = (int) ($data['prompt_preset_id'] ?? 0);
+            if ($presetId <= 0 || ! PromptPreset::query()->whereKey($presetId)->exists()) {
+                $fieldErrors['prompt_preset_id'] = '请选择内容模板';
+            } else {
+                $output['prompt_preset_id'] = $presetId;
+            }
+        } elseif (array_key_exists('prompt_preset_id', $data)) {
+            $output['prompt_preset_id'] = null;
+        }
+
         $referenceMap = [
             'title_library_id' => ['model' => TitleLibrary::class, 'message' => '选择的标题库不存在', 'required' => ! $isUpdate],
             'image_library_id' => ['model' => ImageLibrary::class, 'message' => '选择的图片库不存在', 'required' => false],
-            'prompt_id' => ['model' => Prompt::class, 'message' => '选择的内容提示词不存在', 'required' => ! $isUpdate, 'prompt_content' => true],
+            'prompt_id' => ['model' => Prompt::class, 'message' => '选择的内容提示词不存在', 'required' => ! $isUpdate && $generationEngine !== 'quality_gated', 'prompt_content' => true],
             'ai_model_id' => ['model' => AiModel::class, 'message' => '选择的AI模型不存在或未激活', 'required' => ! $isUpdate, 'ai_active_chat' => true],
             'author_id' => ['model' => Author::class, 'message' => '选择的作者不存在', 'required' => false],
             'knowledge_base_id' => ['model' => KnowledgeBase::class, 'message' => '选择的知识库不存在', 'required' => false],
