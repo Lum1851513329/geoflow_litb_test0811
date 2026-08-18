@@ -10,10 +10,12 @@ use App\Models\KnowledgeBase;
 use App\Models\PromptPreset;
 use App\Models\PromptPresetVersion;
 use App\Models\Task;
+use App\Services\GeoFlow\DistributionOrchestrator;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Schema;
+use Mockery;
 use PhpOffice\PhpSpreadsheet\Spreadsheet;
 use PhpOffice\PhpSpreadsheet\Writer\Xlsx;
 use Tests\TestCase;
@@ -98,5 +100,92 @@ final class BulkContentImportControllerTest extends TestCase
         $this->assertSame(2, $task->article_limit);
         $this->assertSame(2, $task->titleLibrary->titles()->count());
         $this->assertSame($channel->id, $task->distributionChannels()->first()?->id);
+    }
+
+    /**
+     * import()'s per-group work (TitleLibrary + Task + channel sync) is atomic on its own via the
+     * DB::transaction() inside createTaskForGroup(), but until this test's underlying fix, nothing
+     * wrapped the outer foreach ($groups as ...) loop itself. A runtime failure in a later group
+     * (e.g. DistributionOrchestrator::syncTaskChannels() throwing for reasons the upfront
+     * parse()/conflicts() validation can't foresee, such as a channel becoming unavailable between
+     * upload and processing) would previously leave earlier groups' Tasks permanently committed
+     * even though the request as a whole failed. This proves the fix: with the outer transaction in
+     * place, a failure in the second of two groups rolls back the first group's Task too, so the
+     * whole batch is truly all-or-nothing.
+     */
+    public function test_a_runtime_failure_in_a_later_group_rolls_back_every_group_in_the_batch(): void
+    {
+        config([
+            'geoflow.content_strategy_enabled' => true,
+            'geoflow.modular_prompts_enabled' => true,
+            'geoflow.generation_quality_gate_enabled' => true,
+        ]);
+
+        $admin = Admin::query()->create(['username' => 'bulk-import-atomicity-tester', 'password' => bcrypt(bin2hex(random_bytes(32))), 'role' => 'super_admin', 'status' => 'active']);
+        $channel = DistributionChannel::query()->create([
+            'name' => 'LITB Style Blog', 'domain' => 'blog.lightinthebox.com',
+            'endpoint_url' => 'https://blog.lightinthebox.com', 'channel_type' => 'wordpress', 'status' => 'active',
+        ]);
+        $preset = PromptPreset::query()->create(['preset_key' => 'litb.geo_category_authority.en', 'display_name' => 'Category Authority Guide', 'is_system' => true, 'is_enabled' => true]);
+        $version = PromptPresetVersion::query()->forceCreate([
+            'prompt_preset_id' => $preset->id, 'version' => 1, 'matching_rules' => [], 'generation_policy' => [],
+            'blueprint_template' => ['target_length' => 1800, 'sections' => []],
+            'lifecycle_status' => PromptPresetVersion::STATUS_PRODUCTION,
+        ]);
+        $preset->forceFill(['current_version_id' => $version->id])->save();
+        // Two distinct categories => two distinct groups (groupKey is channel:preset:category), so the
+        // import has to loop at least twice, giving a "second group" for the simulated failure to hit.
+        $categoryOne = Category::query()->create(['name' => 'Style & Buying Guides', 'slug' => 'style-and-buying-guides']);
+        $categoryTwo = Category::query()->create(['name' => 'Product Care', 'slug' => 'product-care']);
+        $knowledgeBase = KnowledgeBase::query()->create(['name' => 'LITB KB', 'content' => 'x', 'review_status' => 'reviewed']);
+        $aiModel = AiModel::query()->create(['name' => 'Test model', 'status' => 'active', 'model_type' => 'chat', 'api_url' => 'https://example.invalid', 'api_key' => 'x', 'model_id' => 'x']);
+
+        // Force the second group's Task creation to fail with a plain runtime error that
+        // parse()/conflicts() could never have caught upfront (they don't call
+        // DistributionOrchestrator at all), simulating e.g. a channel becoming unavailable
+        // mid-batch. The first group's call is left as a no-op success so it reaches the point
+        // of having a real, committed-looking Task before the second group blows up.
+        $callCount = 0;
+        $orchestrator = Mockery::mock(DistributionOrchestrator::class);
+        $orchestrator->shouldReceive('lockTaskChannelSelection')->andReturnNull();
+        $orchestrator->shouldReceive('syncTaskChannels')->twice()->andReturnUsing(function () use (&$callCount): void {
+            $callCount++;
+            if ($callCount === 2) {
+                throw new \RuntimeException('simulated distribution failure for the second group');
+            }
+        });
+        $this->app->instance(DistributionOrchestrator::class, $orchestrator);
+
+        $spreadsheet = new Spreadsheet;
+        $sheet = $spreadsheet->getActiveSheet();
+        $rows = [
+            ['site', 'preset', 'category', 'topic', 'knowledge_base', 'core_question', 'primary_keyword', 'reference_urls'],
+            ['instructions'],
+            ['LITB Style Blog (blog.lightinthebox.com)', 'Category Authority Guide (litb.geo_category_authority.en)', 'Style & Buying Guides', 'Topic One', 'LITB KB', '', '', ''],
+            ['LITB Style Blog (blog.lightinthebox.com)', 'Category Authority Guide (litb.geo_category_authority.en)', 'Product Care', 'Topic Two', 'LITB KB', '', '', ''],
+        ];
+        foreach ($rows as $rowIndex => $row) {
+            foreach ($row as $colIndex => $value) {
+                $sheet->setCellValue([$colIndex + 1, $rowIndex + 1], $value);
+            }
+        }
+        $path = tempnam(sys_get_temp_dir(), 'bulk-import-').'.xlsx';
+        (new Xlsx($spreadsheet))->save($path);
+        $file = new UploadedFile($path, 'import.xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', null, true);
+
+        $response = $this->actingAs($admin, 'admin')->post(route('admin.bulk-content-import.store'), [
+            'spreadsheet' => $file,
+            'ai_model_id' => $aiModel->id,
+            'need_review' => '1',
+        ]);
+
+        // The controller only catches BulkContentImportValidationException, so this uncaught
+        // RuntimeException surfaces as a raw 500 — that UX gap is a separate, known concern (see
+        // the report), but the point of this test is solely the DB-level guarantee below: even
+        // though group one's Task looked fully created before group two failed, none of it survives.
+        $response->assertStatus(500);
+        $this->assertSame(0, Task::query()->count(), 'a runtime failure partway through the batch must roll back every group, not just the failing one');
+        $this->assertSame(0, \App\Models\TitleLibrary::query()->count());
+        $this->assertSame(0, \App\Models\Title::query()->count());
     }
 }

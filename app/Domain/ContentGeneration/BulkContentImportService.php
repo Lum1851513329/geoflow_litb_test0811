@@ -40,11 +40,21 @@ final class BulkContentImportService
             $groups[$row->groupKey()][] = $row;
         }
 
-        $tasksCreated = 0;
-        foreach ($groups as $rowsInGroup) {
-            $this->createTaskForGroup($rowsInGroup, $aiModelId, $needReview, $actor);
-            $tasksCreated++;
-        }
+        // The whole batch must be all-or-nothing: each group's Task+TitleLibrary+channel-sync is already
+        // atomic via its own DB::transaction() inside createTaskForGroup(), but without this outer
+        // transaction a runtime failure in group N (e.g. a category deleted between upload and processing)
+        // would leave groups 1..N-1 committed as real Tasks while import() still throws out to the
+        // controller. Laravel nests DB::transaction() calls as savepoints, so createTaskForGroup()'s own
+        // transaction continues to work unchanged inside this one.
+        $tasksCreated = DB::transaction(function () use ($groups, $aiModelId, $needReview, $actor): int {
+            $tasksCreated = 0;
+            foreach ($groups as $rowsInGroup) {
+                $this->createTaskForGroup($rowsInGroup, $aiModelId, $needReview, $actor);
+                $tasksCreated++;
+            }
+
+            return $tasksCreated;
+        });
 
         return ['tasks_created' => $tasksCreated, 'rows_imported' => count($parsed['rows'])];
     }
