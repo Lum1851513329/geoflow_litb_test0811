@@ -115,6 +115,102 @@ final class SeedPresetBlueprintTemplatesCommandTest extends TestCase
         );
     }
 
+    /**
+     * C4: `PromptPresetService::publish()` calls `MandatoryPromptModuleGuard::assertComplete()`,
+     * which throws for ANY unbound DB-wide mandatory module — not just title_crafting.
+     * Without per-preset error handling, preset N throwing aborted the whole command,
+     * leaving presets 1..N-1 on new published versions and N onward untouched with no
+     * summary of what happened. One bad preset must not block the rest.
+     */
+    public function test_a_preset_that_fails_the_mandatory_module_guard_does_not_block_the_others(): void
+    {
+        $actor = Admin::query()->firstOrCreate(['username' => 'geoflow-system'], [
+            'password' => bcrypt(bin2hex(random_bytes(32))),
+            'role' => 'system',
+            'status' => 'active',
+        ]);
+        $this->seed(PromptCompositionSeeder::class);
+        $this->artisan('geoflow:content-strategy:seed-title-crafting-module')->assertSuccessful();
+
+        // Created first so it is reached first in the command's loop — proving the
+        // presets after it are still processed rather than skipped by an abort.
+        $failing = $this->productionPreset('litb.incomplete_bindings.en', $actor, bindAllMandatoryModules: false);
+        $failingOriginalVersionId = $failing->current_version_id;
+        $healthy = $this->productionPreset('litb.geo_category_authority.en', $actor, bindAllMandatoryModules: true);
+
+        $this->artisan('geoflow:content-strategy:seed-preset-blueprint-templates')
+            ->expectsOutputToContain('litb.incomplete_bindings.en')
+            ->assertFailed();
+
+        // The failing preset is left exactly as it was — no half-applied version.
+        $failing->refresh();
+        $this->assertSame($failingOriginalVersionId, $failing->current_version_id);
+        $this->assertSame(1, $failing->currentVersion->version);
+        $this->assertNull($failing->currentVersion->blueprint_template);
+
+        // The healthy preset was still backfilled despite its sibling failing.
+        $healthy->refresh();
+        $this->assertSame(2, $healthy->currentVersion->version);
+        $this->assertNotNull($healthy->currentVersion->blueprint_template);
+        $titleCraftingVersionId = PromptModule::query()->where('module_key', 'title_crafting')->firstOrFail()->current_version_id;
+        $this->assertTrue(
+            PromptPresetModuleVersion::query()
+                ->where('prompt_preset_version_id', $healthy->currentVersion->id)
+                ->where('prompt_module_version_id', $titleCraftingVersionId)
+                ->exists()
+        );
+    }
+
+    /**
+     * Builds a preset with a production current version. When
+     * `$bindAllMandatoryModules` is false it binds only a single mandatory module, so
+     * `MandatoryPromptModuleGuard::assertComplete()` rejects any attempt to publish a
+     * new version for it.
+     */
+    private function productionPreset(string $presetKey, Admin $actor, bool $bindAllMandatoryModules): PromptPreset
+    {
+        $preset = PromptPreset::query()->create([
+            'preset_key' => $presetKey,
+            'display_name' => $presetKey,
+            'is_system' => true,
+            'is_enabled' => true,
+        ]);
+
+        $mandatoryModules = PromptModule::query()
+            ->where('is_system', true)
+            ->where('is_mandatory', true)
+            ->whereNotNull('current_version_id')
+            ->get();
+        $moduleVersions = $bindAllMandatoryModules
+            ? $mandatoryModules->map(fn (PromptModule $module) => $module->currentVersion)
+            : $mandatoryModules->take(1)->map(fn (PromptModule $module) => $module->currentVersion);
+
+        // Bindings must be inserted while the version is still DRAFT — see the
+        // immutability trigger note in the first test above.
+        $version = PromptPresetVersion::query()->forceCreate([
+            'prompt_preset_id' => $preset->id,
+            'version' => 1,
+            'matching_rules' => [],
+            'generation_policy' => [],
+            'conflict_policy' => null,
+            'lifecycle_status' => PromptPresetVersion::STATUS_DRAFT,
+            'created_by_admin_id' => $actor->id,
+        ]);
+        foreach ($moduleVersions->values() as $index => $moduleVersion) {
+            PromptPresetModuleVersion::query()->create([
+                'prompt_preset_version_id' => $version->id,
+                'prompt_module_version_id' => $moduleVersion->id,
+                'sort_order' => $index + 1,
+                'is_required' => true,
+                'selection_source' => 'system',
+            ]);
+        }
+        $version->forceFill(['lifecycle_status' => PromptPresetVersion::STATUS_PRODUCTION])->save();
+        $preset->forceFill(['current_version_id' => $version->id])->save();
+
+        return $preset->refresh();
+    }
+
     public function test_does_not_touch_the_four_excluded_generic_presets(): void
     {
         // See the comment above on firstOrCreate — the migration now seeds this row.

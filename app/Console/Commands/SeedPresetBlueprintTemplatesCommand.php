@@ -10,7 +10,26 @@ use App\Models\PromptPresetModuleVersion;
 use App\Services\GeoFlow\LitbAssets\LitbQuarterlyBriefCatalog;
 use Illuminate\Console\Command;
 use Illuminate\Support\Str;
+use Throwable;
 
+/**
+ * 上线运行顺序（必须严格遵守，且两条命令要放在同一个维护窗口里连续执行）：
+ *
+ *   1. `geoflow:content-strategy:seed-system-admin`（Task 10）——本命令依赖
+ *      `geoflow-system` 管理员账号存在，否则直接返回 FAILURE。
+ *   2. `geoflow:content-strategy:seed-title-crafting-module`（Task 5）
+ *   3. `geoflow:content-strategy:seed-preset-blueprint-templates`（本命令）
+ *
+ * 第 2 步会把 title_crafting 立刻变成一个全局强制模块，从那一刻起，任何尚未绑定
+ * 它的预设都会在 `MandatoryPromptModuleGuard::assertComplete()` 处失败——也就是说
+ * `reserve()` 会对**既有的**（本次改动之前就在跑的）内容生成流水线整体报错。第 3 步
+ * 正是重新满足该约束的动作。因此两步之间的时间差就是既有流水线的故障窗口：顺序
+ * 颠倒、或第 3 步部分失败而没人看汇总，都会把生产上原本正常的生成流程打断。
+ *
+ * 本命令对每个预设单独兜底，失败不会中断整批；结束时会打印成功/失败数量与逐个
+ * 失败原因，并在存在任何失败时返回 FAILURE——请务必检查退出码与汇总输出，把失败
+ * 的预设补齐后重跑（命令本身幂等，已完成的预设会被跳过）。
+ */
 final class SeedPresetBlueprintTemplatesCommand extends Command
 {
     protected $signature = 'geoflow:content-strategy:seed-preset-blueprint-templates';
@@ -67,11 +86,35 @@ final class SeedPresetBlueprintTemplatesCommand extends Command
             ->whereNotNull('current_version_id')
             ->get();
 
+        // 每个预设单独兜底：`PromptPresetService::publish()` 内部会调用
+        // `MandatoryPromptModuleGuard::assertComplete()`，只要该预设缺任何一个全局
+        // 强制模块（不只是 title_crafting）就会抛 InvalidArgumentException。没有
+        // per-preset try/catch 时，第 N 个预设失败会让整条命令直接中断，留下 1..N-1
+        // 已发布新版本、N 之后原封不动的半吊子状态，而且没有任何汇总说明。
+        // 这里改成"记账并继续"，一个坏预设不再挡住其余预设。
+        $succeeded = 0;
+        $failures = [];
         foreach ($presetsToBackfill as $preset) {
-            $this->backfillPreset($presets, $preset, $titleCraftingVersionId, $pillarSections[$preset->preset_key] ?? null, $actor);
+            try {
+                $this->backfillPreset($presets, $preset, $titleCraftingVersionId, $pillarSections[$preset->preset_key] ?? null, $actor);
+                $succeeded++;
+            } catch (Throwable $exception) {
+                $failures[(string) $preset->preset_key] = $exception->getMessage();
+                $this->error("Failed to backfill {$preset->preset_key}: {$exception->getMessage()}");
+            }
         }
 
-        return self::SUCCESS;
+        $this->info("Backfill summary: {$succeeded} preset(s) succeeded or already up to date, ".count($failures).' failed.');
+        if ($failures === []) {
+            return self::SUCCESS;
+        }
+
+        $this->error('The following presets were left untouched and must be fixed before the quality-gated pipeline can use them:');
+        foreach ($failures as $presetKey => $message) {
+            $this->error("  - {$presetKey}: {$message}");
+        }
+
+        return self::FAILURE;
     }
 
     /** @return array<string, array{blueprint_template: array<string, mixed>, default_brief_fields: array<string, mixed>}> */

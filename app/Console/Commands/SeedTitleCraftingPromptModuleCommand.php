@@ -8,6 +8,22 @@ use App\Models\PromptModule;
 use Illuminate\Console\Command;
 use RuntimeException;
 
+/**
+ * 上线运行顺序（必须严格遵守，且要和下一条命令放在同一个维护窗口里连续执行）：
+ *
+ *   1. `geoflow:content-strategy:seed-system-admin`（Task 10）——本命令依赖
+ *      `geoflow-system` 管理员账号存在，否则直接返回 FAILURE。
+ *   2. `geoflow:content-strategy:seed-title-crafting-module`（本命令）
+ *   3. `geoflow:content-strategy:seed-preset-blueprint-templates`（Task 12）——
+ *      必须紧接着执行，不能拖到下一个窗口。
+ *
+ * 原因：本命令会新增一个 `is_mandatory=true` 的 title_crafting 模块，从执行成功的
+ * 那一刻起它就是全局强制模块。任何还没绑定它的预设都会在
+ * `MandatoryPromptModuleGuard::assertComplete()` 处失败，导致 `reserve()` 对**既有的**
+ * 内容生成流水线整体报错——这不只影响本次新增的质量门禁任务，也会打断改动之前
+ * 就在正常运行的生成流程。第 3 步就是给存量预设补上这个绑定、重新满足约束的动作，
+ * 因此两条命令之间的间隔即为线上故障窗口，必须尽可能短。
+ */
 final class SeedTitleCraftingPromptModuleCommand extends Command
 {
     protected $signature = 'geoflow:content-strategy:seed-title-crafting-module';
