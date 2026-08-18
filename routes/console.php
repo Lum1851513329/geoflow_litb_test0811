@@ -96,6 +96,11 @@ Schedule::command('geoflow:recover-content-generation-dispatches', [
     ->onOneServer()
     ->withoutOverlapping(10);
 
+Schedule::command('geoflow:content-strategy:adopt-task-driven-runs')
+    ->everyMinute()
+    ->onOneServer()
+    ->withoutOverlapping(10);
+
 Schedule::command('geoflow:prune-expired-cache')
     ->hourly()
     ->onOneServer()
