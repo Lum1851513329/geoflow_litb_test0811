@@ -217,6 +217,7 @@ Route::prefix($adminPrefix)->name('admin.')->middleware(['admin.locale'])->group
         Route::prefix('bulk-content-import')->name('bulk-content-import.')->group(function () {
             Route::get('/', [BulkContentImportController::class, 'index'])->name('index');
             Route::post('/', [BulkContentImportController::class, 'store'])->name('store');
+            Route::get('template', [BulkContentImportController::class, 'template'])->name('template');
         });
 
         // 分发管理：集中管理外部站点 Agent 与文章分发队列

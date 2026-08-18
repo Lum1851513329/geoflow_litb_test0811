@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Admin;
 
 use App\Domain\ContentGeneration\BulkContentImportService;
+use App\Domain\ContentGeneration\BulkContentImportTemplateBuilder;
 use App\Domain\ContentGeneration\BulkContentImportValidationException;
 use App\Http\Controllers\Controller;
 use App\Models\Admin;
@@ -10,10 +11,15 @@ use App\Models\AiModel;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\View\View;
+use PhpOffice\PhpSpreadsheet\Writer\Xlsx;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 
 final class BulkContentImportController extends Controller
 {
-    public function __construct(private readonly BulkContentImportService $importer) {}
+    public function __construct(
+        private readonly BulkContentImportService $importer,
+        private readonly BulkContentImportTemplateBuilder $templateBuilder,
+    ) {}
 
     public function index(Request $request): View
     {
@@ -33,6 +39,18 @@ final class BulkContentImportController extends Controller
             'pageTitle' => '批量导入文章任务',
             'activeMenu' => 'tasks',
             'aiModels' => $aiModels,
+        ]);
+    }
+
+    public function template(): StreamedResponse
+    {
+        $spreadsheet = $this->templateBuilder->build();
+        $writer = new Xlsx($spreadsheet);
+
+        return response()->streamDownload(function () use ($writer): void {
+            $writer->save('php://output');
+        }, 'geoflow-bulk-content-import-template.xlsx', [
+            'Content-Type' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         ]);
     }
 
