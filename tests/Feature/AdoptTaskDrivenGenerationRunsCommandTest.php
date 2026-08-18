@@ -154,14 +154,224 @@ final class AdoptTaskDrivenGenerationRunsCommandTest extends TestCase
         Log::shouldNotHaveReceived('error');
     }
 
-    private function createReadyForReviewRun(ContentBrief $brief, ?string $rawOutput = null): ContentGenerationRun
+    /**
+     * C2: only runs that actually became Articles may count against the Task's
+     * `article_limit`. Without this a quality-gated Task never reaches its cap
+     * (`is_loop=1` generates without bound) or never reaches "done" (`is_loop=0`).
+     */
+    public function test_a_successful_adoption_increments_the_tasks_generation_counters(): void
+    {
+        $context = $this->taskDrivenRun(['need_review' => 1, 'publish_interval' => 900]);
+
+        $this->artisan('geoflow:content-strategy:adopt-task-driven-runs')->assertSuccessful();
+
+        $task = $context['task']->fresh();
+        $this->assertSame(1, (int) $task->created_count);
+        $this->assertSame(1, (int) $task->loop_count);
+    }
+
+    /**
+     * C2: `next_publish_at` is seeded on adoption using the legacy path's exact
+     * `max(60, publish_interval ?? 3600)` rule, so the first article respects the
+     * Task's pacing instead of being released immediately.
+     */
+    public function test_adoption_seeds_next_publish_at_when_it_is_null_or_already_due(): void
+    {
+        $context = $this->taskDrivenRun(['need_review' => 1, 'publish_interval' => 900]);
+        $this->assertNull($context['task']->next_publish_at);
+
+        $this->artisan('geoflow:content-strategy:adopt-task-driven-runs')->assertSuccessful();
+
+        $task = $context['task']->fresh();
+        $this->assertNotNull($task->next_publish_at);
+        $this->assertTrue($task->next_publish_at->greaterThan(now()->addSeconds(840)));
+        $this->assertTrue($task->next_publish_at->lessThanOrEqualTo(now()->addSeconds(900)));
+    }
+
+    /**
+     * C2: a future `next_publish_at` is the Task's own pacing decision and must not
+     * be pushed back by an adoption.
+     */
+    public function test_adoption_leaves_a_future_next_publish_at_untouched(): void
+    {
+        $future = now()->addHours(5);
+        $context = $this->taskDrivenRun(['need_review' => 1, 'publish_interval' => 900, 'next_publish_at' => $future]);
+
+        $this->artisan('geoflow:content-strategy:adopt-task-driven-runs')->assertSuccessful();
+
+        $this->assertSame(
+            $future->toDateTimeString(),
+            $context['task']->fresh()->next_publish_at->toDateTimeString()
+        );
+    }
+
+    /**
+     * C3: `GenerationAdoptionService::adopt()` always creates draft/pending (it is
+     * shared with the manual HTTP flow and must not change). A `need_review=0` Task
+     * means zero-touch automation, so the command has to approve the article the same
+     * way the legacy engine does — otherwise `publishDueDraftArticle()`, which only
+     * selects approved/auto_approved, never picks it up and the Task stalls forever.
+     */
+    public function test_a_need_review_zero_task_gets_its_adopted_article_approved(): void
+    {
+        $context = $this->taskDrivenRun(['need_review' => 0]);
+
+        $this->artisan('geoflow:content-strategy:adopt-task-driven-runs')->assertSuccessful();
+
+        $article = Article::query()->findOrFail($context['run']->fresh()->article_id);
+        $this->assertSame('draft', $article->status);
+        $this->assertSame('approved', $article->review_status);
+    }
+
+    /**
+     * C3 (control): `need_review=1` must keep the existing pending behaviour.
+     */
+    public function test_a_need_review_one_task_leaves_its_adopted_article_pending(): void
+    {
+        $context = $this->taskDrivenRun(['need_review' => 1]);
+
+        $this->artisan('geoflow:content-strategy:adopt-task-driven-runs')->assertSuccessful();
+
+        $article = Article::query()->findOrFail($context['run']->fresh()->article_id);
+        $this->assertSame('pending', $article->review_status);
+    }
+
+    /**
+     * I7: `ArticleGeoFlowService` throws `ApiException` (a RuntimeException, unrelated
+     * to DomainException) for validation failures. Catching only DomainException let a
+     * single bad run abort the whole batch, which then re-failed identically every
+     * minute on the scheduler.
+     */
+    public function test_one_failing_run_does_not_abort_the_rest_of_the_batch(): void
+    {
+        Log::spy();
+
+        // An H1 longer than 255 characters makes `ArticleGeoFlowService` throw an
+        // `ApiException` — a RuntimeException subtype with no DomainException in its
+        // ancestry. This run is created first, so it is reached first in the
+        // id-ordered batch; the healthy run after it must still be adopted.
+        $overlongTitle = str_repeat('A very long headline segment ', 12);
+        $this->assertGreaterThan(255, mb_strlen($overlongTitle));
+        $broken = $this->taskDrivenRun(['need_review' => 1], '# '.$overlongTitle."\n\nBody text.");
+        $healthy = $this->taskDrivenRun(['need_review' => 1]);
+
+        $this->artisan('geoflow:content-strategy:adopt-task-driven-runs')->assertSuccessful();
+
+        $this->assertSame(ContentGenerationRun::STATUS_READY_FOR_REVIEW, $broken['run']->fresh()->status);
+        $this->assertSame(ContentGenerationRun::STATUS_ADOPTED, $healthy['run']->fresh()->status);
+        Log::shouldHaveReceived('warning')
+            ->once()
+            ->withArgs(static fn (string $message, array $context): bool => $message === 'Task-driven run could not be auto-adopted'
+                && (int) $context['content_generation_run_id'] === (int) $broken['run']->id);
+    }
+
+    /**
+     * I2: `show_references_section` is read from the Preset version's
+     * `blueprint_template` (never shown to the model), not from the per-brief
+     * blueprint that `PromptCompiler` dumps verbatim into the prompt.
+     */
+    public function test_renders_a_references_section_when_the_preset_enables_it(): void
+    {
+        $context = $this->taskDrivenRun(
+            ['need_review' => 1],
+            null,
+            ['show_references_section' => true],
+            ['https://example.com/a', 'https://example.com/b'],
+        );
+
+        $this->artisan('geoflow:content-strategy:adopt-task-driven-runs')->assertSuccessful();
+
+        $article = Article::query()->findOrFail($context['run']->fresh()->article_id);
+        $this->assertStringContainsString('## References', $article->content);
+        $this->assertStringContainsString('https://example.com/a', $article->content);
+        $this->assertStringContainsString('https://example.com/b', $article->content);
+    }
+
+    /**
+     * I2 (plan's Testing section): a Preset with `show_references_section=false`
+     * never renders a references section even when reference_urls were supplied.
+     */
+    public function test_never_renders_a_references_section_when_the_preset_disables_it(): void
+    {
+        $context = $this->taskDrivenRun(
+            ['need_review' => 1],
+            null,
+            ['show_references_section' => false],
+            ['https://example.com/supplied-but-unused'],
+        );
+
+        $this->artisan('geoflow:content-strategy:adopt-task-driven-runs')->assertSuccessful();
+
+        $article = Article::query()->findOrFail($context['run']->fresh()->article_id);
+        $this->assertStringNotContainsString('## References', $article->content);
+        $this->assertStringNotContainsString('https://example.com/supplied-but-unused', $article->content);
+    }
+
+    /**
+     * I2 (plan's Testing section): per `ReferenceEvidenceFetcher`'s "retained for
+     * citation even on fetch failure" design, the references list renders from the
+     * brief's own `reference_urls` — so a URL that failed to fetch still gets cited.
+     */
+    public function test_a_reference_url_that_failed_to_fetch_still_appears_in_the_references_list(): void
+    {
+        // No evidence rows exist for this run at all, i.e. nothing was fetched
+        // successfully — the URL must still be listed.
+        $context = $this->taskDrivenRun(
+            ['need_review' => 1],
+            null,
+            ['show_references_section' => true],
+            ['https://unreachable.invalid/dead-link'],
+        );
+
+        $this->artisan('geoflow:content-strategy:adopt-task-driven-runs')->assertSuccessful();
+
+        $article = Article::query()->findOrFail($context['run']->fresh()->article_id);
+        $this->assertStringContainsString('https://unreachable.invalid/dead-link', $article->content);
+    }
+
+    /**
+     * @param  array<string, mixed>  $taskAttributes
+     * @param  array<string, mixed>  $blueprintTemplateOverrides
+     * @param  list<string>  $referenceUrls
+     * @return array{task: Task, brief: ContentBrief, run: ContentGenerationRun}
+     */
+    private function taskDrivenRun(
+        array $taskAttributes = [],
+        ?string $rawOutput = null,
+        array $blueprintTemplateOverrides = [],
+        array $referenceUrls = [],
+    ): array {
+        $systemAdmin = Admin::query()->where('username', 'geoflow-system')->firstOrFail();
+        $author = Author::query()->create(['name' => 'Test Author '.uniqid()]);
+        $category = Category::query()->create(['name' => 'Cat '.uniqid(), 'slug' => 'cat-'.uniqid()]);
+        $library = TitleLibrary::query()->create(['name' => 'Test library']);
+        $task = Task::query()->create(array_merge([
+            'name' => 'Test task', 'title_library_id' => $library->id, 'status' => 'active',
+            'generation_engine' => 'quality_gated', 'schedule_enabled' => 1,
+            'author_id' => $author->id, 'category_mode' => 'fixed', 'fixed_category_id' => $category->id,
+        ], $taskAttributes));
+
+        $brief = ContentBrief::forceCreate([
+            'topic' => 'Running shoes', 'market_code' => 'US', 'language_code' => 'en', 'audience' => 'x',
+            'core_question' => 'x', 'business_goal' => 'x', 'content_type' => 'x', 'category_id' => $category->id,
+            'status' => ContentBrief::STATUS_STRATEGY_READY, 'created_by_admin_id' => $systemAdmin->id,
+            'task_id' => $task->id, 'reference_urls' => $referenceUrls,
+        ]);
+
+        $run = $this->createReadyForReviewRun($brief, $rawOutput, $blueprintTemplateOverrides);
+
+        return ['task' => $task, 'brief' => $brief, 'run' => $run];
+    }
+
+    /** @param array<string, mixed> $blueprintTemplateOverrides */
+    private function createReadyForReviewRun(ContentBrief $brief, ?string $rawOutput = null, array $blueprintTemplateOverrides = []): ContentGenerationRun
     {
         $preset = PromptPreset::query()->create([
-            'preset_key' => 'test.adopt-task-driven-runs', 'display_name' => 'Test', 'is_system' => false, 'is_enabled' => true,
+            'preset_key' => 'test.adopt-task-driven-runs-'.uniqid(), 'display_name' => 'Test', 'is_system' => false, 'is_enabled' => true,
         ]);
         $presetVersion = PromptPresetVersion::query()->forceCreate([
             'prompt_preset_id' => $preset->id, 'version' => 1, 'matching_rules' => [], 'generation_policy' => [],
-            'blueprint_template' => ['target_length' => 100, 'sections' => []],
+            'blueprint_template' => array_merge(['target_length' => 100, 'sections' => []], $blueprintTemplateOverrides),
             'lifecycle_status' => PromptPresetVersion::STATUS_PRODUCTION,
         ]);
         $aiModel = AiModel::query()->create([

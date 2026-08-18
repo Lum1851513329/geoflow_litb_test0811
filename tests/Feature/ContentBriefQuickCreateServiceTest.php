@@ -91,6 +91,59 @@ final class ContentBriefQuickCreateServiceTest extends TestCase
         $this->assertStringNotContainsString('{{', json_encode($blueprint->blueprint), 'No unresolved template placeholders may remain in the instantiated blueprint.');
     }
 
+    /**
+     * I2: `PromptCompiler::render()` dumps the per-brief blueprint verbatim into the
+     * compiled prompt as CONTENT BLUEPRINT. A raw `"show_references_section": true`
+     * key with no explanation, alongside an EVIDENCE block full of source_urls, makes
+     * models write their own `## References` heading — an (N+1)th top-level section
+     * that trips the position-based gate's `section_count_mismatch` check. The flag is
+     * an editorial toggle consumed at adoption time, so it must never reach the model.
+     */
+    public function test_show_references_section_never_reaches_the_model_facing_blueprint(): void
+    {
+        $actor = Admin::query()->create([
+            'username' => 'quick-create-tester-3',
+            'password' => bcrypt(bin2hex(random_bytes(32))),
+            'role' => 'admin',
+            'status' => 'active',
+        ]);
+        $preset = PromptPreset::query()->create([
+            'preset_key' => 'test.quick-create-references',
+            'display_name' => 'References preset',
+            'is_system' => false,
+            'is_enabled' => true,
+        ]);
+        $version = PromptPresetVersion::query()->forceCreate([
+            'prompt_preset_id' => $preset->id,
+            'version' => 1,
+            'matching_rules' => [],
+            'generation_policy' => [],
+            'blueprint_template' => [
+                'target_length' => 1800,
+                'sections' => [[
+                    'key' => 'answer', 'heading' => 'Direct answer', 'purpose' => 'Answer it.',
+                    'questions_to_answer' => ['{{core_question}}'], 'minimum_words' => 200,
+                    'cta_allowed' => false, 'required_fact_ids' => [],
+                ]],
+                'required_entities' => [],
+                // Explicitly ON, so a naive copy would definitely surface it.
+                'show_references_section' => true,
+            ],
+            'lifecycle_status' => PromptPresetVersion::STATUS_PRODUCTION,
+        ]);
+        $preset->forceFill(['current_version_id' => $version->id])->save();
+
+        $service = $this->app->make(ContentBriefQuickCreateService::class);
+        $brief = $service->create(['topic' => 'Choosing a duvet cover'], $preset, $actor);
+
+        $blueprint = $brief->blueprintVersions()->firstOrFail()->blueprint;
+
+        $this->assertArrayNotHasKey('show_references_section', $blueprint);
+        $this->assertStringNotContainsString('show_references_section', json_encode($blueprint));
+        // The preset's own template remains the authoritative source of the flag.
+        $this->assertTrue((bool) $preset->currentVersion->blueprint_template['show_references_section']);
+    }
+
     public function test_rejects_a_preset_without_a_blueprint_template(): void
     {
         $actor = Admin::query()->create([

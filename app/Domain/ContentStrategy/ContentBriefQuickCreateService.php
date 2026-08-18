@@ -96,6 +96,14 @@ final class ContentBriefQuickCreateService
     }
 
     /**
+     * 注意：`show_references_section` 刻意**不**复制进 per-brief blueprint。
+     * `PromptCompiler::render()` 会把这份 blueprint 整体 dump 成提示词里的
+     * CONTENT BLUEPRINT 段落，模型因此会看到一个毫无上下文的
+     * `"show_references_section": true` 键；配合 EVIDENCE 段落里的 source_url，
+     * 模型时常会自行补写一个 `## References` 标题，多出的顶层小节会直接触发
+     * 质量门禁按位置比对的 `section_count_mismatch`。这个开关纯属编辑侧配置，
+     * 消费方（采纳时渲染引用列表）应当直接读 Preset 版本的 `blueprint_template`。
+     *
      * @param  array<string, mixed>  $template
      * @return array<string, mixed>
      */
@@ -119,7 +127,6 @@ final class ContentBriefQuickCreateService
             'seo_title' => mb_substr($topic.' | LightInTheBox', 0, 60),
             'meta_description' => mb_substr($coreQuestion, 0, 155),
             'schema_types' => ['Article'],
-            'show_references_section' => (bool) ($template['show_references_section'] ?? false),
         ];
     }
 }
