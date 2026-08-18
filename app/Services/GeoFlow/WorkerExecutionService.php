@@ -37,6 +37,12 @@ use Throwable;
 class WorkerExecutionService
 {
     /**
+     * 单个知识库最多取多少条已审核 chunk 作为证据，与
+     * `LitbQuarterlyGenerationCoordinator::MAX_EVIDENCE_CHUNKS_PER_GROUP` 保持一致。
+     */
+    private const MAX_EVIDENCE_CHUNKS_PER_KNOWLEDGE_BASE = 6;
+
+    /**
      * 复用正文提示词和模型调用服务，确保任务生成与单篇生成规则一致。
      */
     public function __construct(
@@ -237,34 +243,52 @@ class WorkerExecutionService
             throw new RuntimeException('系统管理员账户不存在，请先运行 geoflow:content-strategy:seed-system-admin');
         }
 
-        $referenceUrls = (array) ($titleRow->reference_urls ?? []);
-        $fetchedReferences = $referenceUrls !== [] ? $this->referenceEvidenceFetcher->fetch($referenceUrls) : [];
-
-        $brief = $this->briefQuickCreateService->create([
-            'topic' => (string) $titleRow->title,
-            'core_question' => $titleRow->core_question,
-            'category_id' => $category?->id,
-            'reference_urls' => $referenceUrls,
-            'task_id' => (int) $task->id,
-        ], $preset, $systemAdmin);
-
-        $strategyVersion = $brief->strategyVersions()->latest('version')->firstOrFail();
-        $blueprintVersion = $brief->blueprintVersions()->latest('version')->firstOrFail();
         $presetVersion = $preset->currentVersion;
         if ($presetVersion === null) {
             throw new RuntimeException('任务配置的内容模板没有可用版本');
         }
 
-        $reservation = $this->generationRequests->reserve($brief, [
-            'strategy_version_id' => $strategyVersion->id,
-            'blueprint_version_id' => $blueprintVersion->id,
-            'preset_version_id' => $presetVersion->id,
-            'ai_model_id' => (int) $task->ai_model_id,
-            'evidence' => $this->mapFetchedReferencesToEvidence($fetchedReferences),
-        ], $systemAdmin);
+        $referenceUrls = (array) ($titleRow->reference_urls ?? []);
+        $fetchedReferences = $referenceUrls !== [] ? $this->referenceEvidenceFetcher->fetch($referenceUrls) : [];
+        $knowledgeChunkIds = $this->resolveReviewedKnowledgeChunkIds($task);
 
-        Title::query()->whereKey($titleRow->id)->increment('used_count');
-        Title::query()->whereKey($titleRow->id)->increment('usage_count');
+        // Brief/Strategy/Blueprint 与 run 预约必须在同一个事务内提交：
+        // `ContentBriefQuickCreateService::create()` 自带事务并会立刻提交三张表，
+        // 而 `reserve()` 可能因模型停用、预设不合格、证据被拒等原因抛错。若不共用
+        // 事务，失败时这三行会被永久遗留成孤儿数据，而 Title.used_count 又只在
+        // reserve() 成功后才自增，于是下一个调度周期会挑中同一个标题、再造一批
+        // 孤儿数据，在配置错误的任务上每分钟重复一次。
+        [$brief, $reservation] = DB::transaction(function () use ($task, $titleRow, $category, $referenceUrls, $fetchedReferences, $knowledgeChunkIds, $preset, $presetVersion, $systemAdmin): array {
+            $brief = $this->briefQuickCreateService->create([
+                'topic' => (string) $titleRow->title,
+                'core_question' => $titleRow->core_question,
+                'category_id' => $category?->id,
+                'reference_urls' => $referenceUrls,
+                'task_id' => (int) $task->id,
+            ], $preset, $systemAdmin);
+
+            $strategyVersion = $brief->strategyVersions()->latest('version')->firstOrFail();
+            $blueprintVersion = $brief->blueprintVersions()->latest('version')->firstOrFail();
+
+            $reservation = $this->generationRequests->reserve($brief, [
+                'strategy_version_id' => $strategyVersion->id,
+                'blueprint_version_id' => $blueprintVersion->id,
+                'preset_version_id' => $presetVersion->id,
+                'ai_model_id' => (int) $task->ai_model_id,
+                'evidence' => $this->mapFetchedReferencesToEvidence($fetchedReferences),
+                // 任务的知识库证据必须和手工流程一样喂给 run，否则质量门禁任务
+                // 会在"只准使用已审核证据"的模块约束下生成无据可依的正文。
+                'knowledge_chunk_ids' => $knowledgeChunkIds,
+                'idempotency_key' => $this->buildReservationIdempotencyKey($task, $titleRow),
+            ], $systemAdmin);
+
+            // 计数自增随预约一起提交：整体回滚时标题不会被平白消耗，提交后
+            // used_count 已经变化，重试的调度会挑到下一个标题而不是重复本次预约。
+            Title::query()->whereKey($titleRow->id)->increment('used_count');
+            Title::query()->whereKey($titleRow->id)->increment('usage_count');
+
+            return [$brief, $reservation];
+        });
 
         return [
             'article_id' => null,
@@ -278,6 +302,62 @@ class WorkerExecutionService
                 'content_generation_run_id' => (int) $reservation['run']->id,
             ],
         ];
+    }
+
+    /**
+     * 解析任务绑定知识库下的已审核 KnowledgeChunk id，作为 run 的证据来源。
+     *
+     * 与 `LitbQuarterlyGenerationCoordinator::reviewedEvidenceFor()` 保持同一套约定：
+     * 只取 `knowledge_bases.review_status = 'reviewed'` 的知识库、按 id 升序、每个
+     * 知识库最多取 self::MAX_EVIDENCE_CHUNKS_PER_KNOWLEDGE_BASE 条，最终去重。
+     * 区别在于那里"某个证据组一条都取不到"要整体判定为 needs_evidence，而任务侧
+     * 的知识库属于可选增强（任务也可能压根没绑定知识库），因此这里取不到就返回
+     * 空数组交给质量门禁判断，而不是在这里阻断整次生成。
+     *
+     * @return list<int>
+     */
+    private function resolveReviewedKnowledgeChunkIds(Task $task): array
+    {
+        $knowledgeBaseIds = $this->resolveTaskKnowledgeBaseIds($task);
+        if ($knowledgeBaseIds === []) {
+            return [];
+        }
+
+        $chunkIds = [];
+        foreach ($knowledgeBaseIds as $knowledgeBaseId) {
+            $ids = KnowledgeChunk::query()
+                ->where('knowledge_base_id', $knowledgeBaseId)
+                ->whereHas('knowledgeBase', function ($query): void {
+                    $query->where('review_status', 'reviewed');
+                })
+                ->orderBy('id')
+                ->limit(self::MAX_EVIDENCE_CHUNKS_PER_KNOWLEDGE_BASE)
+                ->pluck('id');
+            foreach ($ids as $id) {
+                $chunkIds[(int) $id] = true;
+            }
+        }
+
+        return array_keys($chunkIds);
+    }
+
+    /**
+     * 预约用的幂等键：同一任务 + 同一标题 + 同一次使用，重复调用会命中
+     * `ContentGenerationRequestService::reserve()` 已有的重放逻辑，返回既有 run
+     * 而不是再建一条，从而关闭"队列任务重试导致重复 run"的窗口。
+     *
+     * 必须带上 used_count：`reserve()` 的重放校验会比对 fingerprint（含
+     * content_brief_id），而循环任务（is_loop=1）会在标题库轮完一圈后再次挑到
+     * 同一个标题并创建一个**新的** Brief。若键里只有 task+title，那次合法的二次
+     * 生成会被判成 idempotency_configuration_conflict 而直接失败。used_count 只在
+     * 预约成功的同一个事务里自增，因此重试窗口内它保持不变（键稳定、正确去重），
+     * 而下一轮循环时它已经变化（键不同、允许重新生成）。
+     */
+    private function buildReservationIdempotencyKey(Task $task, Title $titleRow): string
+    {
+        return 'task:'.(int) $task->id
+            .':title:'.(int) $titleRow->id
+            .':use:'.(int) ($titleRow->used_count ?? 0);
     }
 
     /**
@@ -415,9 +495,20 @@ class WorkerExecutionService
         if ((string) ($task->generation_engine ?? 'legacy') === 'quality_gated') {
             // 质量门禁任务在 run 被采纳前不会创建 Article，需要把进行中的 run 也计入草稿池，
             // 否则会在 run 处于 pending/generating/待审时放任任务超量生成。
+            //
+            // 但只统计"确实还在流转"的状态：needs_evidence / model_quality_failed /
+            // manual_review_required 按设计是等人处理的终态，没有任何自动释放路径，
+            // 一旦攒够 draft_limit 条就会把任务永久锁死。人在 /content-generations/{run}
+            // 里处理掉（手工采纳等）会让它转入真正的终态，槽位自然释放。
             $draftCount += ContentGenerationRun::query()
                 ->whereIn('content_brief_id', ContentBrief::query()->where('task_id', (int) $task->id)->select('id'))
-                ->whereNotIn('status', [ContentGenerationRun::STATUS_ADOPTED, ContentGenerationRun::STATUS_FAILED])
+                ->whereNotIn('status', [
+                    ContentGenerationRun::STATUS_ADOPTED,
+                    ContentGenerationRun::STATUS_FAILED,
+                    ContentGenerationRun::STATUS_NEEDS_EVIDENCE,
+                    ContentGenerationRun::STATUS_MODEL_QUALITY_FAILED,
+                    ContentGenerationRun::STATUS_MANUAL_REVIEW_REQUIRED,
+                ])
                 ->count();
         }
 
