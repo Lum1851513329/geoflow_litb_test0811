@@ -45,6 +45,18 @@ class KnowledgeBase extends Model
         'brand_id',
         'site_id',
         'primary_directory_id',
+        'canonical_document_key',
+        'language_code',
+        'authority_level',
+        'retrieved_at',
+        'review_due_at',
+        'version_label',
+        'lifecycle_status',
+        'generation_eligible',
+        'citation_required',
+        'normalized_content_hash',
+        'source_file_path',
+        'source_file_hash',
     ];
 
     protected function casts(): array
@@ -61,6 +73,10 @@ class KnowledgeBase extends Model
             'brand_id' => 'integer',
             'site_id' => 'integer',
             'primary_directory_id' => 'integer',
+            'retrieved_at' => 'datetime',
+            'review_due_at' => 'date',
+            'generation_eligible' => 'boolean',
+            'citation_required' => 'boolean',
         ];
     }
 
@@ -96,5 +112,20 @@ class KnowledgeBase extends Model
             ->withTimestamps()
             ->orderByPivot('sort_order')
             ->orderBy('tasks.id');
+    }
+
+    public function canonicalImportRows(): HasMany
+    {
+        return $this->hasMany(KnowledgeImportRow::class, 'canonical_document_id');
+    }
+
+    public function duplicateAuditRows(): HasMany
+    {
+        return $this->hasMany(KnowledgeDuplicate::class, 'duplicate_document_id');
+    }
+
+    public function canonicalDuplicateAuditRows(): HasMany
+    {
+        return $this->hasMany(KnowledgeDuplicate::class, 'canonical_document_id');
     }
 }
