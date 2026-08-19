@@ -97,6 +97,7 @@ return new class extends Migration
             $table->index(['canonical_document_id', 'duplicate_kind'], 'knowledge_duplicates_canonical_kind_index');
             $table->index('duplicate_document_id', 'knowledge_duplicates_duplicate_document_index');
         });
+
     }
 
     public function down(): void
@@ -140,4 +141,5 @@ SQL);
     {
         DB::statement('DROP INDEX IF EXISTS '.self::ACTIVE_CONTENT_HASH_INDEX);
     }
+
 };

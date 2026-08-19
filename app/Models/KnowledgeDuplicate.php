@@ -8,6 +8,8 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 class KnowledgeDuplicate extends Model
 {
     protected $fillable = [
+        'brand_id',
+        'site_id',
         'import_batch_id',
         'import_row_id',
         'duplicate_document_id',
@@ -21,6 +23,8 @@ class KnowledgeDuplicate extends Model
     protected function casts(): array
     {
         return [
+            'brand_id' => 'integer',
+            'site_id' => 'integer',
             'import_batch_id' => 'integer',
             'import_row_id' => 'integer',
             'duplicate_document_id' => 'integer',

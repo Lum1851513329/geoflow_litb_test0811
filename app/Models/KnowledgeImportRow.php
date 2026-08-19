@@ -9,6 +9,8 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 class KnowledgeImportRow extends Model
 {
     protected $fillable = [
+        'brand_id',
+        'site_id',
         'batch_id',
         'row_number',
         'staged_payload',
@@ -24,6 +26,8 @@ class KnowledgeImportRow extends Model
     protected function casts(): array
     {
         return [
+            'brand_id' => 'integer',
+            'site_id' => 'integer',
             'batch_id' => 'integer',
             'row_number' => 'integer',
             'staged_payload' => 'array',

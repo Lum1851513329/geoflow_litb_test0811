@@ -56,6 +56,8 @@ final class KnowledgeGovernanceSchemaTest extends TestCase
             'source_checksum' => str_repeat('b', 64),
         ]);
         $row = KnowledgeImportRow::query()->create([
+            'brand_id' => $brandId,
+            'site_id' => $siteId,
             'batch_id' => $batch->id,
             'row_number' => 1,
             'staged_payload' => ['source_file' => 'company.txt'],
@@ -67,6 +69,8 @@ final class KnowledgeGovernanceSchemaTest extends TestCase
             'rollback_metadata' => ['discarded_document_id' => $duplicateDocument->id],
         ]);
         $audit = KnowledgeDuplicate::query()->create([
+            'brand_id' => $brandId,
+            'site_id' => $siteId,
             'import_batch_id' => $batch->id,
             'duplicate_document_id' => $duplicateDocument->id,
             'canonical_document_id' => $canonicalDocument->id,
@@ -85,6 +89,108 @@ final class KnowledgeGovernanceSchemaTest extends TestCase
         ]);
         $this->assertSame(['source_file' => 'company.txt'], $row->refresh()->staged_payload);
         $this->assertSame($canonicalDocument->id, $row->canonicalDocument->id);
+    }
+
+    public function test_import_row_rejects_a_canonical_document_from_another_brand(): void
+    {
+        $scope = $this->scopedOwnership();
+        $batch = $this->createBatch($scope['brand_a'], $scope['site_a']);
+        $otherBrandDocument = $this->createDocument(
+            $scope['brand_b'],
+            $scope['site_b'],
+            $scope['directory_b'],
+            'pt',
+            'other-brand-content',
+        );
+
+        $this->expectException(QueryException::class);
+
+        KnowledgeImportRow::query()->create([
+            'brand_id' => $scope['brand_a'],
+            'site_id' => $scope['site_a'],
+            'batch_id' => $batch->id,
+            'row_number' => 1,
+            'staged_payload' => ['source_file' => 'other-brand.md'],
+            'canonical_document_id' => $otherBrandDocument->id,
+        ]);
+    }
+
+    public function test_import_row_rejects_a_canonical_document_from_another_site(): void
+    {
+        $scope = $this->scopedOwnership();
+        $batch = $this->createBatch($scope['brand_a'], $scope['site_a']);
+        $otherSiteDocument = $this->createDocument(
+            $scope['brand_a'],
+            $scope['site_a_secondary'],
+            $scope['directory_a'],
+            'pt',
+            'other-site-content',
+        );
+
+        $this->expectException(QueryException::class);
+
+        KnowledgeImportRow::query()->create([
+            'brand_id' => $scope['brand_a'],
+            'site_id' => $scope['site_a'],
+            'batch_id' => $batch->id,
+            'row_number' => 1,
+            'staged_payload' => ['source_file' => 'other-site.md'],
+            'canonical_document_id' => $otherSiteDocument->id,
+        ]);
+    }
+
+    public function test_duplicate_audit_rejects_a_document_from_another_brand_or_site(): void
+    {
+        $scope = $this->scopedOwnership();
+        $batch = $this->createBatch($scope['brand_a'], $scope['site_a']);
+        $canonicalDocument = $this->createDocument(
+            $scope['brand_a'],
+            $scope['site_a'],
+            $scope['directory_a'],
+            'pt',
+            'canonical-content',
+        );
+        $otherBrandDocument = $this->createDocument(
+            $scope['brand_b'],
+            $scope['site_b'],
+            $scope['directory_b'],
+            'pt',
+            'other-brand-content',
+        );
+        $otherSiteDocument = $this->createDocument(
+            $scope['brand_a'],
+            $scope['site_a_secondary'],
+            $scope['directory_a'],
+            'pt',
+            'other-site-content',
+        );
+
+        $this->assertDuplicateAuditDocumentScopeRejected($batch, $canonicalDocument, $otherBrandDocument);
+        $this->assertDuplicateAuditDocumentScopeRejected($batch, $canonicalDocument, $otherSiteDocument);
+    }
+
+    public function test_duplicate_audit_rejects_an_import_row_from_another_batch(): void
+    {
+        $scope = $this->scopedOwnership();
+        $firstBatch = $this->createBatch($scope['brand_a'], $scope['site_a']);
+        $secondBatch = $this->createBatch($scope['brand_a'], $scope['site_a']);
+        $row = KnowledgeImportRow::query()->create([
+            'brand_id' => $scope['brand_a'],
+            'site_id' => $scope['site_a'],
+            'batch_id' => $secondBatch->id,
+            'row_number' => 1,
+            'staged_payload' => ['source_file' => 'second-batch.md'],
+        ]);
+
+        $this->expectException(QueryException::class);
+
+        KnowledgeDuplicate::query()->create([
+            'brand_id' => $scope['brand_a'],
+            'site_id' => $scope['site_a'],
+            'import_batch_id' => $firstBatch->id,
+            'import_row_id' => $row->id,
+            'duplicate_kind' => 'exact',
+        ]);
     }
 
     public function test_governance_and_import_audit_schema_expose_the_staged_document_contract(): void
@@ -111,6 +217,8 @@ final class KnowledgeGovernanceSchemaTest extends TestCase
             'rollback_metadata',
         ]));
         $this->assertTrue(Schema::hasColumns('knowledge_import_rows', [
+            'brand_id',
+            'site_id',
             'staged_payload',
             'outcome',
             'canonical_document_id',
@@ -120,6 +228,8 @@ final class KnowledgeGovernanceSchemaTest extends TestCase
             'rollback_metadata',
         ]));
         $this->assertTrue(Schema::hasColumns('knowledge_duplicates', [
+            'brand_id',
+            'site_id',
             'duplicate_document_id',
             'canonical_document_id',
             'duplicate_kind',
@@ -178,6 +288,97 @@ final class KnowledgeGovernanceSchemaTest extends TestCase
             'language_code' => $languageCode,
             'normalized_content_hash' => $normalizedContentHash,
             'lifecycle_status' => $lifecycleStatus,
+        ]);
+    }
+
+    private function createBatch(int $brandId, int $siteId): KnowledgeImportBatch
+    {
+        return KnowledgeImportBatch::query()->create([
+            'brand_id' => $brandId,
+            'site_id' => $siteId,
+            'source_type' => 'folder',
+            'status' => 'completed',
+            'configuration_hash' => str()->random(64),
+            'source_checksum' => str()->random(64),
+        ]);
+    }
+
+    private function assertDuplicateAuditDocumentScopeRejected(
+        KnowledgeImportBatch $batch,
+        KnowledgeBase $canonicalDocument,
+        KnowledgeBase $duplicateDocument,
+    ): void {
+        try {
+            KnowledgeDuplicate::query()->create([
+                'brand_id' => $batch->brand_id,
+                'site_id' => $batch->site_id,
+                'import_batch_id' => $batch->id,
+                'duplicate_document_id' => $duplicateDocument->id,
+                'canonical_document_id' => $canonicalDocument->id,
+                'duplicate_kind' => 'exact',
+            ]);
+            $this->fail('Expected a duplicate audit document outside the batch scope to be rejected.');
+        } catch (QueryException) {
+            $this->addToAssertionCount(1);
+        }
+    }
+
+    /**
+     * @return array{brand_a: int, site_a: int, site_a_secondary: int, directory_a: int, brand_b: int, site_b: int, directory_b: int}
+     */
+    private function scopedOwnership(): array
+    {
+        $now = now();
+        $brandA = DB::table('knowledge_brands')->insertGetId([
+            'key' => 'brand-a',
+            'name' => 'Brand A',
+            'created_at' => $now,
+            'updated_at' => $now,
+        ]);
+        $brandB = DB::table('knowledge_brands')->insertGetId([
+            'key' => 'brand-b',
+            'name' => 'Brand B',
+            'created_at' => $now,
+            'updated_at' => $now,
+        ]);
+        $siteA = $this->createSite($brandA, 'brand-a-main', $now);
+        $siteASecondary = $this->createSite($brandA, 'brand-a-secondary', $now);
+        $siteB = $this->createSite($brandB, 'brand-b-main', $now);
+        $directoryA = $this->createDirectory($brandA, 'brand-a-directory', $now);
+        $directoryB = $this->createDirectory($brandB, 'brand-b-directory', $now);
+
+        return [
+            'brand_a' => $brandA,
+            'site_a' => $siteA,
+            'site_a_secondary' => $siteASecondary,
+            'directory_a' => $directoryA,
+            'brand_b' => $brandB,
+            'site_b' => $siteB,
+            'directory_b' => $directoryB,
+        ];
+    }
+
+    private function createSite(int $brandId, string $key, \DateTimeInterface $now): int
+    {
+        return DB::table('knowledge_sites')->insertGetId([
+            'brand_id' => $brandId,
+            'key' => $key,
+            'canonical_host' => $key.'.test',
+            'role' => 'commerce-primary',
+            'created_at' => $now,
+            'updated_at' => $now,
+        ]);
+    }
+
+    private function createDirectory(int $brandId, string $key, \DateTimeInterface $now): int
+    {
+        return DB::table('knowledge_directories')->insertGetId([
+            'brand_id' => $brandId,
+            'key' => $key,
+            'path' => $key,
+            'name' => str($key)->replace('-', ' ')->title(),
+            'created_at' => $now,
+            'updated_at' => $now,
         ]);
     }
 }
