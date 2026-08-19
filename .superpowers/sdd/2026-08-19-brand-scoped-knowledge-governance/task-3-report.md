@@ -21,6 +21,17 @@ docker compose exec -T app php artisan test tests/Feature/KnowledgeKeywordAssoci
 
 Pint and `git diff --check` also completed without errors.
 
+## Fix Round 1 Verification
+
+Added regression coverage for zero-keyword nodes and nodes linked to both the requested and a foreign library. Each starts with valid node and cluster associations and confirms that both pivot sets remain unchanged after rejection. The suite also now documents `sync` complete-set behavior: an empty set clears only that target type, omitted IDs are removed on replacement, and duplicate IDs do not create duplicate pivots.
+
+```text
+docker compose exec -T app php artisan test tests/Feature/KnowledgeKeywordAssociationTest.php tests/Feature/KeywordClusterServiceTest.php --compact
+
+Tests:    28 passed (117 assertions)
+Duration: 1.20s
+```
+
 ## Scope Notes
 
 - The service intentionally accepts the library ID as an argument; it does not hard-code ID 42. Production callers pass LightInTheBox's formal library ID (42), while tests create their own deterministic ID-42 fixture.

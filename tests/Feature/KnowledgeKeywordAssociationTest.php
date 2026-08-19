@@ -107,6 +107,104 @@ class KnowledgeKeywordAssociationTest extends TestCase
         $this->assertDatabaseCount('knowledge_keyword_clusters', 0);
     }
 
+    public function test_rejects_a_node_without_keyword_ownership_without_changing_existing_associations(): void
+    {
+        $library = $this->library(42, 'LightInTheBox governed keywords');
+        $node = $this->nodeWithKeyword($library, 'wedding-dresses');
+        $cluster = $this->cluster($library, $node, 'wedding-dresses');
+        $unownedNode = $this->nodeWithoutKeywords('unowned-node');
+        $document = $this->document();
+        $service = app(KnowledgeKeywordAssociationService::class);
+
+        $service->associate($document, [$node->id], [$cluster->id], $library->id);
+
+        $this->assertDomainError(
+            'knowledge_keyword_association.node_library_boundary',
+            fn () => $service->associate($document, [$unownedNode->id], [], $library->id),
+        );
+
+        $this->assertOnlyAssociates($document, $node, $cluster);
+    }
+
+    public function test_rejects_a_node_shared_with_another_library_without_changing_existing_associations(): void
+    {
+        $library = $this->library(42, 'LightInTheBox governed keywords');
+        $foreignLibrary = $this->library(84, 'Other brand keywords');
+        $node = $this->nodeWithKeyword($library, 'wedding-dresses');
+        $cluster = $this->cluster($library, $node, 'wedding-dresses');
+        $sharedNode = $this->nodeWithKeyword($library, 'shared-dresses');
+        $sharedNode->keywords()->attach($this->keyword($foreignLibrary, 'foreign-shared-dresses')->id);
+        $document = $this->document();
+        $service = app(KnowledgeKeywordAssociationService::class);
+
+        $service->associate($document, [$node->id], [$cluster->id], $library->id);
+
+        $this->assertDomainError(
+            'knowledge_keyword_association.node_library_boundary',
+            fn () => $service->associate($document, [$sharedNode->id], [], $library->id),
+        );
+
+        $this->assertOnlyAssociates($document, $node, $cluster);
+    }
+
+    public function test_empty_target_sets_clear_only_the_association_type_they_replace(): void
+    {
+        $library = $this->library(42, 'LightInTheBox governed keywords');
+        $node = $this->nodeWithKeyword($library, 'wedding-dresses');
+        $cluster = $this->cluster($library, $node, 'wedding-dresses');
+        $document = $this->document();
+        $service = app(KnowledgeKeywordAssociationService::class);
+
+        $service->associate($document, [$node->id], [$cluster->id], $library->id);
+        $service->associate($document, [], [$cluster->id], $library->id);
+
+        $this->assertDatabaseCount('knowledge_keyword_nodes', 0);
+        $this->assertDatabaseHas('knowledge_keyword_clusters', [
+            'knowledge_base_id' => $document->id,
+            'keyword_cluster_id' => $cluster->id,
+        ]);
+
+        $service->associate($document, [$node->id], [], $library->id);
+
+        $this->assertDatabaseHas('knowledge_keyword_nodes', [
+            'knowledge_base_id' => $document->id,
+            'keyword_node_id' => $node->id,
+        ]);
+        $this->assertDatabaseCount('knowledge_keyword_clusters', 0);
+    }
+
+    public function test_replaces_omitted_targets_and_treats_duplicate_ids_idempotently(): void
+    {
+        $library = $this->library(42, 'LightInTheBox governed keywords');
+        $firstNode = $this->nodeWithKeyword($library, 'wedding-dresses');
+        $secondNode = $this->nodeWithKeyword($library, 'evening-dresses');
+        $firstCluster = $this->cluster($library, $firstNode, 'wedding-dresses');
+        $secondCluster = $this->cluster($library, $secondNode, 'evening-dresses');
+        $document = $this->document();
+        $service = app(KnowledgeKeywordAssociationService::class);
+
+        $service->associate(
+            $document,
+            [$firstNode->id, $firstNode->id, $secondNode->id],
+            [$firstCluster->id, $firstCluster->id, $secondCluster->id],
+            $library->id,
+        );
+        $this->assertDatabaseCount('knowledge_keyword_nodes', 2);
+        $this->assertDatabaseCount('knowledge_keyword_clusters', 2);
+
+        $service->associate($document, [$secondNode->id], [$secondCluster->id], $library->id);
+
+        $this->assertDatabaseMissing('knowledge_keyword_nodes', [
+            'knowledge_base_id' => $document->id,
+            'keyword_node_id' => $firstNode->id,
+        ]);
+        $this->assertDatabaseMissing('knowledge_keyword_clusters', [
+            'knowledge_base_id' => $document->id,
+            'keyword_cluster_id' => $firstCluster->id,
+        ]);
+        $this->assertOnlyAssociates($document, $secondNode, $secondCluster);
+    }
+
     private function library(int $id, string $name): KeywordLibrary
     {
         DB::table('keyword_libraries')->insert([
@@ -123,6 +221,14 @@ class KnowledgeKeywordAssociationTest extends TestCase
 
     private function nodeWithKeyword(KeywordLibrary $library, string $slug): KeywordNode
     {
+        $node = $this->nodeWithoutKeywords($slug);
+        $node->keywords()->attach($this->keyword($library, $slug)->id, ['is_primary' => true]);
+
+        return $node;
+    }
+
+    private function nodeWithoutKeywords(string $slug): KeywordNode
+    {
         $taxonomy = KeywordTaxonomy::query()->create([
             'name' => str()->headline($slug),
             'slug' => $slug.'-'.str()->random(8),
@@ -134,7 +240,13 @@ class KnowledgeKeywordAssociationTest extends TestCase
             'path' => $slug,
             'depth' => 0,
         ]);
-        $keyword = Keyword::query()->create([
+
+        return $node;
+    }
+
+    private function keyword(KeywordLibrary $library, string $slug): Keyword
+    {
+        return Keyword::query()->create([
             'library_id' => $library->id,
             'keyword' => str()->replace('-', ' ', $slug),
             'normalized_keyword' => str()->replace('-', ' ', $slug),
@@ -147,9 +259,6 @@ class KnowledgeKeywordAssociationTest extends TestCase
             'used_count' => 0,
             'usage_count' => 0,
         ]);
-        $node->keywords()->attach($keyword->id, ['is_primary' => true]);
-
-        return $node;
     }
 
     private function cluster(KeywordLibrary $library, KeywordNode $node, string $slug): KeywordCluster
@@ -172,6 +281,20 @@ class KnowledgeKeywordAssociationTest extends TestCase
         return KnowledgeBase::query()->create([
             'name' => 'Governed knowledge document',
             'content' => 'LightInTheBox wedding dress guidance.',
+        ]);
+    }
+
+    private function assertOnlyAssociates(KnowledgeBase $document, KeywordNode $node, KeywordCluster $cluster): void
+    {
+        $this->assertDatabaseCount('knowledge_keyword_nodes', 1);
+        $this->assertDatabaseCount('knowledge_keyword_clusters', 1);
+        $this->assertDatabaseHas('knowledge_keyword_nodes', [
+            'knowledge_base_id' => $document->id,
+            'keyword_node_id' => $node->id,
+        ]);
+        $this->assertDatabaseHas('knowledge_keyword_clusters', [
+            'knowledge_base_id' => $document->id,
+            'keyword_cluster_id' => $cluster->id,
         ]);
     }
 
