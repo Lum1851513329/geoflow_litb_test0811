@@ -28,3 +28,10 @@
 - Near comparison computes paragraph fingerprints and token sets once per document before pairing.
 - `python3 -m unittest discover -s tools/knowledge_corpus/tests -v` — 30 passed.
 - `docker compose exec -T app php artisan test tests/Feature/KnowledgeChunkGovernanceMetadataTest.php tests/Feature/KnowledgeChunkAsyncSyncTest.php tests/Feature/KnowledgeChunkEmbeddingSyncTest.php` — 38 passed, 201 assertions (49.68s; captured from the container because the interactive command exceeded the local 30-second tool window).
+
+## Fix round 2 evidence (2026-08-19)
+
+- Oversized units are now deterministically partitioned into balanced token groups before packing. A splittable ~800-token paragraph produces two chunks, each within the 350–700 target range.
+- Mixed Latin/CJK units are segmented token-by-token while retaining source order and all non-whitespace content; no output chunk exceeds the maximum or contains only a heading.
+- `python3 -m unittest discover -s tools/knowledge_corpus/tests -v` — 32 passed.
+- PHP was unchanged in this round, so the focused PHP suite was not rerun.

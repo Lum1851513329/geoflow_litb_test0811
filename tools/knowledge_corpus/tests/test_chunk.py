@@ -101,6 +101,27 @@ class BuildChunksTest(unittest.TestCase):
         for word in words:
             self.assertTrue(any(word in chunk["content"] for chunk in chunks))
 
+    def test_splittable_eight_hundred_token_paragraph_rebalances_into_two_in_range_chunks(self):
+        words = [f"balancedword{word}" for word in range(800)]
+        document = self.document("policies/balanced.md", "# Returns\n\n" + " ".join(words) + "\n")
+
+        chunks = build_chunks(document, target_min=350, target_max=700)
+
+        self.assertEqual(2, len(chunks))
+        self.assertTrue(all(350 <= self.token_count(chunk["content"]) <= 700 for chunk in chunks))
+
+    def test_mixed_script_oversized_content_preserves_order_without_oversized_or_empty_chunks(self):
+        body = "前言 " + "政策内容" * 250
+        document = self.document("policies/mixed-script.md", "# Returns\n\n" + body + "\n")
+
+        chunks = build_chunks(document, target_min=350, target_max=700)
+
+        self.assertGreaterEqual(len(chunks), 2)
+        self.assertTrue(all(self.token_count(chunk["content"]) <= 700 for chunk in chunks))
+        self.assertTrue(all(chunk["content"].replace("# Returns", "").strip() for chunk in chunks))
+        reconstructed = "".join(chunk["content"].replace("# Returns", "") for chunk in chunks)
+        self.assertEqual(re.sub(r"\s+", "", body), re.sub(r"\s+", "", reconstructed))
+
     def test_sibling_heading_paths_remain_separate_for_citation(self):
         document = self.document(
             "policies/shipping-and-returns.md",

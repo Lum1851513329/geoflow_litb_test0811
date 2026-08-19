@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import math
 import re
 from typing import Any
 
@@ -170,23 +171,24 @@ def _pack_units(
 
 
 def _split_oversized_unit(unit: str, maximum_tokens: int) -> list[str]:
-    if _token_count(unit) <= maximum_tokens:
+    total_tokens = _token_count(unit)
+    if total_tokens <= maximum_tokens:
         return [unit]
-    if re.search(rf"[{_CJK}]", unit) and not re.search(r"\s", unit):
-        return [unit[index:index + maximum_tokens] for index in range(0, len(unit), maximum_tokens)]
 
-    pieces = re.findall(r"\S+(?:\s+|$)", unit)
+    chunk_count = math.ceil(total_tokens / maximum_tokens)
+    target_tokens = math.ceil(total_tokens / chunk_count)
+    pieces = re.findall(rf"[{_CJK}]|[^\s{_CJK}]+|\s+", unit)
     groups: list[str] = []
     buffer = ""
     for piece in pieces:
         candidate = buffer + piece
-        if buffer and _token_count(candidate) > maximum_tokens:
-            groups.append(buffer.rstrip())
+        if buffer and _token_count(candidate) > target_tokens:
+            groups.append(buffer)
             buffer = piece
         else:
             buffer = candidate
     if buffer:
-        groups.append(buffer.rstrip())
+        groups.append(buffer)
     return groups or [unit]
 
 
