@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
@@ -41,6 +42,9 @@ class KnowledgeBase extends Model
         'chunk_synced_at',
         'asset_key',
         'asset_provenance',
+        'brand_id',
+        'site_id',
+        'primary_directory_id',
     ];
 
     protected function casts(): array
@@ -54,12 +58,30 @@ class KnowledgeBase extends Model
             'chunk_sync_require_real_embedding' => 'boolean',
             'chunk_synced_at' => 'datetime',
             'asset_provenance' => 'array',
+            'brand_id' => 'integer',
+            'site_id' => 'integer',
+            'primary_directory_id' => 'integer',
         ];
     }
 
     public function chunks(): HasMany
     {
         return $this->hasMany(KnowledgeChunk::class, 'knowledge_base_id');
+    }
+
+    public function brand(): BelongsTo
+    {
+        return $this->belongsTo(KnowledgeBrand::class, 'brand_id');
+    }
+
+    public function site(): BelongsTo
+    {
+        return $this->belongsTo(KnowledgeSite::class, 'site_id');
+    }
+
+    public function primaryDirectory(): BelongsTo
+    {
+        return $this->belongsTo(KnowledgeDirectory::class, 'primary_directory_id');
     }
 
     public function tasks(): HasMany
