@@ -8,7 +8,7 @@ canonical source and explains every decision.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from datetime import datetime
+from datetime import datetime, timezone
 import hashlib
 from itertools import combinations
 import re
@@ -23,17 +23,17 @@ _MARKDOWN_SUFFIXES = frozenset({".md", ".markdown", ".mdown", ".mkdn"})
 
 
 def resolve_exact(documents: Sequence[object]) -> tuple[list[object], list[dict[str, object]]]:
-    """Choose one exact duplicate per brand/language/directory/hash group.
+    """Choose one exact duplicate per brand/language/hash group.
 
     Original input objects are returned unchanged.  A duplicate audit record
     always points to the canonical relative path and contains a deterministic
     reason suitable for an import manifest.
     """
-    groups: dict[tuple[str, str, str, str], list[object]] = {}
+    groups: dict[tuple[str, str, str], list[object]] = {}
     for document in documents:
         normalized = _normalized(document)
-        brand, language, directory = _scope(document)
-        groups.setdefault((brand, language, directory, normalized.normalized_hash), []).append(document)
+        brand, language = _exact_scope(document)
+        groups.setdefault((brand, language, normalized.normalized_hash), []).append(document)
 
     canonical_documents: list[object] = []
     duplicate_records: list[dict[str, object]] = []
@@ -47,7 +47,7 @@ def resolve_exact(documents: Sequence[object]) -> tuple[list[object], list[dict[
                 "relative_path": _relative_path(discarded),
                 "duplicate_of": _relative_path(canonical),
                 "reason": _precedence_reason(canonical, discarded),
-                "normalized_hash": group_key[3],
+                "normalized_hash": group_key[2],
             })
 
     return canonical_documents, duplicate_records
@@ -64,38 +64,42 @@ def find_near_duplicates(documents: Sequence[object], threshold: float = 0.92) -
     if not 0 <= threshold <= 1:
         raise ValueError("threshold must be between 0 and 1")
 
-    scoped: dict[tuple[str, str, str], list[object]] = {}
+    scoped: dict[tuple[str, str, str], list[tuple[object, tuple[frozenset[str], frozenset[str]]]]] = {}
     for document in documents:
-        scoped.setdefault(_scope(document), []).append(document)
+        scoped.setdefault(_near_scope(document), []).append((document, _document_analysis(document)))
 
     records: list[dict[str, object]] = []
     for scope in sorted(scoped):
-        candidates = sorted(scoped[scope], key=_relative_path)
-        for first, second in combinations(candidates, 2):
+        candidates = sorted(scoped[scope], key=lambda item: _relative_path(item[0]))
+        for (first, first_analysis), (second, second_analysis) in combinations(candidates, 2):
             if _normalized(first).normalized_hash == _normalized(second).normalized_hash:
                 continue
-            similarity = _token_set_similarity(first, second)
+            similarity = _token_set_similarity(first_analysis[0], second_analysis[0])
             if similarity < threshold:
                 continue
-            subset, _ = _strict_subset_pair(first, second)
+            subset, superset = _strict_subset_pair(first, second, first_analysis[1], second_analysis[1])
             if subset is not None and _has_unambiguous_provenance_precedence(first, second):
                 canonical = min((first, second), key=_precedence_key)
-                duplicate = second if canonical is first else first
-                records.append({
-                    "kind": "near",
-                    "action": "merge",
-                    "relative_path": _relative_path(duplicate),
-                    "duplicate_of": _relative_path(canonical),
-                    "reason": "strict_subset_unambiguous_provenance",
-                    "similarity": similarity,
-                })
-                continue
+                if canonical is superset:
+                    duplicate = second if canonical is first else first
+                    records.append({
+                        "kind": "near",
+                        "action": "merge",
+                        "relative_path": _relative_path(duplicate),
+                        "duplicate_of": _relative_path(canonical),
+                        "reason": "strict_subset_unambiguous_provenance",
+                        "similarity": similarity,
+                    })
+                    continue
+                review_reason = "strict_subset_canonical_lacks_content"
+            else:
+                review_reason = "near_duplicate_requires_review"
 
             records.append({
                 "kind": "near",
                 "action": "review",
                 "relative_paths": (_relative_path(first), _relative_path(second)),
-                "reason": "near_duplicate_requires_review",
+                "reason": review_reason,
                 "similarity": similarity,
             })
 
@@ -116,7 +120,12 @@ def _classification(document: object) -> Classification:
     return classification
 
 
-def _scope(document: object) -> tuple[str, str, str]:
+def _exact_scope(document: object) -> tuple[str, str]:
+    classification = _classification(document)
+    return classification.brand_key, classification.language_code
+
+
+def _near_scope(document: object) -> tuple[str, str, str]:
     classification = _classification(document)
     directory_path = classification.directory_path or ""
     directory_family = directory_path.split("/", 1)[0]
@@ -144,7 +153,9 @@ def _is_markdown(document: object) -> bool:
     return any(path.endswith(suffix) for suffix in _MARKDOWN_SUFFIXES)
 
 
-def _has_source_url(document: object) -> bool:
+def _has_first_party_url(document: object) -> bool:
+    if _classification(document).authority_level != "first_party":
+        return False
     source_url = str(_field(document, "source_url", "canonical_url", default="")).strip()
     return bool(source_url or _normalized(document).source_urls)
 
@@ -171,14 +182,13 @@ def _lifecycle_timestamp(document: object) -> float:
     for candidate in candidates:
         if candidate is None or candidate == "":
             continue
-        if hasattr(candidate, "timestamp"):
-            try:
-                parsed.append(float(candidate.timestamp()))
-                continue
-            except (TypeError, ValueError, OSError):
-                pass
         try:
-            parsed.append(datetime.fromisoformat(str(candidate).replace("Z", "+00:00")).timestamp())
+            value = candidate if isinstance(candidate, datetime) else datetime.fromisoformat(
+                str(candidate).replace("Z", "+00:00")
+            )
+            if value.tzinfo is None:
+                value = value.replace(tzinfo=timezone.utc)
+            parsed.append(value.timestamp())
         except ValueError:
             continue
     return max(parsed, default=float("-inf"))
@@ -187,7 +197,7 @@ def _lifecycle_timestamp(document: object) -> float:
 def _precedence_key(document: object) -> tuple[int, int, int, float, str]:
     return (
         -int(_is_markdown(document)),
-        -int(_has_source_url(document)),
+        -int(_has_first_party_url(document)),
         -_provenance_completeness(document),
         -_lifecycle_timestamp(document),
         _relative_path(document),
@@ -197,8 +207,8 @@ def _precedence_key(document: object) -> tuple[int, int, int, float, str]:
 def _precedence_reason(canonical: object, discarded: object) -> str:
     if _is_markdown(canonical) != _is_markdown(discarded):
         return "markdown_over_txt" if _is_markdown(canonical) else "format_precedence"
-    if _has_source_url(canonical) != _has_source_url(discarded):
-        return "url_bearing_first_party_source"
+    if _has_first_party_url(canonical) != _has_first_party_url(discarded):
+        return "first_party_url_bearing_source"
     if _provenance_completeness(canonical) != _provenance_completeness(discarded):
         return "provenance_completeness"
     if _lifecycle_timestamp(canonical) != _lifecycle_timestamp(discarded):
@@ -206,9 +216,12 @@ def _precedence_reason(canonical: object, discarded: object) -> str:
     return "lexical_path_tiebreaker"
 
 
-def _token_set_similarity(first: object, second: object) -> float:
-    first_tokens = set(_tokens(_normalized(first).markdown))
-    second_tokens = set(_tokens(_normalized(second).markdown))
+def _document_analysis(document: object) -> tuple[frozenset[str], frozenset[str]]:
+    markdown = _normalized(document).markdown
+    return frozenset(_tokens(markdown)), _paragraph_fingerprints(markdown)
+
+
+def _token_set_similarity(first_tokens: frozenset[str], second_tokens: frozenset[str]) -> float:
     union = first_tokens | second_tokens
     return len(first_tokens & second_tokens) / len(union) if union else 1.0
 
@@ -217,8 +230,8 @@ def _tokens(markdown: str) -> tuple[str, ...]:
     return tuple(token.casefold() for token in _TOKEN.findall(markdown))
 
 
-def _paragraph_fingerprints(document: object) -> frozenset[str]:
-    paragraphs = re.split(r"\n\s*\n", _normalized(document).markdown.strip())
+def _paragraph_fingerprints(markdown: str) -> frozenset[str]:
+    paragraphs = re.split(r"\n\s*\n", markdown.strip())
     fingerprints = []
     for paragraph in paragraphs:
         tokens = _tokens(re.sub(r"^\s{0,3}#{1,6}\s+", "", paragraph))
@@ -227,9 +240,12 @@ def _paragraph_fingerprints(document: object) -> frozenset[str]:
     return frozenset(fingerprints)
 
 
-def _strict_subset_pair(first: object, second: object) -> tuple[object | None, object | None]:
-    first_fingerprints = _paragraph_fingerprints(first)
-    second_fingerprints = _paragraph_fingerprints(second)
+def _strict_subset_pair(
+    first: object,
+    second: object,
+    first_fingerprints: frozenset[str],
+    second_fingerprints: frozenset[str],
+) -> tuple[object | None, object | None]:
     if first_fingerprints < second_fingerprints:
         return first, second
     if second_fingerprints < first_fingerprints:

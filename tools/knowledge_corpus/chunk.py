@@ -11,7 +11,8 @@ from .normalize import NormalizedDocument
 
 
 _HEADING = re.compile(r"^\s{0,3}(#{1,6})\s+(.+?)\s*$")
-_TOKEN = re.compile(r"[\w]+(?:['’-][\w]+)?", re.UNICODE)
+_CJK = "\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff"
+_TOKEN = re.compile(rf"[{_CJK}]|[^\W{_CJK}]+(?:['’-][^\W{_CJK}]+)?", re.UNICODE)
 _LIST_ITEM = re.compile(r"^\s*(?:[-+*]|\d+[.)])\s+")
 
 
@@ -29,7 +30,7 @@ def build_chunks(
     sections = _sections(normalized.markdown)
     metadata = _governance_metadata(document, normalized, classification)
     chunks: list[dict[str, object]] = []
-    for section in _combine_short_siblings(sections, target_min, target_max):
+    for section in sections:
         chunks.extend(_split_section(section, target_min, target_max, metadata))
     return chunks
 
@@ -110,28 +111,6 @@ def _sections(markdown: str) -> list[dict[str, object]]:
     return sections
 
 
-def _combine_short_siblings(
-    sections: list[dict[str, object]], target_min: int, target_max: int
-) -> list[dict[str, object]]:
-    combined: list[dict[str, object]] = []
-    for section in sections:
-        if not combined:
-            combined.append(dict(section))
-            continue
-        previous = combined[-1]
-        candidate = f"{previous['content']}\n\n{section['content']}"
-        if (
-            previous["parent_path"] == section["parent_path"]
-            and _token_count(str(previous["content"])) < target_min
-            and _token_count(candidate) <= target_max
-        ):
-            previous["content"] = candidate
-            previous["section_path"] = str(previous["section_path"])
-            continue
-        combined.append(dict(section))
-    return combined
-
-
 def _split_section(
     section: dict[str, object], target_min: int, target_max: int, metadata: dict[str, object]
 ) -> list[dict[str, object]]:
@@ -144,26 +123,71 @@ def _split_section(
     if not body_units:
         return [_chunk(content, section, metadata)]
 
-    chunks: list[dict[str, object]] = []
-    buffer: list[str] = [heading] if heading else []
-    body_tokens = 0
-    for unit in body_units:
-        unit_tokens = _token_count(unit)
-        candidate = "\n\n".join([*buffer, unit])
-        if body_tokens >= target_min and _token_count(candidate) > target_min:
-            chunks.append(_chunk("\n\n".join(buffer), section, metadata))
-            buffer = [heading] if heading else []
-            body_tokens = 0
-        if buffer and _token_count(candidate) > target_max and body_tokens:
-            chunks.append(_chunk("\n\n".join(buffer), section, metadata))
-            buffer = [heading] if heading else []
-            body_tokens = 0
-        buffer.append(unit)
-        body_tokens += unit_tokens
+    heading_tokens = _token_count(heading)
+    body_capacity = max(1, target_max - heading_tokens)
+    safe_units = [
+        piece
+        for unit in body_units
+        for piece in _split_oversized_unit(unit, body_capacity)
+    ]
+    groups = _pack_units(safe_units, heading_tokens, target_min, target_max)
+    return [
+        _chunk("\n\n".join(([heading] if heading else []) + group), section, metadata)
+        for group in groups
+    ]
 
+
+def _pack_units(
+    units: list[str], heading_tokens: int, target_min: int, target_max: int
+) -> list[list[str]]:
+    groups: list[list[str]] = []
+    buffer: list[str] = []
+    for unit in units:
+        candidate = [*buffer, unit]
+        if buffer and heading_tokens + _token_count("\n\n".join(candidate)) > target_max:
+            groups.append(buffer)
+            buffer = [unit]
+        else:
+            buffer = candidate
     if buffer:
-        chunks.append(_chunk("\n\n".join(buffer), section, metadata))
-    return chunks
+        groups.append(buffer)
+
+    while len(groups) >= 2 and heading_tokens + _token_count("\n\n".join(groups[-1])) < target_min:
+        previous = groups[-2]
+        if len(previous) < 2:
+            break
+        moved = previous[-1]
+        candidate_previous = previous[:-1]
+        candidate_tail = [moved, *groups[-1]]
+        if (
+            heading_tokens + _token_count("\n\n".join(candidate_previous)) < target_min
+            or heading_tokens + _token_count("\n\n".join(candidate_tail)) > target_max
+        ):
+            break
+        groups[-2] = candidate_previous
+        groups[-1] = candidate_tail
+    return groups
+
+
+def _split_oversized_unit(unit: str, maximum_tokens: int) -> list[str]:
+    if _token_count(unit) <= maximum_tokens:
+        return [unit]
+    if re.search(rf"[{_CJK}]", unit) and not re.search(r"\s", unit):
+        return [unit[index:index + maximum_tokens] for index in range(0, len(unit), maximum_tokens)]
+
+    pieces = re.findall(r"\S+(?:\s+|$)", unit)
+    groups: list[str] = []
+    buffer = ""
+    for piece in pieces:
+        candidate = buffer + piece
+        if buffer and _token_count(candidate) > maximum_tokens:
+            groups.append(buffer.rstrip())
+            buffer = piece
+        else:
+            buffer = candidate
+    if buffer:
+        groups.append(buffer.rstrip())
+    return groups or [unit]
 
 
 def _chunk(content: str, section: dict[str, object], metadata: dict[str, object]) -> dict[str, object]:

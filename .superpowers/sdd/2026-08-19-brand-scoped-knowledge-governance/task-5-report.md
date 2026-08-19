@@ -18,3 +18,13 @@
 
 - Verified exact duplicate precedence and audit mapping, uncertain near-duplicate review behavior, strict-subset merge criteria, scope isolation, heading paths, list boundaries, document isolation, and PHP metadata propagation.
 - No unresolved Task 5 concerns. The host shell has no PHP binary, so PHP checks were run in the repository's `app` Docker service.
+
+## Fix round 1 evidence (2026-08-19)
+
+- Exact duplicates are now scoped only by brand and language; near-duplicate candidates remain brand/language/directory-family scoped.
+- A strict-subset candidate is merged only when the deterministic provenance winner is the content superset. A stronger-provenance subset is retained with a `review` record so unique content cannot be discarded.
+- Exact precedence now explicitly ranks Markdown, first-party URL-bearing sources, provenance completeness, UTC-normalized lifecycle dates, and lexical paths.
+- Chunk packing now fills up to the maximum before flushing, rebalances feasible undersized tails, splits oversized prose/list units at safe boundaries, keeps sibling heading paths separate, and counts CJK characters conservatively.
+- Near comparison computes paragraph fingerprints and token sets once per document before pairing.
+- `python3 -m unittest discover -s tools/knowledge_corpus/tests -v` — 30 passed.
+- `docker compose exec -T app php artisan test tests/Feature/KnowledgeChunkGovernanceMetadataTest.php tests/Feature/KnowledgeChunkAsyncSyncTest.php tests/Feature/KnowledgeChunkEmbeddingSyncTest.php` — 38 passed, 201 assertions (49.68s; captured from the container because the interactive command exceeded the local 30-second tool window).

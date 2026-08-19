@@ -29,7 +29,7 @@ class BuildChunksTest(unittest.TestCase):
         }
 
     def token_count(self, text):
-        return len(re.findall(r"[A-Za-z0-9]+(?:['’-][A-Za-z0-9]+)?", text))
+        return len(re.findall(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]|[A-Za-z0-9]+(?:['’-][A-Za-z0-9]+)?", text))
 
     def test_chunks_preserve_heading_paths_and_governance_metadata(self):
         document = self.document(
@@ -77,6 +77,50 @@ class BuildChunksTest(unittest.TestCase):
         self.assertTrue(all(self.token_count(chunk["content"]) <= 700 for chunk in chunks))
         for item in items:
             self.assertTrue(any(item in chunk["content"] for chunk in chunks))
+
+    def test_packing_keeps_three_roughly_two_hundred_token_paragraphs_together(self):
+        paragraphs = [
+            " ".join(f"part{part}word{word}" for word in range(200))
+            for part in range(3)
+        ]
+        document = self.document("policies/packed.md", "# Returns\n\n" + "\n\n".join(paragraphs) + "\n")
+
+        chunks = build_chunks(document, target_min=350, target_max=700)
+
+        self.assertEqual(1, len(chunks))
+        self.assertLessEqual(self.token_count(chunks[0]["content"]), 700)
+
+    def test_oversized_paragraph_splits_at_word_boundaries_without_exceeding_maximum(self):
+        words = [f"oversizedword{word}" for word in range(800)]
+        document = self.document("policies/oversized.md", "# Returns\n\n" + " ".join(words) + "\n")
+
+        chunks = build_chunks(document, target_min=350, target_max=700)
+
+        self.assertGreaterEqual(len(chunks), 2)
+        self.assertTrue(all(self.token_count(chunk["content"]) <= 700 for chunk in chunks))
+        for word in words:
+            self.assertTrue(any(word in chunk["content"] for chunk in chunks))
+
+    def test_sibling_heading_paths_remain_separate_for_citation(self):
+        document = self.document(
+            "policies/shipping-and-returns.md",
+            "# Policies\n\nCurrent customer policy evidence.\n\n## Shipping\n\nShipping evidence.\n\n## Returns\n\nReturns evidence.\n",
+        )
+
+        chunks = build_chunks(document)
+
+        self.assertEqual(["Policies", "Policies > Shipping", "Policies > Returns"], [
+            chunk["section_path"] for chunk in chunks
+        ])
+        self.assertNotIn("Returns evidence.", chunks[1]["content"])
+
+    def test_cjk_content_is_counted_conservatively_and_respects_the_maximum(self):
+        document = self.document("policies/cjk.md", "# 政策\n\n" + "政策内容" * 250 + "\n")
+
+        chunks = build_chunks(document, target_min=350, target_max=700)
+
+        self.assertGreaterEqual(len(chunks), 2)
+        self.assertTrue(all(self.token_count(chunk["content"]) <= 700 for chunk in chunks))
 
     def test_chunks_never_mix_documents_or_governance_scope(self):
         english = self.document("policies/en.md", "# Returns\n\nEnglish policy evidence.\n")
