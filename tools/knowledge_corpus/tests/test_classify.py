@@ -38,8 +38,44 @@ class ClassifyDocumentTest(unittest.TestCase):
                 self.assertEqual("lightinthebox", classification.brand_key)
                 self.assertEqual("lightinthebox-main", classification.site_key)
                 self.assertEqual(directory_key, classification.directory_path)
+                self.assertIn(classification.directory_path, {
+                    "brand-company", "customer-transaction", "policy-compliance", "product-category",
+                    "new-hot-products", "logistics-fulfilment", "official-news", "investor-relations",
+                    "research-reference",
+                })
                 self.assertEqual(authority, classification.authority_level)
                 self.assertEqual(risk, classification.risk_level)
+
+    def test_controlled_source_root_precedes_filename_terms(self):
+        company = classify_document(
+            "01_Company_Info/market-reputation.md",
+            self.document("# Market reputation\nCompetition analysis."),
+        )
+        marketplace = classify_document("misc/marketplace.md", self.document("# Marketplace\n"))
+        non_report = classify_document("archive/annual-financial-report.md", self.document("# Notes\n"))
+
+        self.assertEqual("brand-company", company.directory_path)
+        self.assertIsNone(marketplace.directory_path)
+        self.assertIn("ambiguous_directory_route", marketplace.warnings)
+        self.assertIsNone(non_report.directory_path)
+
+    def test_detects_language_only_from_positive_prose_evidence(self):
+        cases = (
+            ("# Mais vendidos\nNovo em\n", "pt"),
+            ("# Política de devolución\n", "und"),
+            ("# Note\n\n## Provenance\n- Source: https://example.com/中文\n", "und"),
+            ("# Mais vendidos\nOur company story.\n", "und"),
+            ("# About\nOur company story.\n", "en"),
+            ("# 公司概况\n", "zh"),
+        )
+
+        for markdown, language_code in cases:
+            with self.subTest(markdown=markdown):
+                classification = classify_document("misc/notes.md", self.document(markdown))
+
+                self.assertEqual(language_code, classification.language_code)
+                if language_code == "und":
+                    self.assertIn("ambiguous_language", classification.warnings)
 
     def test_detects_portuguese_from_body_not_legacy_english_path_label(self):
         document = self.document(

@@ -25,6 +25,9 @@ _ENGLISH_MARKERS = frozenset({
 })
 _WORD = re.compile(r"[\wÀ-ÖØ-öø-ÿ]+", re.UNICODE)
 _HAN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
+_URL = re.compile(r"https?://[^\s<>\"']+")
+_PROVENANCE_HEADING = re.compile(r"^\s{0,3}#{1,6}\s+provenance\s*$", re.IGNORECASE)
+_ROOTS = frozenset({"01_company_info", "02_customer_service", "03_company_policies", "04_product_categories"})
 
 
 @dataclass(frozen=True)
@@ -53,10 +56,12 @@ def classify_document(relative_path: str, document: NormalizedDocument) -> Class
     if not isinstance(document, NormalizedDocument):
         raise TypeError("document must be a NormalizedDocument")
 
-    path = _canonical_path(relative_path)
-    directory_path = _route_path(path)
+    components = _path_components(relative_path)
+    directory_path = _route_path(components)
     if directory_path is None:
         directory_path = _route_content(document.markdown)
+    if directory_path is not None and directory_path not in DIRECTORY_KEYS:
+        raise ValueError(f"unknown taxonomy directory key: {directory_path}")
 
     warnings: list[str] = []
     if directory_path is None:
@@ -84,43 +89,79 @@ def classify_document(relative_path: str, document: NormalizedDocument) -> Class
     )
 
 
-def _canonical_path(relative_path: str) -> str:
-    return unicodedata.normalize("NFC", relative_path).replace("\\", "/").casefold()
+def _path_components(relative_path: str) -> tuple[str, ...]:
+    normalized = unicodedata.normalize("NFC", relative_path).replace("\\", "/")
+    return tuple(component.casefold() for component in normalized.split("/") if component)
 
 
-def _route_path(path: str) -> str | None:
-    """Apply source-folder rules in their declared precedence order."""
-    if _contains_any(
-        path,
-        ("research", "market", "traffic", "competition", "reputation", "竞争", "市场", "流量", "口碑", "评价"),
-    ):
-        return "research-reference"
-    if _contains_any(path, ("annual", "financial", "filing", "governance", "investor", "10-k", "10-q", "投资者关系", "公司治理", "财务")):
-        return "investor-relations"
-    if _contains_any(path, ("announcement", "announcements", "press-release", "press_release", "official-news", "official_news", "新闻资讯")):
-        return "official-news"
-    if _contains_any(path, ("公司概况", "历史沿革", "corporate-history", "corporate_history", "company-history", "company_history")):
+def _route_path(components: tuple[str, ...]) -> str | None:
+    """Route only known source components before considering report filenames."""
+    roots = set(components).intersection(_ROOTS)
+    if "01_company_info" in roots:
         return "brand-company"
-    if _contains_any(path, ("产品目录", "产品分类树")):
-        return "product-category"
-    if "01_company_info" in path:
-        return "brand-company"
-    if "02_customer_service" in path:
-        if _contains_any(path, ("delivery", "shipping", "fulfilment", "fulfillment", "tracking", "dispatch")):
+    if "02_customer_service" in roots:
+        if _components_include(components, ("delivery", "shipping", "fulfilment", "fulfillment", "tracking", "dispatch")):
             return "logistics-fulfilment"
         return "customer-transaction"
-    if "03_company_policies" in path:
-        if "all you need to know" in path or "all_you_need_to_know" in path:
+    if "03_company_policies" in roots:
+        if _components_include_phrase(components, ("all you need to know",)):
             return "product-category"
         return "policy-compliance"
-    if "04_product_categories" in path:
-        if _contains_any(
-            path,
-            ("new arrival", "new_arrival", "best seller", "best_seller", "bestseller", "novo em", "mais vendidos"),
+    if "04_product_categories" in roots:
+        if _components_include_phrase(
+            components,
+            (
+                "new arrival", "new arrivals", "new_arrival", "best seller", "best sellers", "best_seller",
+                "bestseller", "novo em", "mais vendidos",
+            ),
         ):
             return "new-hot-products"
         return "product-category"
+    if "litb_reports" in components:
+        return _route_report(components)
     return None
+
+
+def _route_report(components: tuple[str, ...]) -> str | None:
+    if _components_include(components, ("竞争", "市场", "流量", "口碑", "评价")) or _components_include_phrase(
+        components, ("research", "market", "traffic", "competition", "reputation")
+    ):
+        return "research-reference"
+    if _components_include(components, ("投资者关系", "公司治理", "财务")) or _components_include_phrase(
+        components, ("annual", "financial", "filing", "governance", "investor", "10 k", "10 q")
+    ):
+        return "investor-relations"
+    if _components_include(components, ("新闻资讯",)) or _components_include_phrase(
+        components, ("announcement", "press release", "official news")
+    ):
+        return "official-news"
+    if _components_include(components, ("公司概况", "历史沿革")) or _components_include_phrase(
+        components, ("corporate history", "company history")
+    ):
+        return "brand-company"
+    if _components_include(components, ("产品目录", "产品分类树")):
+        return "product-category"
+    return None
+
+
+def _components_include(components: tuple[str, ...], signals: tuple[str, ...]) -> bool:
+    for component in components:
+        tokens = frozenset(re.findall(r"[a-z0-9]+", component))
+        for signal in signals:
+            if signal.isascii() and signal in tokens:
+                return True
+            if not signal.isascii() and signal in component:
+                return True
+    return False
+
+
+def _components_include_phrase(components: tuple[str, ...], phrases: tuple[str, ...]) -> bool:
+    normalized_components = tuple(re.sub(r"[_-]+", " ", component) for component in components)
+    return any(
+        re.search(rf"(?<![a-z0-9]){re.escape(phrase.replace('_', ' '))}(?![a-z0-9])", component)
+        for component in normalized_components
+        for phrase in phrases
+    )
 
 
 def _route_content(markdown: str) -> str | None:
@@ -147,20 +188,34 @@ def _contains_any(text: str, signals: tuple[str, ...]) -> bool:
 
 
 def _detect_language(markdown: str) -> str:
-    if _HAN.search(markdown):
-        return "zh"
-    words = tuple(word.casefold() for word in _WORD.findall(markdown))
+    prose = _prose_for_language(markdown)
+    words = tuple(word.casefold() for word in _WORD.findall(prose))
     portuguese_score = sum(word in _PORTUGUESE_MARKERS for word in words)
+    if "mais vendidos" in prose.casefold():
+        portuguese_score += 2
+    if "novo em" in prose.casefold():
+        portuguese_score += 2
     english_score = sum(word in _ENGLISH_MARKERS for word in words)
-    accented_portuguese = sum(character in "ãõçáéíóúâêô" for character in markdown.casefold())
-    portuguese_score += accented_portuguese
-    if portuguese_score >= 2 and portuguese_score > english_score:
-        return "pt"
-    if english_score:
-        return "en"
-    # The governed source is Portuguese/English/Chinese only. Plain Latin text
-    # without Portuguese signals is treated as English; no filename is used.
-    return "en" if any(character.isalpha() for character in markdown) else "und"
+    candidates = set()
+    if len(_HAN.findall(prose)) >= 2:
+        candidates.add("zh")
+    if portuguese_score >= 2:
+        candidates.add("pt")
+    if english_score >= 2:
+        candidates.add("en")
+    return candidates.pop() if len(candidates) == 1 else "und"
+
+
+def _prose_for_language(markdown: str) -> str:
+    prose_lines: list[str] = []
+    in_provenance = False
+    for line in markdown.splitlines():
+        if _PROVENANCE_HEADING.match(line):
+            in_provenance = True
+            continue
+        if not in_provenance:
+            prose_lines.append(line)
+    return _URL.sub(" ", "\n".join(prose_lines))
 
 
 def _governance_for(

@@ -6,9 +6,9 @@ from dataclasses import dataclass
 import hashlib
 import re
 import unicodedata
+from urllib.parse import urlsplit
 
 
-_CHINESE_INLINE_LINK = re.compile(r"【\s*([^】\n]+?)\s*】\s*[（(]\s*([^\s)）]+)\s*[）)]")
 _EMPTY_HEADING = re.compile(r"^\s{0,3}#{1,6}\s*$")
 _ISOLATED_BACKSLASH = re.compile(r"^\s*\\\s*$")
 _MARKDOWN_HEADING = re.compile(r"^\s{0,3}#\s+(.+?)\s*$")
@@ -53,7 +53,7 @@ def normalize_document(raw: str) -> NormalizedDocument:
                 previous_blank = True
             continue
 
-        line = _CHINESE_INLINE_LINK.sub(r"[\1](\2)", line)
+        line = _normalize_inline_link_wrappers(line, warnings)
         is_blank = line == ""
         if is_blank and previous_blank:
             continue
@@ -87,6 +87,66 @@ def _extract_title(lines: list[str]) -> str:
         if match:
             return match.group(1).strip().rstrip("#").rstrip()
     return ""
+
+
+def _normalize_inline_link_wrappers(line: str, warnings: list[str]) -> str:
+    """Convert only balanced, HTTP(S) Chinese-style link wrappers."""
+    rendered: list[str] = []
+    position = 0
+    while True:
+        start = line.find("【", position)
+        if start < 0:
+            rendered.append(line[position:])
+            return "".join(rendered)
+        close_label = line.find("】", start + 1)
+        if close_label < 0:
+            rendered.append(line[position:])
+            return "".join(rendered)
+        opener = close_label + 1
+        while opener < len(line) and line[opener].isspace():
+            opener += 1
+        if opener == len(line) or line[opener] not in "(（":
+            rendered.append(line[position:close_label + 1])
+            position = close_label + 1
+            continue
+        close_destination = _find_wrapper_close(line, opener)
+        if close_destination is None:
+            rendered.append(line[position:])
+            return "".join(rendered)
+
+        destination = line[opener + 1:close_destination].strip()
+        if _is_http_url(destination):
+            label = line[start + 1:close_label].strip()
+            rendered.append(line[position:start])
+            rendered.append(f"[{label}]({destination})")
+        else:
+            _append_warning(warnings, "preserved_invalid_inline_link")
+            rendered.append(line[position:close_destination + 1])
+        position = close_destination + 1
+
+
+def _find_wrapper_close(line: str, opener: int) -> int | None:
+    opening, closing = ("(", ")") if line[opener] == "(" else ("（", "）")
+    depth = 0
+    for index in range(opener, len(line)):
+        character = line[index]
+        if character == opening:
+            depth += 1
+        elif character == closing:
+            depth -= 1
+            if depth == 0:
+                return index
+    return None
+
+
+def _is_http_url(destination: str) -> bool:
+    if not destination or any(character.isspace() for character in destination):
+        return False
+    try:
+        parsed = urlsplit(destination)
+    except ValueError:
+        return False
+    return parsed.scheme.casefold() in {"http", "https"} and bool(parsed.netloc)
 
 
 def _extract_urls(markdown: str) -> tuple[str, ...]:

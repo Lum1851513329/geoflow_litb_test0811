@@ -53,3 +53,25 @@ class NormalizeDocumentTest(unittest.TestCase):
             document.markdown,
         )
         self.assertEqual(("https://www.lightinthebox.com/pt/returns",), document.source_urls)
+
+    def test_preserves_unsafe_inline_link_wrapper_and_warns(self):
+        raw = "【Run script】(javascript:alert(1))\n"
+
+        document = normalize_document(raw)
+
+        self.assertEqual(raw, document.markdown)
+        self.assertIn("preserved_invalid_inline_link", document.warnings)
+
+    def test_preserves_malformed_http_inline_link_wrapper_and_warns(self):
+        raw = "【Broken】(https://[)\n"
+
+        document = normalize_document(raw)
+
+        self.assertEqual(raw, document.markdown)
+        self.assertIn("preserved_invalid_inline_link", document.warnings)
+
+    def test_converts_valid_inline_link_with_nested_parentheses(self):
+        document = normalize_document("【Guide】(https://example.com/a_(b))\n")
+
+        self.assertEqual("[Guide](https://example.com/a_(b))\n", document.markdown)
+        self.assertEqual(("https://example.com/a_(b)",), document.source_urls)
