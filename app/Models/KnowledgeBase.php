@@ -128,4 +128,20 @@ class KnowledgeBase extends Model
     {
         return $this->hasMany(KnowledgeDuplicate::class, 'canonical_document_id');
     }
+
+    public function keywordNodes(): BelongsToMany
+    {
+        return $this->belongsToMany(KeywordNode::class, 'knowledge_keyword_nodes', 'knowledge_base_id', 'keyword_node_id')
+            ->using(KnowledgeKeywordNode::class)
+            ->withPivot(['confidence', 'source', 'is_primary'])
+            ->withTimestamps();
+    }
+
+    public function keywordClusters(): BelongsToMany
+    {
+        return $this->belongsToMany(KeywordCluster::class, 'knowledge_keyword_clusters', 'knowledge_base_id', 'keyword_cluster_id')
+            ->using(KnowledgeKeywordCluster::class)
+            ->withPivot(['confidence', 'source', 'is_primary'])
+            ->withTimestamps();
+    }
 }

@@ -43,4 +43,12 @@ class KeywordNode extends Model
     {
         return $this->hasMany(KeywordCluster::class, 'taxonomy_node_id');
     }
+
+    public function knowledgeBases(): BelongsToMany
+    {
+        return $this->belongsToMany(KnowledgeBase::class, 'knowledge_keyword_nodes', 'keyword_node_id', 'knowledge_base_id')
+            ->using(KnowledgeKeywordNode::class)
+            ->withPivot(['confidence', 'source', 'is_primary'])
+            ->withTimestamps();
+    }
 }
