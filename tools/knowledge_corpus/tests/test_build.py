@@ -266,6 +266,29 @@ class CorpusBuilderTest(unittest.TestCase):
         self.assertEqual("untouched", marker.read_text(encoding="utf-8"))
         self.assertEqual([marker], list(victim.iterdir()))
 
+    def test_output_ancestor_symlink_into_source_is_rejected_without_cleanup_aliasing(self):
+        self.make_governed_fixture()
+        marker = self.write("victim-marker.bin", "source victim must remain untouched")
+        source_hashes_before = self.source_hashes()
+        source_alias = self.root / "source-alias"
+        source_alias.symlink_to(self.source, target_is_directory=True)
+        aliased_output = source_alias / "knowledge_cleanup_work" / "output"
+
+        with self.assertRaises(BuildError):
+            build_corpus(
+                self.source,
+                aliased_output,
+                brand="lightinthebox",
+                site="lightinthebox-main",
+            )
+
+        self.assertEqual("source victim must remain untouched", marker.read_text(encoding="utf-8"))
+        self.assertEqual(source_hashes_before, self.source_hashes())
+        self.assertEqual(
+            "# Stale\n\nThe old output.\n",
+            (self.source / "knowledge_cleanup_work/output/stale.md").read_text(encoding="utf-8"),
+        )
+
     def test_atomic_exchange_failure_leaves_existing_output_byte_identical(self):
         self.make_governed_fixture()
         build_corpus(self.source, self.output, brand="lightinthebox", site="lightinthebox-main")
@@ -331,6 +354,12 @@ class CorpusBuilderTest(unittest.TestCase):
         self.assertEqual({"new.txt": b"new"}, self.artifact_bytes(first))
         self.assertEqual({"live.txt": b"live"}, self.artifact_bytes(second))
 
+    def test_atomic_exchange_uses_platform_specific_at_fdcwd(self):
+        self.assertEqual(-2, corpus_build._at_fdcwd("Darwin"))
+        self.assertEqual(-100, corpus_build._at_fdcwd("Linux"))
+        with self.assertRaises(BuildError):
+            corpus_build._at_fdcwd("UnsupportedOS")
+
     def test_exact_then_near_duplicate_chain_points_directly_to_final_document(self):
         self.make_governed_fixture()
         shared = "The return policy explains customers and products. " + " ".join(
@@ -372,6 +401,51 @@ class CorpusBuilderTest(unittest.TestCase):
         self.assertEqual({final_record["document_id"]}, {
             record["duplicate_of_document_id"] for record in chained_audits
         })
+
+    def test_identical_english_txt_orphans_resolve_to_final_exclusion_canonical(self):
+        self.make_governed_fixture()
+        orphan_body = (
+            "# Orphan mirror\n\n"
+            "The company return policy serves customers and products.\n"
+        )
+        orphan_paths = {
+            self.write(
+                "LightInTheBox_PT_Official_KB_TXT/02_Customer_Service/orphan-a.txt",
+                orphan_body,
+            ).relative_to(self.source).as_posix(),
+            self.write(
+                "LightInTheBox_PT_Official_KB_TXT/02_Customer_Service/archive/orphan-b.txt",
+                orphan_body,
+            ).relative_to(self.source).as_posix(),
+        }
+
+        summary = build_corpus(
+            self.source,
+            self.output,
+            brand="lightinthebox",
+            site="lightinthebox-main",
+        )
+
+        manifest = self.jsonl(self.output, "manifest.jsonl")
+        duplicates = self.jsonl(self.output, "duplicate_audit.jsonl")
+        exclusions = self.jsonl(self.output, "exclusion_audit.jsonl")
+        orphan_exclusions = [
+            record for record in exclusions
+            if record["reason"] == "txt_mirror_without_markdown_canonical"
+        ]
+        exact_orphan = next(
+            record for record in duplicates
+            if record["kind"] == "exact" and record["source_file_path"] in orphan_paths
+        )
+
+        self.assertEqual(1, len(orphan_exclusions))
+        target = orphan_exclusions[0]
+        self.assertEqual("en", target["language_code"])
+        self.assertIn(target["source_file_path"], orphan_paths)
+        self.assertEqual(target["source_file_path"], exact_orphan["duplicate_of_source_file_path"])
+        self.assertEqual(target["document_id"], exact_orphan["duplicate_of_document_id"])
+        self.assertTrue(orphan_paths.isdisjoint({record["source_file_path"] for record in manifest}))
+        self.assertTrue(summary["validation"]["valid_duplicate_targets"])
 
     def test_newest_lifecycle_date_wins_across_retrieved_and_effective_fields(self):
         self.make_governed_fixture()

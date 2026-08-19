@@ -77,8 +77,9 @@ def build_corpus(
     validated in a sibling temporary directory, then published as one tree.
     """
     source_root = Path(source).expanduser().resolve(strict=True)
-    output_path = Path(os.path.abspath(Path(output).expanduser()))
-    _reject_output_symlink(output_path)
+    caller_output_path = Path(os.path.abspath(Path(output).expanduser()))
+    _reject_output_symlink(caller_output_path)
+    output_path = _canonical_output_path(caller_output_path, source_root)
     _validate_configuration(source_root, output_path, brand, site)
     _validate_source_structure(source_root)
 
@@ -115,6 +116,9 @@ def build_corpus(
         if document["source_kind"] == "canonical_md"
     ]
     exclusions = _build_exclusion_audit(documents, brand, site)
+    exclusions.extend(
+        _build_orphan_txt_exclusions(canonical_documents, documents, brand, site)
+    )
     duplicate_audit = _exact_audit_records(exact_records, documents, brand, site)
     duplicate_audit.extend(
         _audit_surviving_txt_mirrors(canonical_documents, documents, brand, site)
@@ -211,7 +215,10 @@ def _validate_configuration(source: Path, output: Path, brand: str, site: str) -
         raise BuildError("output cannot replace or contain the source directory")
     if source in output.parents:
         relative_output = output.relative_to(source)
-        if not relative_output.parts or relative_output.parts[0] != "knowledge_cleanup_work":
+        if (
+            len(relative_output.parts) < 2
+            or relative_output.parts[0] != "knowledge_cleanup_work"
+        ):
             raise BuildError("output inside source must be under knowledge_cleanup_work")
     if output.exists() and not output.is_dir():
         raise BuildError(f"output exists and is not a directory: {output}")
@@ -224,6 +231,41 @@ def _reject_output_symlink(output: Path) -> None:
         return
     if stat.S_ISLNK(mode):
         raise BuildError(f"output path must not be a symlink: {output}")
+
+
+def _canonical_output_path(caller_output: Path, source: Path) -> Path:
+    symlinked_ancestor = _has_symlinked_ancestor(caller_output)
+    canonical_output = caller_output.resolve(strict=False)
+    _reject_output_symlink(canonical_output)
+    worktree = Path(__file__).resolve().parents[2]
+
+    if symlinked_ancestor and (
+        _is_within(canonical_output, source) or _is_within(canonical_output, worktree)
+    ):
+        raise BuildError("output symlink ancestor resolves inside a protected boundary")
+    if _paths_overlap(canonical_output, worktree):
+        raise BuildError("output cannot overlap the application worktree")
+    return canonical_output
+
+
+def _has_symlinked_ancestor(path: Path) -> bool:
+    current = Path(path.anchor)
+    for part in path.parts[1:-1]:
+        current /= part
+        try:
+            if stat.S_ISLNK(current.lstat().st_mode):
+                return True
+        except FileNotFoundError:
+            return False
+    return False
+
+
+def _is_within(path: Path, boundary: Path) -> bool:
+    return path == boundary or boundary in path.parents
+
+
+def _paths_overlap(first: Path, second: Path) -> bool:
+    return _is_within(first, second) or _is_within(second, first)
 
 
 def _discover(source: Path) -> tuple[list[Path], list[Path]]:
@@ -433,18 +475,52 @@ def _build_exclusion_audit(
         classification = _classification(document)
         if classification.language_code == "en":
             continue
-        records.append({
-            "document_id": _document_id(document, brand, site),
-            "canonical_document_key": document["canonical_document_key"],
-            "source_file_path": document["source_file_path"],
-            "source_file_hash": document["source_file_hash"],
-            "normalized_content_hash": _normalized(document).normalized_hash,
-            "language_code": classification.language_code,
-            "reason": "non_english_initial_corpus",
-            "source_kind": document["source_kind"],
-            "warnings": sorted(set((*classification.warnings, *_normalized(document).warnings))),
-        })
+        records.append(_exclusion_record(
+            document, brand, site, reason="non_english_initial_corpus"
+        ))
     return records
+
+
+def _build_orphan_txt_exclusions(
+    canonical_documents: Sequence[dict[str, object]],
+    all_documents: Sequence[dict[str, object]],
+    brand: str,
+    site: str,
+) -> list[dict[str, object]]:
+    discovered_paths = {str(document["source_file_path"]) for document in all_documents}
+    records: list[dict[str, object]] = []
+    for document in canonical_documents:
+        if (
+            document["source_kind"] != "txt_mirror"
+            or _classification(document).language_code != "en"
+            or _expected_markdown_path(str(document["source_file_path"])) in discovered_paths
+        ):
+            continue
+        records.append(_exclusion_record(
+            document,
+            brand,
+            site,
+            reason="txt_mirror_without_markdown_canonical",
+        ))
+    return records
+
+
+def _exclusion_record(
+    document: dict[str, object], brand: str, site: str, *, reason: str
+) -> dict[str, object]:
+    classification = _classification(document)
+    normalized = _normalized(document)
+    return {
+        "document_id": _document_id(document, brand, site),
+        "canonical_document_key": document["canonical_document_key"],
+        "source_file_path": document["source_file_path"],
+        "source_file_hash": document["source_file_hash"],
+        "normalized_content_hash": normalized.normalized_hash,
+        "language_code": classification.language_code,
+        "reason": reason,
+        "source_kind": document["source_kind"],
+        "warnings": sorted(set((*classification.warnings, *normalized.warnings))),
+    }
 
 
 def _exact_audit_records(
@@ -482,10 +558,7 @@ def _audit_surviving_txt_mirrors(
         if document["source_kind"] != "txt_mirror":
             continue
         source_path = str(document["source_file_path"])
-        expected_path = (
-            source_path.replace(f"{TXT_MIRROR_ROOT}/", f"{CANONICAL_MARKDOWN_ROOT}/", 1)
-            .removesuffix(".txt") + ".md"
-        )
+        expected_path = _expected_markdown_path(source_path)
         target = by_path.get(expected_path)
         record: dict[str, object] = {
             "kind": "txt_mirror_excluded",
@@ -502,6 +575,13 @@ def _audit_surviving_txt_mirrors(
             })
         records.append(record)
     return records
+
+
+def _expected_markdown_path(txt_path: str) -> str:
+    return (
+        txt_path.replace(f"{TXT_MIRROR_ROOT}/", f"{CANONICAL_MARKDOWN_ROOT}/", 1)
+        .removesuffix(".txt") + ".md"
+    )
 
 
 def _apply_near_records(
@@ -1002,10 +1082,10 @@ def _publish(stage: Path, output: Path) -> None:
 def _atomic_exchange(first: Path, second: Path) -> None:
     """Atomically exchange two directory names or fail before changing either."""
     system = platform.system()
+    at_fdcwd = _at_fdcwd(system)
     libc = ctypes.CDLL(None, use_errno=True)
     first_bytes = os.fsencode(first)
     second_bytes = os.fsencode(second)
-    at_fdcwd = -2
 
     if system == "Darwin" and hasattr(libc, "renameatx_np"):
         rename = libc.renameatx_np
@@ -1023,6 +1103,14 @@ def _atomic_exchange(first: Path, second: Path) -> None:
     if result != 0:
         error_number = ctypes.get_errno()
         raise OSError(error_number, os.strerror(error_number), os.fspath(first), os.fspath(second))
+
+
+def _at_fdcwd(system: str) -> int:
+    if system == "Darwin":
+        return -2
+    if system == "Linux":
+        return -100
+    raise BuildError(f"atomic directory exchange is unsupported on {system}")
 
 
 def _argument_parser() -> argparse.ArgumentParser:
