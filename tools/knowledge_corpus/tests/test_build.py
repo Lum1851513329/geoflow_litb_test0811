@@ -3,7 +3,9 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
+from tools.knowledge_corpus import build as corpus_build
 from tools.knowledge_corpus.build import BuildError, build_corpus, main
 
 
@@ -41,7 +43,18 @@ class CorpusBuilderTest(unittest.TestCase):
             if path.is_file()
         }
 
+    def make_source_structure(self):
+        for family in corpus_build.OFFICIAL_FAMILIES:
+            (self.source / corpus_build.CANONICAL_MARKDOWN_ROOT / family).mkdir(
+                parents=True, exist_ok=True
+            )
+            (self.source / corpus_build.TXT_MIRROR_ROOT / family).mkdir(
+                parents=True, exist_ok=True
+            )
+        (self.source / corpus_build.REPORT_ROOT).mkdir(parents=True, exist_ok=True)
+
     def make_governed_fixture(self):
+        self.make_source_structure()
         old_about = self.write(
             "LightInTheBox_PT_Official_KB/01_Company_Info/archive/about-2025.md",
             "# About LightInTheBox\n\n"
@@ -237,6 +250,314 @@ class CorpusBuilderTest(unittest.TestCase):
             build_corpus(self.source, self.output, brand="lightinthebox", site="lightinthebox-main")
 
         self.assertFalse(self.output.exists())
+
+    def test_output_symlink_is_rejected_without_touching_its_target(self):
+        self.make_governed_fixture()
+        victim = self.root / "victim"
+        victim.mkdir()
+        marker = victim / "keep.txt"
+        marker.write_text("untouched", encoding="utf-8")
+        self.output.symlink_to(victim, target_is_directory=True)
+
+        with self.assertRaises(BuildError):
+            build_corpus(self.source, self.output, brand="lightinthebox", site="lightinthebox-main")
+
+        self.assertTrue(self.output.is_symlink())
+        self.assertEqual("untouched", marker.read_text(encoding="utf-8"))
+        self.assertEqual([marker], list(victim.iterdir()))
+
+    def test_atomic_exchange_failure_leaves_existing_output_byte_identical(self):
+        self.make_governed_fixture()
+        build_corpus(self.source, self.output, brand="lightinthebox", site="lightinthebox-main")
+        published_before = self.artifact_bytes(self.output)
+
+        with patch.object(corpus_build, "_atomic_exchange", side_effect=OSError("injected exchange failure")):
+            with self.assertRaises(OSError):
+                build_corpus(
+                    self.source,
+                    self.output,
+                    brand="lightinthebox",
+                    site="lightinthebox-main",
+                )
+
+        self.assertEqual(published_before, self.artifact_bytes(self.output))
+        self.assertFalse(any(path.name.startswith(".output.old-") for path in self.root.iterdir()))
+
+    def test_existing_output_uses_one_atomic_exchange_and_remains_readable(self):
+        self.make_governed_fixture()
+        build_corpus(self.source, self.output, brand="lightinthebox", site="lightinthebox-main")
+        real_exchange = corpus_build._atomic_exchange
+
+        with patch.object(corpus_build, "_atomic_exchange", wraps=real_exchange) as exchange:
+            summary = build_corpus(
+                self.source,
+                self.output,
+                brand="lightinthebox",
+                site="lightinthebox-main",
+            )
+
+        exchange.assert_called_once()
+        self.assertEqual(summary, json.loads((self.output / "run_summary.json").read_text(encoding="utf-8")))
+        self.assertEqual(4, len(self.jsonl(self.output, "manifest.jsonl")))
+        self.assertFalse(any(path.name.startswith(".output.old-") for path in self.root.iterdir()))
+
+    def test_old_output_cleanup_failure_does_not_report_publication_failure(self):
+        self.make_governed_fixture()
+        build_corpus(self.source, self.output, brand="lightinthebox", site="lightinthebox-main")
+
+        with patch.object(corpus_build.shutil, "rmtree", side_effect=OSError("injected cleanup failure")):
+            summary = build_corpus(
+                self.source,
+                self.output,
+                brand="lightinthebox",
+                site="lightinthebox-main",
+            )
+
+        self.assertEqual(4, summary["counts"]["manifest_documents"])
+        self.assertEqual(4, len(self.jsonl(self.output, "manifest.jsonl")))
+
+    def test_unsupported_atomic_exchange_platform_fails_without_mutation(self):
+        first = self.root / "first"
+        second = self.root / "second"
+        first.mkdir()
+        second.mkdir()
+        (first / "new.txt").write_text("new", encoding="utf-8")
+        (second / "live.txt").write_text("live", encoding="utf-8")
+
+        with patch.object(corpus_build.platform, "system", return_value="UnsupportedOS"):
+            with self.assertRaises(BuildError):
+                corpus_build._atomic_exchange(first, second)
+
+        self.assertEqual({"new.txt": b"new"}, self.artifact_bytes(first))
+        self.assertEqual({"live.txt": b"live"}, self.artifact_bytes(second))
+
+    def test_exact_then_near_duplicate_chain_points_directly_to_final_document(self):
+        self.make_governed_fixture()
+        shared = "The return policy explains customers and products. " + " ".join(
+            f"policyword{number}" for number in range(100)
+        )
+        exact_canonical = self.write(
+            "LightInTheBox_PT_Official_KB/03_Company_Policies/chain-a.md",
+            f"# Shared policy\n\n{shared}\n",
+        )
+        exact_mirror = self.write(
+            "LightInTheBox_PT_Official_KB_TXT/03_Company_Policies/chain-a.txt",
+            f"# Shared policy\n\n{shared}\n",
+        )
+        final_canonical = self.write(
+            "LightInTheBox_PT_Official_KB/03_Company_Policies/chain-c.md",
+            "# Shared policy\n\n"
+            "**Original URL:** https://www.lightinthebox.com/policies/shared\n\n"
+            f"{shared}\n\nOfficial summary.\n",
+        )
+
+        build_corpus(self.source, self.output, brand="lightinthebox", site="lightinthebox-main")
+
+        manifest = self.jsonl(self.output, "manifest.jsonl")
+        duplicates = self.jsonl(self.output, "duplicate_audit.jsonl")
+        final_path = final_canonical.relative_to(self.source).as_posix()
+        final_record = next(record for record in manifest if record["source_file_path"] == final_path)
+        chained_sources = {
+            exact_canonical.relative_to(self.source).as_posix(),
+            exact_mirror.relative_to(self.source).as_posix(),
+        }
+        chained_audits = [
+            record for record in duplicates if record["source_file_path"] in chained_sources
+        ]
+
+        self.assertEqual(2, len(chained_audits))
+        self.assertEqual({final_path}, {
+            record["duplicate_of_source_file_path"] for record in chained_audits
+        })
+        self.assertEqual({final_record["document_id"]}, {
+            record["duplicate_of_document_id"] for record in chained_audits
+        })
+
+    def test_newest_lifecycle_date_wins_across_retrieved_and_effective_fields(self):
+        self.make_governed_fixture()
+        older = self.write(
+            "LightInTheBox_PT_Official_KB/01_Company_Info/date-old.md",
+            "# Date version\n\n"
+            "**Original URL:** https://www.lightinthebox.com/company/date-version\n"
+            "**Retrieved Date:** 2025-12-31\n\n"
+            "Our company serves customers with the older version.\n",
+        )
+        newer = self.write(
+            "LightInTheBox_PT_Official_KB/01_Company_Info/date-new.md",
+            "# Date version\n\n"
+            "**Original URL:** https://www.lightinthebox.com/company/date-version\n"
+            "**Effective Date:** 2026-01-01\n\n"
+            "Our company serves customers with the newer version.\n",
+        )
+
+        build_corpus(self.source, self.output, brand="lightinthebox", site="lightinthebox-main")
+
+        versions = [
+            record for record in self.jsonl(self.output, "manifest.jsonl")
+            if record["canonical_document_key"]
+            == "url:https://www.lightinthebox.com/company/date-version"
+        ]
+        active = next(record for record in versions if record["lifecycle_status"] == "active")
+        self.assertEqual(newer.relative_to(self.source).as_posix(), active["source_file_path"])
+        self.assertEqual(
+            older.relative_to(self.source).as_posix(),
+            next(record for record in versions if record["lifecycle_status"] == "superseded")[
+                "source_file_path"
+            ],
+        )
+
+    def test_natural_version_order_selects_v10_after_v2(self):
+        self.make_governed_fixture()
+        version_two = self.write(
+            "LightInTheBox_PT_Official_KB/01_Company_Info/version-2.md",
+            "# Natural version\n\n"
+            "**Original URL:** https://www.lightinthebox.com/company/natural-version\n"
+            "**Version:** v2\n\n"
+            "Our company serves customers with version two.\n",
+        )
+        version_ten = self.write(
+            "LightInTheBox_PT_Official_KB/01_Company_Info/version-10.md",
+            "# Natural version\n\n"
+            "**Original URL:** https://www.lightinthebox.com/company/natural-version\n"
+            "**Version:** v10\n\n"
+            "Our company serves customers with version ten.\n",
+        )
+
+        build_corpus(self.source, self.output, brand="lightinthebox", site="lightinthebox-main")
+
+        versions = [
+            record for record in self.jsonl(self.output, "manifest.jsonl")
+            if record["canonical_document_key"]
+            == "url:https://www.lightinthebox.com/company/natural-version"
+        ]
+        active = next(record for record in versions if record["lifecycle_status"] == "active")
+        self.assertEqual(version_ten.relative_to(self.source).as_posix(), active["source_file_path"])
+        self.assertNotEqual(version_two.relative_to(self.source).as_posix(), active["source_file_path"])
+
+    def test_aba_mutation_during_load_fails_even_when_final_source_hash_matches(self):
+        fixture = self.make_governed_fixture()
+        target = fixture["current_about"]
+        original = target.read_bytes()
+        mutated = original.replace(b"serves customers", b"mutates customers")
+        real_load = corpus_build._load_document
+        mutated_once = False
+
+        def load_with_aba(source, path, brand, site, source_kind, *args, **kwargs):
+            nonlocal mutated_once
+            if path.resolve() == target.resolve() and not mutated_once:
+                mutated_once = True
+                path.write_bytes(mutated)
+                try:
+                    return real_load(source, path, brand, site, source_kind, *args, **kwargs)
+                finally:
+                    path.write_bytes(original)
+            return real_load(source, path, brand, site, source_kind, *args, **kwargs)
+
+        with patch.object(corpus_build, "_load_document", side_effect=load_with_aba):
+            with self.assertRaises(BuildError):
+                build_corpus(
+                    self.source,
+                    self.output,
+                    brand="lightinthebox",
+                    site="lightinthebox-main",
+                )
+
+        self.assertTrue(mutated_once)
+        self.assertEqual(original, target.read_bytes())
+        self.assertFalse(self.output.exists())
+
+    def test_nested_excluded_components_are_pruned_at_every_depth(self):
+        self.make_governed_fixture()
+        nested_exclusions = (
+            "LightInTheBox_PT_Official_KB/01_Company_Info/archive/Keyword_Library/leak.md",
+            "LightInTheBox_PT_Official_KB/02_Customer_Service/nested/knowledge_cleanup_work/leak.md",
+            "LightInTheBox_PT_Official_KB/03_Company_Policies/nested/.DS_Store/leak.md",
+            "LightInTheBox_PT_Official_KB/04_Product_Categories/nested/output/leak.md",
+            "officialknowege/LITB_Reports/nested/work/leak.md",
+        )
+        for relative_path in nested_exclusions:
+            self.write(
+                relative_path,
+                "# Leaked document\n\nThe company serves customers and products.\n",
+            )
+
+        summary = build_corpus(
+            self.source,
+            self.output,
+            brand="lightinthebox",
+            site="lightinthebox-main",
+        )
+
+        audited_paths = {
+            record["source_file_path"]
+            for name in ("manifest.jsonl", "duplicate_audit.jsonl", "exclusion_audit.jsonl")
+            for record in self.jsonl(self.output, name)
+        }
+        self.assertEqual(7, summary["counts"]["canonical_source_files"])
+        self.assertTrue(set(nested_exclusions).isdisjoint(audited_paths))
+
+    def test_missing_or_empty_required_source_structure_fails_closed(self):
+        with self.subTest(case="all roots missing"):
+            self.source.mkdir()
+            with self.assertRaises(BuildError):
+                build_corpus(
+                    self.source,
+                    self.output,
+                    brand="lightinthebox",
+                    site="lightinthebox-main",
+                )
+
+        self.source.mkdir(exist_ok=True)
+        self.make_source_structure()
+        with self.subTest(case="empty canonical corpus"):
+            with self.assertRaises(BuildError):
+                build_corpus(
+                    self.source,
+                    self.output,
+                    brand="lightinthebox",
+                    site="lightinthebox-main",
+                )
+
+        (self.source / corpus_build.REPORT_ROOT).rmdir()
+        self.write(
+            "LightInTheBox_PT_Official_KB/01_Company_Info/about.md",
+            "# About\n\nOur company serves customers and products.\n",
+        )
+        with self.subTest(case="one governed root missing"):
+            with self.assertRaises(BuildError):
+                build_corpus(
+                    self.source,
+                    self.output,
+                    brand="lightinthebox",
+                    site="lightinthebox-main",
+                )
+
+    def test_front_matter_scalars_round_trip_through_json_compatible_values(self):
+        self.make_governed_fixture()
+        edge = self.write(
+            "LightInTheBox_PT_Official_KB/01_Company_Info/quoted-边缘.md",
+            "# Edge: \"quoted\" [yes, no, null] & symbols\n\n"
+            "**Original URL:** https://www.lightinthebox.com/company/edge?note=a:b&quoted=%22x%22\n\n"
+            "Our company serves customers and the products.\n",
+        )
+
+        build_corpus(self.source, self.output, brand="lightinthebox", site="lightinthebox-main")
+
+        record = next(
+            item for item in self.jsonl(self.output, "manifest.jsonl")
+            if item["source_file_path"] == edge.relative_to(self.source).as_posix()
+        )
+        cleaned = (self.output / record["cleaned_file_path"]).read_text(encoding="utf-8")
+        front_matter = cleaned.split("---\n", 2)[1].strip().splitlines()
+        parsed = {
+            key: json.loads(value)
+            for key, value in (line.split(": ", 1) for line in front_matter)
+        }
+
+        self.assertEqual('Edge: "quoted" [yes, no, null] & symbols', parsed["title"])
+        self.assertEqual(record["source_url"], parsed["source_url"])
+        for key, value in parsed.items():
+            self.assertEqual(record[key], value)
 
 
 if __name__ == "__main__":

@@ -5,13 +5,16 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 from collections.abc import Iterable, Sequence
+import ctypes
 from datetime import date
 import hashlib
 import json
 import os
+import platform
 from pathlib import Path, PurePosixPath
 import re
 import shutil
+import stat
 import sys
 import tempfile
 import unicodedata
@@ -74,17 +77,35 @@ def build_corpus(
     validated in a sibling temporary directory, then published as one tree.
     """
     source_root = Path(source).expanduser().resolve(strict=True)
-    output_path = Path(output).expanduser().resolve(strict=False)
+    output_path = Path(os.path.abspath(Path(output).expanduser()))
+    _reject_output_symlink(output_path)
     _validate_configuration(source_root, output_path, brand, site)
+    _validate_source_structure(source_root)
 
     canonical_paths, mirror_paths = _discover(source_root)
+    if not canonical_paths:
+        raise BuildError("canonical Markdown corpus is empty")
     discovered_paths = [*canonical_paths, *mirror_paths]
     source_hashes_before = _hash_source_files(source_root, discovered_paths)
     documents = [
-        _load_document(source_root, path, brand, site, "canonical_md")
+        _load_document(
+            source_root,
+            path,
+            brand,
+            site,
+            "canonical_md",
+            source_hashes_before[_safe_relative_source_path(source_root, path)],
+        )
         for path in canonical_paths
     ] + [
-        _load_document(source_root, path, brand, site, "txt_mirror")
+        _load_document(
+            source_root,
+            path,
+            brand,
+            site,
+            "txt_mirror",
+            source_hashes_before[_safe_relative_source_path(source_root, path)],
+        )
         for path in mirror_paths
     ]
 
@@ -107,10 +128,21 @@ def build_corpus(
         _validate_required_metadata(document, brand, site)
 
     near_records = find_near_duplicates(english_documents)
-    english_documents, near_duplicate_audit, near_review = _apply_near_records(
+    english_documents, near_duplicate_audit, near_review, near_aliases = _apply_near_records(
         english_documents, near_records, brand, site
     )
     duplicate_audit.extend(near_duplicate_audit)
+    exact_aliases = {
+        str(record["relative_path"]): str(record["duplicate_of"])
+        for record in exact_records
+    }
+    _collapse_duplicate_targets(
+        duplicate_audit,
+        {**exact_aliases, **near_aliases},
+        documents,
+        brand,
+        site,
+    )
     versioned_documents = _assign_lifecycle(english_documents)
 
     manifest = [_manifest_record(document, brand, site) for document in versioned_documents]
@@ -151,7 +183,7 @@ def build_corpus(
         _validate_artifacts(
             manifest,
             duplicate_audit,
-            documents,
+            exclusions,
             source_hashes_before,
             source_hashes_after,
             brand,
@@ -174,6 +206,7 @@ def _validate_configuration(source: Path, output: Path, brand: str, site: str) -
             raise BuildError(f"invalid {label} key: {value!r}")
     if brand != "lightinthebox" or site != "lightinthebox-main":
         raise BuildError("the current classifier supports only lightinthebox/lightinthebox-main")
+    _reject_output_symlink(output)
     if output == source or output in source.parents:
         raise BuildError("output cannot replace or contain the source directory")
     if source in output.parents:
@@ -182,6 +215,15 @@ def _validate_configuration(source: Path, output: Path, brand: str, site: str) -
             raise BuildError("output inside source must be under knowledge_cleanup_work")
     if output.exists() and not output.is_dir():
         raise BuildError(f"output exists and is not a directory: {output}")
+
+
+def _reject_output_symlink(output: Path) -> None:
+    try:
+        mode = output.lstat().st_mode
+    except FileNotFoundError:
+        return
+    if stat.S_ISLNK(mode):
+        raise BuildError(f"output path must not be a symlink: {output}")
 
 
 def _discover(source: Path) -> tuple[list[Path], list[Path]]:
@@ -196,6 +238,21 @@ def _discover(source: Path) -> tuple[list[Path], list[Path]]:
     return sorted(set(canonical), key=_source_sort_key), sorted(set(mirrors), key=_source_sort_key)
 
 
+def _validate_source_structure(source: Path) -> None:
+    required_roots = [
+        *(f"{CANONICAL_MARKDOWN_ROOT}/{family}" for family in OFFICIAL_FAMILIES),
+        *(f"{TXT_MIRROR_ROOT}/{family}" for family in OFFICIAL_FAMILIES),
+        REPORT_ROOT,
+    ]
+    missing = []
+    for relative_root in required_roots:
+        root = source / relative_root
+        if root.is_symlink() or not root.is_dir():
+            missing.append(relative_root)
+    if missing:
+        raise BuildError(f"required source roots missing: {', '.join(missing)}")
+
+
 def _files_below(source: Path, relative_root: str, suffix: str) -> list[Path]:
     root = source / relative_root
     if not root.exists():
@@ -203,12 +260,36 @@ def _files_below(source: Path, relative_root: str, suffix: str) -> list[Path]:
     if root.is_symlink() or not root.is_dir():
         raise BuildError(f"source family is not a real directory: {relative_root}")
     paths: list[Path] = []
-    for path in root.rglob(f"*{suffix}"):
-        if path.name == ".DS_Store" or not path.is_file():
-            continue
-        _safe_relative_source_path(source, path)
-        paths.append(path)
+    for current, directory_names, file_names in os.walk(root, followlinks=False):
+        current_path = Path(current)
+        retained_directories: list[str] = []
+        for directory_name in sorted(directory_names):
+            if _excluded_component(directory_name):
+                continue
+            directory = current_path / directory_name
+            if directory.is_symlink():
+                raise BuildError(f"source symlink is not permitted: {directory}")
+            retained_directories.append(directory_name)
+        directory_names[:] = retained_directories
+
+        for file_name in sorted(file_names):
+            if _excluded_component(file_name) or not file_name.casefold().endswith(suffix):
+                continue
+            path = current_path / file_name
+            if not path.is_file():
+                continue
+            _safe_relative_source_path(source, path)
+            paths.append(path)
     return paths
+
+
+def _excluded_component(component: str) -> bool:
+    folded = unicodedata.normalize("NFC", component).casefold()
+    normalized = re.sub(r"[\s-]+", "_", folded)
+    return (
+        normalized in {".ds_store", "knowledge_cleanup_work", "output", "work"}
+        or "keyword_library" in normalized
+    )
 
 
 def _safe_relative_source_path(source: Path, path: Path) -> str:
@@ -242,9 +323,13 @@ def _load_document(
     brand: str,
     site: str,
     source_kind: str,
+    expected_source_hash: str,
 ) -> dict[str, object]:
     relative_path = _safe_relative_source_path(source, path)
     raw_bytes = path.read_bytes()
+    source_hash = hashlib.sha256(raw_bytes).hexdigest()
+    if source_hash != expected_source_hash:
+        raise BuildError(f"source changed while loading: {relative_path}")
     try:
         raw = raw_bytes.decode("utf-8")
     except UnicodeDecodeError as error:
@@ -257,8 +342,8 @@ def _load_document(
     return {
         "relative_path": relative_path,
         "source_file_path": relative_path,
-        "source_file_hash": hashlib.sha256(raw_bytes).hexdigest(),
-        "source_checksum": hashlib.sha256(raw_bytes).hexdigest(),
+        "source_file_hash": source_hash,
+        "source_checksum": source_hash,
         "source_kind": source_kind,
         "source_family": source_family,
         "source_name": (
@@ -424,7 +509,12 @@ def _apply_near_records(
     records: Sequence[dict[str, object]],
     brand: str,
     site: str,
-) -> tuple[list[dict[str, object]], list[dict[str, object]], list[dict[str, object]]]:
+) -> tuple[
+    list[dict[str, object]],
+    list[dict[str, object]],
+    list[dict[str, object]],
+    dict[str, str],
+]:
     by_path = {str(document["source_file_path"]): document for document in documents}
     merge_targets: dict[str, str] = {}
     review_records: list[dict[str, object]] = []
@@ -484,7 +574,36 @@ def _apply_near_records(
         record for record in review_records
         if set(record["source_file_paths"]).issubset(remaining_paths)
     ]
-    return remaining, duplicate_records, review_records
+    return remaining, duplicate_records, review_records, merge_targets
+
+
+def _collapse_duplicate_targets(
+    records: Sequence[dict[str, object]],
+    aliases: dict[str, str],
+    documents: Sequence[dict[str, object]],
+    brand: str,
+    site: str,
+) -> None:
+    by_path = {str(document["source_file_path"]): document for document in documents}
+
+    def final_target(path: str) -> str:
+        visited: set[str] = set()
+        while path in aliases:
+            if path in visited:
+                raise BuildError("duplicate alias cycle")
+            visited.add(path)
+            path = aliases[path]
+        return path
+
+    for record in records:
+        if "duplicate_of_source_file_path" not in record:
+            continue
+        target_path = final_target(str(record["duplicate_of_source_file_path"]))
+        target = by_path.get(target_path)
+        if target is None:
+            raise BuildError(f"duplicate target is not a discovered source: {target_path}")
+        record["duplicate_of_source_file_path"] = target_path
+        record["duplicate_of_document_id"] = _document_id(target, brand, site)
 
 
 def _same_canonical_key(first: dict[str, object], second: dict[str, object]) -> bool:
@@ -539,12 +658,34 @@ def _assign_lifecycle(documents: Sequence[dict[str, object]]) -> list[dict[str, 
     return result
 
 
-def _version_sort_key(document: dict[str, object]) -> tuple[str, str, str, str]:
+def _version_sort_key(
+    document: dict[str, object],
+) -> tuple[int, tuple[tuple[int, object], ...], str]:
     return (
-        str(document["retrieved_at"]),
-        str(document["effective_date"]),
-        str(document["explicit_version"]),
+        _latest_lifecycle_ordinal(document),
+        _natural_version_key(str(document["explicit_version"])),
         str(document["source_file_path"]),
+    )
+
+
+def _latest_lifecycle_ordinal(document: dict[str, object]) -> int:
+    parsed: list[date] = []
+    for field in ("retrieved_at", "effective_date"):
+        value = str(document[field])
+        if not value:
+            continue
+        try:
+            parsed.append(date.fromisoformat(value))
+        except ValueError:
+            continue
+    return max(parsed, default=date.min).toordinal()
+
+
+def _natural_version_key(value: str) -> tuple[tuple[int, object], ...]:
+    return tuple(
+        (1, int(part)) if part.isdigit() else (0, part.casefold())
+        for part in re.split(r"(\d+)", value)
+        if part
     )
 
 
@@ -559,6 +700,7 @@ def _version_label(document: dict[str, object]) -> str:
 
 
 def _document_id(document: dict[str, object], brand: str, site: str) -> str:
+    """Return an order-independent stable identity for one content version."""
     identity = "\0".join((
         brand,
         site,
@@ -699,7 +841,7 @@ def _build_summary(
     site: str,
 ) -> dict[str, object]:
     validation = _validation_results(
-        manifest, duplicates, documents, source_hashes_before, source_hashes_after, brand, site
+        manifest, duplicates, exclusions, source_hashes_before, source_hashes_after, brand, site
     )
     artifacts = (
         "manifest.jsonl", "duplicate_audit.jsonl", "exclusion_audit.jsonl",
@@ -743,7 +885,7 @@ def _build_summary(
 def _validation_results(
     manifest: Sequence[dict[str, object]],
     duplicates: Sequence[dict[str, object]],
-    documents: Sequence[dict[str, object]],
+    exclusions: Sequence[dict[str, object]],
     source_hashes_before: dict[str, str],
     source_hashes_after: dict[str, str],
     brand: str,
@@ -753,9 +895,9 @@ def _validation_results(
         (record["brand_key"], record["language_code"], record["normalized_content_hash"])
         for record in manifest if record["lifecycle_status"] == "active"
     ]
-    source_paths = {str(document["source_file_path"]) for document in documents}
-    target_ids = {
-        _document_id(document, brand, site) for document in documents
+    final_targets = {
+        (str(record["source_file_path"]), str(record["document_id"]))
+        for record in (*manifest, *exclusions)
     }
     return {
         "source_hashes_unchanged": source_hashes_before == source_hashes_after,
@@ -775,9 +917,9 @@ def _validation_results(
         "valid_duplicate_targets": all(
             "duplicate_of_source_file_path" not in record
             or (
-                record["duplicate_of_source_file_path"] in source_paths
-                and record.get("duplicate_of_document_id") in target_ids
-            )
+                str(record["duplicate_of_source_file_path"]),
+                str(record.get("duplicate_of_document_id", "")),
+            ) in final_targets
             for record in duplicates
         ),
         "cleaned_manifest_paths_unique": len(manifest) == len({
@@ -789,7 +931,7 @@ def _validation_results(
 def _validate_artifacts(
     manifest: Sequence[dict[str, object]],
     duplicates: Sequence[dict[str, object]],
-    documents: Sequence[dict[str, object]],
+    exclusions: Sequence[dict[str, object]],
     source_hashes_before: dict[str, str],
     source_hashes_after: dict[str, str],
     brand: str,
@@ -806,7 +948,7 @@ def _validate_artifacts(
         name for name, passed in _validation_results(
             manifest,
             duplicates,
-            documents,
+            exclusions,
             source_hashes_before,
             source_hashes_after,
             brand,
@@ -845,16 +987,42 @@ def _publish(stage: Path, output: Path) -> None:
     if not output.exists():
         stage.replace(output)
         return
-    backup = output.parent / f".{output.name}.old-{os.getpid()}"
-    if backup.exists():
-        raise BuildError(f"atomic publication backup already exists: {backup}")
-    output.replace(backup)
+    _reject_output_symlink(output)
+    if not output.is_dir():
+        raise BuildError(f"live output is not a directory: {output}")
+    _atomic_exchange(stage, output)
     try:
-        stage.replace(output)
-    except BaseException:
-        backup.replace(output)
-        raise
-    shutil.rmtree(backup)
+        shutil.rmtree(stage)
+    except OSError:
+        # Publication already succeeded atomically. A stale old-output temp
+        # directory is safer than reporting a false build failure.
+        pass
+
+
+def _atomic_exchange(first: Path, second: Path) -> None:
+    """Atomically exchange two directory names or fail before changing either."""
+    system = platform.system()
+    libc = ctypes.CDLL(None, use_errno=True)
+    first_bytes = os.fsencode(first)
+    second_bytes = os.fsencode(second)
+    at_fdcwd = -2
+
+    if system == "Darwin" and hasattr(libc, "renameatx_np"):
+        rename = libc.renameatx_np
+        rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        rename.restype = ctypes.c_int
+        result = rename(at_fdcwd, first_bytes, at_fdcwd, second_bytes, 0x00000002)
+    elif system == "Linux" and hasattr(libc, "renameat2"):
+        rename = libc.renameat2
+        rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        rename.restype = ctypes.c_int
+        result = rename(at_fdcwd, first_bytes, at_fdcwd, second_bytes, 0x00000002)
+    else:
+        raise BuildError(f"atomic directory exchange is unsupported on {system}")
+
+    if result != 0:
+        error_number = ctypes.get_errno()
+        raise OSError(error_number, os.strerror(error_number), os.fspath(first), os.fspath(second))
 
 
 def _argument_parser() -> argparse.ArgumentParser:
