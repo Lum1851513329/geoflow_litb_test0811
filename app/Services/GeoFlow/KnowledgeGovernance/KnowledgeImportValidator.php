@@ -3,6 +3,9 @@
 namespace App\Services\GeoFlow\KnowledgeGovernance;
 
 use App\Models\KeywordLibrary;
+use App\Models\KnowledgeBase;
+use App\Models\KnowledgeBrand;
+use App\Models\KnowledgeSite;
 use DateTimeImmutable;
 use Illuminate\Support\Facades\DB;
 use RuntimeException;
@@ -57,6 +60,33 @@ final class KnowledgeImportValidator
         'cleaned_file_hash',
     ];
 
+    private const FRONT_MATTER_FIELDS = [
+        'document_id', 'asset_key', 'canonical_document_key', 'version_label',
+        'lifecycle_status', 'brand_key', 'site_key', 'directory_path',
+        'language_code', 'authority_level', 'risk_level', 'review_status',
+        'generation_eligible', 'citation_required', 'title', 'source_name',
+        'source_url', 'source_type', 'source_file_path', 'source_file_hash',
+        'normalized_content_hash', 'ingestion_method', 'retrieved_at',
+        'effective_date', 'review_due_at', 'warnings',
+    ];
+
+    private const SUMMARY_VALIDATIONS = [
+        'source_hashes_unchanged',
+        'zero_active_exact_hash_duplicates',
+        'no_unknown_owner',
+        'english_only_manifest',
+        'policy_eligibility_rules',
+        'valid_duplicate_targets',
+        'cleaned_manifest_paths_unique',
+    ];
+
+    private const REQUIRED_ARTIFACTS = [
+        'manifest.jsonl',
+        'duplicate_audit.jsonl',
+        'exclusion_audit.jsonl',
+        'near_duplicate_review.jsonl',
+    ];
+
     /**
      * @return array{
      *   manifest:list<array<string,mixed>>,
@@ -76,33 +106,42 @@ final class KnowledgeImportValidator
         $manifestPath = $this->regularFile($manifestPath, 'manifest');
         $root = dirname($manifestPath);
         $duplicatePath = $this->regularFile($root.'/duplicate_audit.jsonl', 'duplicate_audit');
-        $exclusionCandidate = $root.'/exclusion_audit.jsonl';
-        $exclusionPath = is_file($exclusionCandidate)
-            ? $this->regularFile($exclusionCandidate, 'exclusion_audit')
-            : null;
+        $exclusionPath = $this->regularFile($root.'/exclusion_audit.jsonl', 'exclusion_audit');
+        $nearReviewPath = $this->regularFile($root.'/near_duplicate_review.jsonl', 'near_duplicate_review');
 
         [$manifest, $manifestBytes] = $this->readJsonLines($manifestPath, 'manifest');
         [$duplicates, $duplicateBytes] = $this->readJsonLines($duplicatePath, 'duplicate_audit');
-        [$exclusions, $exclusionBytes] = $exclusionPath === null
-            ? [[], '']
-            : $this->readJsonLines($exclusionPath, 'exclusion_audit');
+        [$exclusions, $exclusionBytes] = $this->readJsonLines($exclusionPath, 'exclusion_audit');
+        [$nearReviews, $nearReviewBytes] = $this->readJsonLines($nearReviewPath, 'near_duplicate_review');
 
         if ($manifest === []) {
             throw new RuntimeException('governed_import.manifest_empty');
         }
 
         $this->validateDocuments($manifest, $root);
-        $targets = $this->validateExclusions($exclusions);
+        [$targets, $paths] = $this->validateExclusions($exclusions);
         foreach ($manifest as $record) {
-            $targets[(string) $record['document_id']] = (string) $record['source_file_path'];
+            $this->addIdentity($targets, $paths, $record, true, 'manifest');
         }
         $this->validateDuplicates($duplicates, $targets);
         $this->validateKeywordTargets($manifest, $keywordLibraryId);
-        $sourceSetHash = $this->validateSummaryHashes($root, $manifestBytes, $duplicateBytes, $exclusionBytes);
+        $artifactBytes = [
+            'manifest.jsonl' => $manifestBytes,
+            'duplicate_audit.jsonl' => $duplicateBytes,
+            'exclusion_audit.jsonl' => $exclusionBytes,
+            'near_duplicate_review.jsonl' => $nearReviewBytes,
+        ];
+        $sourceSetHash = $this->validateSummary(
+            $root,
+            $artifactBytes,
+            $manifest,
+            $duplicates,
+            $exclusions,
+            $nearReviews,
+        );
+        $this->preflightDatabase($manifest);
         $artifactHashes = [
-            'manifest.jsonl' => hash('sha256', $manifestBytes),
-            'duplicate_audit.jsonl' => hash('sha256', $duplicateBytes),
-            'exclusion_audit.jsonl' => hash('sha256', $exclusionBytes),
+            ...array_map(static fn (string $bytes): string => hash('sha256', $bytes), $artifactBytes),
         ];
 
         $configuration = [
@@ -118,8 +157,7 @@ final class KnowledgeImportValidator
             'manifest' => $manifest,
             'duplicates' => $duplicates,
             'exclusions' => $exclusions,
-            'source_checksum' => $sourceSetHash
-                ?? hash('sha256', $manifestBytes."\0".$duplicateBytes."\0".$exclusionBytes),
+            'source_checksum' => $sourceSetHash,
             'configuration_hash' => hash('sha256', json_encode($configuration, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES)),
             'manifest_path' => $manifestPath,
         ];
@@ -132,6 +170,7 @@ final class KnowledgeImportValidator
         $assetKeys = [];
         $cleanedPaths = [];
         $activeHashes = [];
+        $activeCanonicalKeys = [];
 
         foreach ($records as $index => &$record) {
             $row = $index + 1;
@@ -167,6 +206,18 @@ final class KnowledgeImportValidator
             if (! in_array($record['authority_level'], ['first_party', 'regulatory_filing', 'mixed_research', 'third_party'], true)) {
                 throw new RuntimeException("governed_import.manifest_row_{$row}.authority_invalid");
             }
+            if (! in_array($record['risk_level'], ['low', 'medium', 'high'], true)) {
+                throw new RuntimeException("governed_import.manifest_row_{$row}.risk_invalid");
+            }
+            if (! in_array($record['review_status'], ['reviewed', 'unreviewed'], true)) {
+                throw new RuntimeException("governed_import.manifest_row_{$row}.review_invalid");
+            }
+            if (! in_array($record['source_type'], ['official_web_page', 'compiled_report'], true)) {
+                throw new RuntimeException("governed_import.manifest_row_{$row}.source_type_invalid");
+            }
+            if ($record['ingestion_method'] !== 'read_only_folder') {
+                throw new RuntimeException("governed_import.manifest_row_{$row}.ingestion_method_invalid");
+            }
             if (! in_array($record['lifecycle_status'], ['active', 'superseded'], true)) {
                 throw new RuntimeException("governed_import.manifest_row_{$row}.lifecycle_invalid");
             }
@@ -190,6 +241,9 @@ final class KnowledgeImportValidator
             if (! is_string($record['source_url'])) {
                 throw new RuntimeException("governed_import.manifest_row_{$row}.source_url_invalid");
             }
+            if ($record['source_url'] !== '' && ! $this->isHttpUrl($record['source_url'])) {
+                throw new RuntimeException("governed_import.manifest_row_{$row}.source_url_invalid");
+            }
 
             $documentId = (string) $record['document_id'];
             $assetKey = (string) $record['asset_key'];
@@ -207,6 +261,10 @@ final class KnowledgeImportValidator
                     throw new RuntimeException("governed_import.manifest_row_{$row}.active_hash_not_unique");
                 }
                 $activeHashes[$activeHash] = true;
+                if (isset($activeCanonicalKeys[$record['canonical_document_key']])) {
+                    throw new RuntimeException("governed_import.manifest_row_{$row}.active_canonical_key_not_unique");
+                }
+                $activeCanonicalKeys[$record['canonical_document_key']] = true;
             }
 
             $cleanedFile = $this->packageFile($root, $cleanedPath, "manifest row {$row} cleaned file");
@@ -214,7 +272,30 @@ final class KnowledgeImportValidator
             if ($bytes === false || ! hash_equals((string) $record['cleaned_file_hash'], hash('sha256', $bytes))) {
                 throw new RuntimeException("governed_import.manifest_row_{$row}.cleaned_file_hash_mismatch");
             }
-            $record['_content'] = $this->stripFrontMatter($bytes);
+            [$frontMatter, $body] = $this->parseGovernedDocument($bytes, $row);
+            foreach (self::FRONT_MATTER_FIELDS as $field) {
+                if (! array_key_exists($field, $frontMatter) || $frontMatter[$field] !== $record[$field]) {
+                    throw new RuntimeException("governed_import.manifest_row_{$row}.front_matter_{$field}_mismatch");
+                }
+            }
+            $normalizedBody = $this->normalizeMarkdown($body);
+            if ($normalizedBody !== $body) {
+                throw new RuntimeException("governed_import.manifest_row_{$row}.body_not_normalized");
+            }
+            $contentHash = hash('sha256', $normalizedBody);
+            if (! hash_equals((string) $record['normalized_content_hash'], $contentHash)) {
+                throw new RuntimeException("governed_import.manifest_row_{$row}.normalized_content_hash_mismatch");
+            }
+            $documentId = $this->documentId(
+                (string) $record['brand_key'],
+                (string) $record['site_key'],
+                (string) $record['canonical_document_key'],
+                $contentHash,
+            );
+            if (! hash_equals((string) $record['document_id'], $documentId)) {
+                throw new RuntimeException("governed_import.manifest_row_{$row}.document_id_mismatch");
+            }
+            $record['_content'] = $body;
             $record['keyword_node_ids'] = $this->normalizeIds($record['keyword_node_ids'] ?? [], "manifest row {$row} keyword_node_ids");
             $record['keyword_cluster_ids'] = $this->normalizeIds($record['keyword_cluster_ids'] ?? [], "manifest row {$row} keyword_cluster_ids");
         }
@@ -223,11 +304,12 @@ final class KnowledgeImportValidator
 
     /**
      * @param  list<array<string,mixed>>  $records
-     * @return array<string,string>
+     * @return array{array<string,array{path:string,hash:string,formal:bool}>,array<string,string>}
      */
     private function validateExclusions(array $records): array
     {
         $targets = [];
+        $paths = [];
         foreach ($records as $index => $record) {
             $row = $index + 1;
             $this->requireFields($record, [
@@ -240,22 +322,44 @@ final class KnowledgeImportValidator
             ], "exclusion row {$row}");
             $this->requireHash($record['source_file_hash'], "exclusion row {$row} source_file_hash");
             $this->requireHash($record['normalized_content_hash'], "exclusion row {$row} normalized_content_hash");
-            if ($record['language_code'] === 'en' || ! is_array($record['warnings']) || ! array_is_list($record['warnings'])) {
+            if (
+                ! in_array($record['language_code'], ['en', 'pt', 'zh', 'und'], true)
+                || ! in_array($record['source_kind'], ['canonical_md', 'txt_mirror'], true)
+                || ! is_array($record['warnings'])
+                || ! array_is_list($record['warnings'])
+            ) {
                 throw new RuntimeException("governed_import.exclusion_row_{$row}.invalid");
             }
-            $id = (string) $record['document_id'];
-            $path = (string) $record['source_file_path'];
-            if (isset($targets[$id]) && $targets[$id] !== $path) {
-                throw new RuntimeException("governed_import.exclusion_row_{$row}.identity_not_unique");
+            foreach ($record['warnings'] as $warning) {
+                if (! is_string($warning)) {
+                    throw new RuntimeException("governed_import.exclusion_row_{$row}.invalid");
+                }
             }
-            $targets[$id] = $path;
+            $englishOrphan = $record['language_code'] === 'en'
+                && $record['reason'] === 'txt_mirror_without_markdown_canonical'
+                && $record['source_kind'] === 'txt_mirror';
+            $nonEnglishSource = $record['language_code'] !== 'en'
+                && $record['reason'] === 'non_english_initial_corpus';
+            if (! $englishOrphan && ! $nonEnglishSource) {
+                throw new RuntimeException("governed_import.exclusion_row_{$row}.reason_invalid");
+            }
+            $expectedId = $this->documentId(
+                self::BRAND_KEY,
+                self::SITE_KEY,
+                (string) $record['canonical_document_key'],
+                (string) $record['normalized_content_hash'],
+            );
+            if (! hash_equals($expectedId, (string) $record['document_id'])) {
+                throw new RuntimeException("governed_import.exclusion_row_{$row}.document_id_mismatch");
+            }
+            $this->addIdentity($targets, $paths, $record, false, "exclusion row {$row}");
         }
 
-        return $targets;
+        return [$targets, $paths];
     }
 
     /** @param list<array<string,mixed>> $records
-     * @param  array<string,string>  $targets
+     * @param  array<string,array{path:string,hash:string,formal:bool}>  $targets
      */
     private function validateDuplicates(array $records, array $targets): void
     {
@@ -286,8 +390,12 @@ final class KnowledgeImportValidator
             if ($hasTargetId) {
                 $targetId = (string) $record['duplicate_of_document_id'];
                 $targetPath = (string) $record['duplicate_of_source_file_path'];
-                if (($targets[$targetId] ?? null) !== $targetPath) {
+                $target = $targets[$targetId] ?? null;
+                if ($target === null || $target['path'] !== $targetPath) {
                     throw new RuntimeException("governed_import.duplicate_row_{$row}.target_invalid");
+                }
+                if ($record['kind'] === 'exact' && ! hash_equals($target['hash'], (string) $record['normalized_content_hash'])) {
+                    throw new RuntimeException("governed_import.duplicate_row_{$row}.exact_hash_mismatch");
                 }
             }
             if (array_key_exists('similarity', $record)) {
@@ -343,36 +451,198 @@ final class KnowledgeImportValidator
         }
     }
 
-    private function validateSummaryHashes(string $root, string $manifest, string $duplicates, string $exclusions): ?string
-    {
-        $path = $root.'/run_summary.json';
-        if (! is_file($path)) {
-            return null;
+    /**
+     * @param  array<string,string>  $artifactBytes
+     * @param  list<array<string,mixed>>  $manifest
+     * @param  list<array<string,mixed>>  $duplicates
+     * @param  list<array<string,mixed>>  $exclusions
+     * @param  list<array<string,mixed>>  $nearReviews
+     */
+    private function validateSummary(
+        string $root,
+        array $artifactBytes,
+        array $manifest,
+        array $duplicates,
+        array $exclusions,
+        array $nearReviews,
+    ): string {
+        $path = $this->regularFile($root.'/run_summary.json', 'run_summary');
+        try {
+            $summary = json_decode((string) file_get_contents($path), true, 512, JSON_THROW_ON_ERROR);
+        } catch (\JsonException $exception) {
+            throw new RuntimeException('governed_import.run_summary_invalid', 0, $exception);
         }
-        $path = $this->regularFile($path, 'run_summary');
-        $summary = json_decode((string) file_get_contents($path), true, 512, JSON_THROW_ON_ERROR);
-        if (! is_array($summary)) {
-            throw new RuntimeException('governed_import.run_summary_invalid');
+        if (! is_array($summary) || array_is_list($summary) || ($summary['schema_version'] ?? null) !== 1) {
+            throw new RuntimeException('governed_import.run_summary_schema_invalid');
         }
         if (($summary['brand_key'] ?? null) !== self::BRAND_KEY || ($summary['site_key'] ?? null) !== self::SITE_KEY) {
             throw new RuntimeException('governed_import.run_summary_ownership_invalid');
         }
         $sourceSetHash = $summary['source_set_hash'] ?? null;
         $this->requireHash($sourceSetHash, 'run_summary source_set_hash');
-        $expected = [
-            'manifest.jsonl' => hash('sha256', $manifest),
-            'duplicate_audit.jsonl' => hash('sha256', $duplicates),
-        ];
-        if (is_file($root.'/exclusion_audit.jsonl')) {
-            $expected['exclusion_audit.jsonl'] = hash('sha256', $exclusions);
+        foreach (self::SUMMARY_VALIDATIONS as $validation) {
+            if (($summary['validation'][$validation] ?? null) !== true) {
+                throw new RuntimeException("governed_import.run_summary_validation_failed.{$validation}");
+            }
         }
-        foreach ($expected as $name => $hash) {
-            if (! hash_equals($hash, (string) ($summary['artifact_hashes'][$name] ?? ''))) {
-                throw new RuntimeException("governed_import.run_summary_hash_mismatch.{$name}");
+
+        $expectedCounts = [
+            ...$this->sourceCounts($manifest, $duplicates, $exclusions, $nearReviews),
+            'manifest_documents' => count($manifest),
+            'active_documents' => count(array_filter($manifest, static fn (array $record): bool => $record['lifecycle_status'] === 'active')),
+            'superseded_documents' => count(array_filter($manifest, static fn (array $record): bool => $record['lifecycle_status'] === 'superseded')),
+            'duplicate_records' => count($duplicates),
+            'near_review_records' => count($nearReviews),
+            'excluded_sources' => count($exclusions),
+        ];
+        foreach ($expectedCounts as $name => $count) {
+            if (($summary['counts'][$name] ?? null) !== $count) {
+                throw new RuntimeException("governed_import.run_summary_count_mismatch.{$name}");
+            }
+        }
+        $declaredHashes = $summary['artifact_hashes'] ?? null;
+        if (! is_array($declaredHashes) || array_is_list($declaredHashes)) {
+            throw new RuntimeException('governed_import.run_summary_artifact_hashes_invalid');
+        }
+        foreach (self::REQUIRED_ARTIFACTS as $artifact) {
+            if (! array_key_exists($artifact, $declaredHashes)) {
+                throw new RuntimeException("governed_import.run_summary_artifact_missing.{$artifact}");
+            }
+        }
+        foreach ($declaredHashes as $artifact => $declaredHash) {
+            if (! is_string($artifact) || basename($artifact) !== $artifact || str_contains($artifact, '..')) {
+                throw new RuntimeException('governed_import.run_summary_artifact_name_invalid');
+            }
+            $this->requireHash($declaredHash, "run_summary artifact {$artifact}");
+            $bytes = $artifactBytes[$artifact] ?? null;
+            if ($bytes === null) {
+                $artifactPath = $this->packageFile($root, $artifact, "run_summary artifact {$artifact}");
+                $bytes = file_get_contents($artifactPath);
+                if ($bytes === false) {
+                    throw new RuntimeException("governed_import.run_summary_artifact_read_failed.{$artifact}");
+                }
+            }
+            if (! hash_equals($declaredHash, hash('sha256', $bytes))) {
+                throw new RuntimeException("governed_import.run_summary_hash_mismatch.{$artifact}");
             }
         }
 
         return $sourceSetHash;
+    }
+
+    /**
+     * @param  list<array<string,mixed>>  $manifest
+     * @param  list<array<string,mixed>>  $duplicates
+     * @param  list<array<string,mixed>>  $exclusions
+     * @param  list<array<string,mixed>>  $nearReviews
+     * @return array{canonical_source_files:int,txt_mirror_files:int,source_files_hashed:int}
+     */
+    private function sourceCounts(array $manifest, array $duplicates, array $exclusions, array $nearReviews): array
+    {
+        $paths = [];
+        foreach ([...$manifest, ...$duplicates, ...$exclusions] as $record) {
+            $path = $record['source_file_path'] ?? null;
+            if (is_string($path) && $path !== '') {
+                $paths[$path] = true;
+            }
+        }
+        foreach ($nearReviews as $record) {
+            foreach (($record['source_file_paths'] ?? []) as $path) {
+                if (is_string($path) && $path !== '') {
+                    $paths[$path] = true;
+                }
+            }
+        }
+
+        $canonical = 0;
+        $mirrors = 0;
+        foreach (array_keys($paths) as $path) {
+            match (strtolower((string) pathinfo($path, PATHINFO_EXTENSION))) {
+                'md' => $canonical++,
+                'txt' => $mirrors++,
+                default => throw new RuntimeException('governed_import.run_summary_source_path_invalid'),
+            };
+        }
+
+        return [
+            'canonical_source_files' => $canonical,
+            'txt_mirror_files' => $mirrors,
+            'source_files_hashed' => count($paths),
+        ];
+    }
+
+    /** @param list<array<string,mixed>> $manifest */
+    private function preflightDatabase(array $manifest): void
+    {
+        $assets = array_column($manifest, 'asset_key');
+        $existingAssets = KnowledgeBase::query()
+            ->with(['brand:id,key', 'site:id,key,brand_id'])
+            ->whereIn('asset_key', $assets)
+            ->get()
+            ->keyBy('asset_key');
+        foreach ($manifest as $record) {
+            $existing = $existingAssets->get($record['asset_key']);
+            if ($existing === null) {
+                continue;
+            }
+            if (
+                $existing->brand?->key !== self::BRAND_KEY
+                || $existing->site?->key !== self::SITE_KEY
+                || $existing->canonical_document_key !== $record['canonical_document_key']
+                || $existing->normalized_content_hash !== $record['normalized_content_hash']
+                || $existing->content !== $record['_content']
+            ) {
+                throw new RuntimeException('governed_import.preflight_existing_asset_conflict');
+            }
+        }
+
+        $brand = KnowledgeBrand::query()->where('key', self::BRAND_KEY)->first(['id']);
+        if ($brand === null) {
+            return;
+        }
+        $site = KnowledgeSite::query()
+            ->where('brand_id', $brand->id)
+            ->where('key', self::SITE_KEY)
+            ->first(['id']);
+        foreach ($manifest as $record) {
+            $hashConflict = KnowledgeBase::query()
+                ->where('brand_id', $brand->id)
+                ->where('lifecycle_status', 'active')
+                ->where('asset_key', '!=', $record['asset_key'])
+                ->where('language_code', $record['language_code'])
+                ->where('normalized_content_hash', $record['normalized_content_hash'])
+                ->exists();
+            $canonicalConflict = $site !== null && KnowledgeBase::query()
+                ->where('brand_id', $brand->id)
+                ->where('site_id', $site->id)
+                ->where('lifecycle_status', 'active')
+                ->where('asset_key', '!=', $record['asset_key'])
+                ->where('canonical_document_key', $record['canonical_document_key'])
+                ->exists();
+            if ($hashConflict || $canonicalConflict) {
+                throw new RuntimeException('governed_import.preflight_active_document_conflict');
+            }
+        }
+    }
+
+    /**
+     * @param  array<string,array{path:string,hash:string,formal:bool}>  $targets
+     * @param  array<string,string>  $paths
+     * @param  array<string,mixed>  $record
+     */
+    private function addIdentity(array &$targets, array &$paths, array $record, bool $formal, string $label): void
+    {
+        $id = (string) $record['document_id'];
+        $path = (string) $record['source_file_path'];
+        if (isset($targets[$id]) || isset($paths[$path])) {
+            throw new RuntimeException(str_replace(' ', '_', "governed_import.{$label}.identity_collision"));
+        }
+        $targets[$id] = [
+            'path' => $path,
+            'hash' => (string) $record['normalized_content_hash'],
+            'formal' => $formal,
+        ];
+        $paths[$path] = $id;
     }
 
     /** @return array{list<array<string,mixed>>,string} */
@@ -518,17 +788,201 @@ final class KnowledgeImportValidator
         return $resolved;
     }
 
-    private function stripFrontMatter(string $content): string
+    /** @return array{array<string,mixed>,string} */
+    private function parseGovernedDocument(string $content, int $row): array
     {
         if (! str_starts_with($content, "---\n")) {
-            return $content;
+            throw new RuntimeException("governed_import.manifest_row_{$row}.front_matter_required");
         }
-        $end = strpos($content, "\n---\n", 4);
+        $end = strpos($content, "\n---\n\n", 4);
         if ($end === false) {
-            throw new RuntimeException('governed_import.cleaned_front_matter_invalid');
+            throw new RuntimeException("governed_import.manifest_row_{$row}.front_matter_invalid");
+        }
+        $frontMatter = [];
+        foreach (explode("\n", substr($content, 4, $end - 4)) as $line) {
+            $separator = strpos($line, ':');
+            if ($separator === false) {
+                throw new RuntimeException("governed_import.manifest_row_{$row}.front_matter_invalid");
+            }
+            $field = substr($line, 0, $separator);
+            $encoded = ltrim(substr($line, $separator + 1));
+            if ($field === '' || array_key_exists($field, $frontMatter)) {
+                throw new RuntimeException("governed_import.manifest_row_{$row}.front_matter_invalid");
+            }
+            try {
+                $value = json_decode($encoded, true, 512, JSON_THROW_ON_ERROR);
+            } catch (\JsonException $exception) {
+                throw new RuntimeException("governed_import.manifest_row_{$row}.front_matter_json_invalid", 0, $exception);
+            }
+            if (is_array($value) && ! array_is_list($value)) {
+                throw new RuntimeException("governed_import.manifest_row_{$row}.front_matter_value_invalid");
+            }
+            $frontMatter[$field] = $value;
+        }
+        if (array_diff(array_keys($frontMatter), self::FRONT_MATTER_FIELDS) !== []) {
+            throw new RuntimeException("governed_import.manifest_row_{$row}.front_matter_field_invalid");
         }
 
-        return ltrim(substr($content, $end + 5), "\n");
+        return [$frontMatter, substr($content, $end + 6)];
+    }
+
+    private function normalizeMarkdown(string $raw): string
+    {
+        if (preg_match('//u', $raw) !== 1) {
+            throw new RuntimeException('governed_import.cleaned_document_utf8_invalid');
+        }
+        $normalized = \Normalizer::normalize($raw, \Normalizer::FORM_C);
+        if ($normalized === false) {
+            throw new RuntimeException('governed_import.cleaned_document_unicode_normalization_failed');
+        }
+        $text = str_replace(["\r\n", "\r"], "\n", $normalized);
+        $lines = [];
+        $previousBlank = false;
+        foreach (explode("\n", $text) as $sourceLine) {
+            $line = $this->rstripUnicode($sourceLine);
+            if (preg_match('/^\s{0,3}#{1,6}\s*$/u', $line) === 1 || preg_match('/^\s*\\\\\s*$/u', $line) === 1) {
+                if ($lines !== [] && end($lines) !== '') {
+                    $lines[] = '';
+                    $previousBlank = true;
+                }
+
+                continue;
+            }
+            $line = $this->normalizeInlineLinkWrappers($line);
+            $blank = $line === '';
+            if ($blank && $previousBlank) {
+                continue;
+            }
+            $lines[] = $line;
+            $previousBlank = $blank;
+        }
+        while ($lines !== [] && end($lines) === '') {
+            array_pop($lines);
+        }
+        $markdown = implode("\n", $lines);
+
+        return $markdown === '' ? '' : $markdown."\n";
+    }
+
+    private function normalizeInlineLinkWrappers(string $line): string
+    {
+        $characters = preg_split('//u', $line, -1, PREG_SPLIT_NO_EMPTY);
+        if ($characters === false) {
+            throw new RuntimeException('governed_import.cleaned_document_utf8_invalid');
+        }
+        $rendered = '';
+        $position = 0;
+        $length = count($characters);
+        while (true) {
+            $start = $this->findCharacter($characters, '【', $position);
+            if ($start === null) {
+                return $rendered.implode('', array_slice($characters, $position));
+            }
+            $closeLabel = $this->findCharacter($characters, '】', $start + 1);
+            if ($closeLabel === null) {
+                return $rendered.implode('', array_slice($characters, $position));
+            }
+            $opener = $closeLabel + 1;
+            while ($opener < $length && $this->isUnicodeWhitespace($characters[$opener])) {
+                $opener++;
+            }
+            if ($opener === $length || ! in_array($characters[$opener], ['(', '（'], true)) {
+                $rendered .= implode('', array_slice($characters, $position, $closeLabel + 1 - $position));
+                $position = $closeLabel + 1;
+
+                continue;
+            }
+            $closeDestination = $this->findWrapperClose($characters, $opener);
+            if ($closeDestination === null) {
+                return $rendered.implode('', array_slice($characters, $position));
+            }
+            $destination = $this->stripUnicode(implode('', array_slice(
+                $characters,
+                $opener + 1,
+                $closeDestination - $opener - 1,
+            )));
+            if ($this->isHttpUrl($destination) && ! $this->containsUnicodeWhitespace($destination)) {
+                $label = $this->stripUnicode(implode('', array_slice(
+                    $characters,
+                    $start + 1,
+                    $closeLabel - $start - 1,
+                )));
+                $rendered .= implode('', array_slice($characters, $position, $start - $position));
+                $rendered .= '['.$label.']('.$destination.')';
+            } else {
+                $rendered .= implode('', array_slice(
+                    $characters,
+                    $position,
+                    $closeDestination + 1 - $position,
+                ));
+            }
+            $position = $closeDestination + 1;
+        }
+    }
+
+    /** @param list<string> $characters */
+    private function findCharacter(array $characters, string $needle, int $offset): ?int
+    {
+        for ($index = $offset, $length = count($characters); $index < $length; $index++) {
+            if ($characters[$index] === $needle) {
+                return $index;
+            }
+        }
+
+        return null;
+    }
+
+    /** @param list<string> $characters */
+    private function findWrapperClose(array $characters, int $opener): ?int
+    {
+        [$opening, $closing] = $characters[$opener] === '(' ? ['(', ')'] : ['（', '）'];
+        $depth = 0;
+        for ($index = $opener, $length = count($characters); $index < $length; $index++) {
+            if ($characters[$index] === $opening) {
+                $depth++;
+            } elseif ($characters[$index] === $closing) {
+                $depth--;
+                if ($depth === 0) {
+                    return $index;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private function rstripUnicode(string $value): string
+    {
+        return preg_replace('/[\x{0009}-\x{000D}\x{001C}-\x{001F}\x{0020}\x{0085}\x{00A0}\x{1680}\x{2000}-\x{200A}\x{2028}\x{2029}\x{202F}\x{205F}\x{3000}]+$/u', '', $value) ?? $value;
+    }
+
+    private function stripUnicode(string $value): string
+    {
+        return preg_replace('/^[\x{0009}-\x{000D}\x{001C}-\x{001F}\x{0020}\x{0085}\x{00A0}\x{1680}\x{2000}-\x{200A}\x{2028}\x{2029}\x{202F}\x{205F}\x{3000}]+|[\x{0009}-\x{000D}\x{001C}-\x{001F}\x{0020}\x{0085}\x{00A0}\x{1680}\x{2000}-\x{200A}\x{2028}\x{2029}\x{202F}\x{205F}\x{3000}]+$/u', '', $value) ?? $value;
+    }
+
+    private function isUnicodeWhitespace(string $character): bool
+    {
+        return preg_match('/^[\x{0009}-\x{000D}\x{001C}-\x{001F}\x{0020}\x{0085}\x{00A0}\x{1680}\x{2000}-\x{200A}\x{2028}\x{2029}\x{202F}\x{205F}\x{3000}]$/u', $character) === 1;
+    }
+
+    private function containsUnicodeWhitespace(string $value): bool
+    {
+        return preg_match('/[\x{0009}-\x{000D}\x{001C}-\x{001F}\x{0020}\x{0085}\x{00A0}\x{1680}\x{2000}-\x{200A}\x{2028}\x{2029}\x{202F}\x{205F}\x{3000}]/u', $value) === 1;
+    }
+
+    private function documentId(string $brand, string $site, string $canonicalKey, string $contentHash): string
+    {
+        return substr(hash('sha256', implode("\0", [$brand, $site, $canonicalKey, $contentHash])), 0, 32);
+    }
+
+    private function isHttpUrl(string $value): bool
+    {
+        $parts = parse_url($value);
+
+        return is_array($parts)
+            && in_array(strtolower((string) ($parts['scheme'] ?? '')), ['http', 'https'], true)
+            && trim((string) ($parts['host'] ?? '')) !== '';
     }
 
     private function nonEmptyString(mixed $value): bool

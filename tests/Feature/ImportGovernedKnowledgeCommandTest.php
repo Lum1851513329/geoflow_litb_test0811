@@ -3,10 +3,19 @@
 namespace Tests\Feature;
 
 use App\Jobs\PrepareKnowledgeChunkSyncJob;
+use App\Models\KnowledgeBase;
+use App\Models\KnowledgeBrand;
+use App\Models\KnowledgeDirectory;
+use App\Models\KnowledgeSite;
+use App\Models\Task;
+use App\Services\GeoFlow\KnowledgeChunkSyncCoordinator;
+use App\Services\GeoFlow\KnowledgeGovernance\GovernedKnowledgeImporter;
+use Illuminate\Database\QueryException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Queue;
+use RuntimeException;
 use Tests\TestCase;
 
 final class ImportGovernedKnowledgeCommandTest extends TestCase
@@ -173,7 +182,7 @@ final class ImportGovernedKnowledgeCommandTest extends TestCase
             ->whereNull('canonical_document_id')
             ->sole();
         $this->assertSame(
-            'excluded-document',
+            $this->exclusionRecord()['document_id'],
             json_decode((string) $excludedTargetAudit->rollback_metadata, true, 512, JSON_THROW_ON_ERROR)['canonical_target_document_id'],
         );
         Queue::assertPushed(
@@ -206,17 +215,7 @@ final class ImportGovernedKnowledgeCommandTest extends TestCase
     {
         $manifest = $this->writePackage();
         $sourceSetHash = hash('sha256', 'complete governed source set');
-        File::put($this->root.'/run_summary.json', json_encode([
-            'schema_version' => 1,
-            'brand_key' => 'lightinthebox',
-            'site_key' => 'lightinthebox-main',
-            'source_set_hash' => $sourceSetHash,
-            'artifact_hashes' => [
-                'manifest.jsonl' => hash_file('sha256', $this->root.'/manifest.jsonl'),
-                'duplicate_audit.jsonl' => hash_file('sha256', $this->root.'/duplicate_audit.jsonl'),
-                'exclusion_audit.jsonl' => hash_file('sha256', $this->root.'/exclusion_audit.jsonl'),
-            ],
-        ], JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES));
+        $this->writeSummary($sourceSetHash);
 
         $this->artisan('geoflow:knowledge:import-governed', [
             'manifest' => $manifest,
@@ -229,10 +228,12 @@ final class ImportGovernedKnowledgeCommandTest extends TestCase
     public function test_invalid_ownership_in_a_later_manifest_row_leaves_the_whole_database_unchanged(): void
     {
         $records = [$this->documentRecord(), [
-            ...$this->documentRecord('foreign-document', 'cleaned/brand-company/foreign-document.md'),
+            ...$this->documentRecord(
+                'url:https://www.lightinthebox.com/company',
+                "# Company\n\nCompany information.\n",
+                'brand-company',
+            ),
             'brand_key' => 'another-brand',
-            'asset_key' => 'knowledge:foreign-document',
-            'normalized_content_hash' => hash('sha256', 'foreign normalized content'),
         ]];
         $manifest = $this->writePackage($records, []);
 
@@ -281,95 +282,736 @@ final class ImportGovernedKnowledgeCommandTest extends TestCase
         $this->assertNoImportWrites();
     }
 
+    public function test_false_asset_identity_cannot_overwrite_a_task_referenced_document(): void
+    {
+        $existing = KnowledgeBase::query()->create([
+            'asset_key' => 'knowledge:'.str_repeat('a', 32),
+            'name' => 'Operator document',
+            'content' => 'Operator-owned content.',
+            'file_type' => 'markdown',
+        ]);
+        $task = Task::query()->create([
+            'name' => 'Referenced task',
+            'status' => 'paused',
+            'knowledge_base_id' => $existing->id,
+        ]);
+        $record = $this->documentRecord();
+        $record['document_id'] = str_repeat('a', 32);
+        $record['asset_key'] = 'knowledge:'.$record['document_id'];
+        $manifest = $this->writePackage([$record], []);
+
+        $this->artisan('geoflow:knowledge:import-governed', [
+            'manifest' => $manifest,
+            '--keyword-library' => 42,
+        ])->assertFailed();
+
+        $this->assertSame('Operator-owned content.', $existing->fresh()->content);
+        $this->assertSame((int) $existing->id, (int) $task->fresh()->knowledge_base_id);
+        $this->assertDatabaseCount('knowledge_import_batches', 0);
+    }
+
+    public function test_front_matter_must_match_every_governed_manifest_field(): void
+    {
+        $manifest = $this->writePackage();
+        $cleanedPath = File::glob($this->root.'/cleaned/policy-compliance/*.md')[0];
+        $cleaned = str_replace('title: "Returns"', 'title: "Forged Returns"', File::get($cleanedPath));
+        File::put($cleanedPath, $cleaned);
+        $record = $this->readJsonLines($manifest)[0];
+        $record['cleaned_file_hash'] = hash('sha256', $cleaned);
+        $this->writeJsonLines($manifest, [$record]);
+        $this->writeSummary();
+
+        $this->artisan('geoflow:knowledge:import-governed', [
+            'manifest' => $manifest,
+            '--keyword-library' => 42,
+        ])->assertFailed();
+
+        $this->assertNoImportWrites();
+    }
+
+    public function test_cleaned_body_must_already_match_task_six_unicode_normalization(): void
+    {
+        $body = "# Café\u{00A0}\n\nDetails.\u{00A0}\n";
+        $manifest = $this->writePackage([
+            $this->documentRecord(
+                'url:https://www.lightinthebox.com/cafe',
+                $body,
+                'brand-company',
+            ),
+        ], []);
+
+        $this->artisan('geoflow:knowledge:import-governed', [
+            'manifest' => $manifest,
+            '--dry-run' => true,
+            '--keyword-library' => 42,
+        ])->assertFailed();
+
+        $this->assertNoImportWrites();
+    }
+
+    public function test_dry_run_preflight_rejects_active_canonical_collision_without_writes(): void
+    {
+        [$brand, $site, $directory] = $this->ownership();
+        $existing = $this->documentRecord(
+            'url:https://www.lightinthebox.com/returns',
+            "# Old Returns\n\nOld policy content.\n",
+        );
+        KnowledgeBase::query()->create($this->existingDocumentPayload($existing, $brand, $site, $directory));
+        $before = [
+            'brands' => DB::table('knowledge_brands')->count(),
+            'sites' => DB::table('knowledge_sites')->count(),
+            'directories' => DB::table('knowledge_directories')->count(),
+            'documents' => DB::table('knowledge_bases')->count(),
+        ];
+        $manifest = $this->writePackage();
+
+        $this->artisan('geoflow:knowledge:import-governed', [
+            'manifest' => $manifest,
+            '--dry-run' => true,
+            '--keyword-library' => 42,
+        ])->assertFailed();
+
+        $this->assertSame($before['brands'], DB::table('knowledge_brands')->count());
+        $this->assertSame($before['sites'], DB::table('knowledge_sites')->count());
+        $this->assertSame($before['directories'], DB::table('knowledge_directories')->count());
+        $this->assertSame($before['documents'], DB::table('knowledge_bases')->count());
+        $this->assertDatabaseCount('knowledge_import_batches', 0);
+    }
+
+    public function test_dry_run_preflight_rejects_foreign_owned_existing_asset_without_writes(): void
+    {
+        $brand = KnowledgeBrand::query()->create(['key' => 'another-brand', 'name' => 'Another Brand']);
+        $site = KnowledgeSite::query()->create([
+            'brand_id' => $brand->id,
+            'key' => 'another-site',
+            'canonical_host' => 'example.test',
+            'role' => 'commerce-primary',
+        ]);
+        $directory = KnowledgeDirectory::query()->create([
+            'brand_id' => $brand->id,
+            'key' => 'policy-compliance',
+            'path' => 'policy-compliance',
+            'name' => 'Policy & Compliance',
+        ]);
+        $record = $this->documentRecord();
+        KnowledgeBase::query()->create($this->existingDocumentPayload($record, $brand, $site, $directory));
+        $before = [
+            'brands' => DB::table('knowledge_brands')->count(),
+            'sites' => DB::table('knowledge_sites')->count(),
+            'directories' => DB::table('knowledge_directories')->count(),
+            'documents' => DB::table('knowledge_bases')->count(),
+        ];
+        $manifest = $this->writePackage([$record], []);
+
+        $this->artisan('geoflow:knowledge:import-governed', [
+            'manifest' => $manifest,
+            '--dry-run' => true,
+            '--keyword-library' => 42,
+        ])->assertFailed();
+
+        $this->assertSame($before['brands'], DB::table('knowledge_brands')->count());
+        $this->assertSame($before['sites'], DB::table('knowledge_sites')->count());
+        $this->assertSame($before['directories'], DB::table('knowledge_directories')->count());
+        $this->assertSame($before['documents'], DB::table('knowledge_bases')->count());
+        $this->assertDatabaseCount('knowledge_import_batches', 0);
+    }
+
+    public function test_manifest_enums_urls_and_single_active_version_are_strictly_validated(): void
+    {
+        $invalidFields = [
+            'risk_level' => 'critical',
+            'review_status' => 'approved',
+            'source_type' => 'uploaded_file',
+            'ingestion_method' => 'api',
+            'authority_level' => 'unknown',
+            'lifecycle_status' => 'published',
+            'source_url' => 'javascript:alert(1)',
+        ];
+        foreach ($invalidFields as $field => $value) {
+            $record = [...$this->documentRecord(), $field => $value];
+            $manifest = $this->writePackage([$record], []);
+            $this->artisan('geoflow:knowledge:import-governed', [
+                'manifest' => $manifest,
+                '--dry-run' => true,
+                '--keyword-library' => 42,
+            ])->assertFailed();
+        }
+
+        $second = $this->documentRecord(
+            'url:https://www.lightinthebox.com/returns',
+            "# Returns Updated\n\nUpdated policy content.\n",
+        );
+        $manifest = $this->writePackage([$this->documentRecord(), $second], []);
+        $this->artisan('geoflow:knowledge:import-governed', [
+            'manifest' => $manifest,
+            '--dry-run' => true,
+            '--keyword-library' => 42,
+        ])->assertFailed();
+
+        $this->assertNoImportWrites();
+    }
+
+    public function test_global_identity_collisions_and_exact_duplicate_hash_divergence_are_rejected(): void
+    {
+        $record = $this->documentRecord();
+        $collision = $this->exclusionRecord();
+        $collision['document_id'] = $record['document_id'];
+        $manifest = $this->writePackage([$record], [], [$collision]);
+        $this->artisan('geoflow:knowledge:import-governed', [
+            'manifest' => $manifest,
+            '--dry-run' => true,
+            '--keyword-library' => 42,
+        ])->assertFailed();
+
+        $duplicate = $this->manifestDuplicate($record);
+        $duplicate['normalized_content_hash'] = hash('sha256', "different\n");
+        $manifest = $this->writePackage([$record], [$duplicate]);
+        $this->artisan('geoflow:knowledge:import-governed', [
+            'manifest' => $manifest,
+            '--dry-run' => true,
+            '--keyword-library' => 42,
+        ])->assertFailed();
+
+        $this->assertNoImportWrites();
+    }
+
+    public function test_english_orphan_txt_exclusion_from_task_six_remains_a_valid_audit_target(): void
+    {
+        $canonicalKey = 'path:orphan-txt';
+        $contentHash = hash('sha256', "orphan english text\n");
+        $exclusion = [
+            'document_id' => $this->documentId($canonicalKey, $contentHash),
+            'canonical_document_key' => $canonicalKey,
+            'source_file_path' => 'LightInTheBox_PT_Official_KB_TXT/01_Company_Info/Orphan.txt',
+            'source_file_hash' => hash('sha256', 'orphan txt bytes'),
+            'normalized_content_hash' => $contentHash,
+            'language_code' => 'en',
+            'reason' => 'txt_mirror_without_markdown_canonical',
+            'source_kind' => 'txt_mirror',
+            'warnings' => [],
+        ];
+        $manifest = $this->writePackage([$this->documentRecord()], [], [$exclusion]);
+
+        $this->artisan('geoflow:knowledge:import-governed', [
+            'manifest' => $manifest,
+            '--dry-run' => true,
+            '--keyword-library' => 42,
+        ])->assertSuccessful();
+
+        $this->assertNoImportWrites();
+    }
+
+    public function test_run_summary_schema_flags_counts_and_all_artifact_hashes_are_required(): void
+    {
+        $manifest = $this->writePackage();
+        $summary = json_decode(File::get($this->root.'/run_summary.json'), true, 512, JSON_THROW_ON_ERROR);
+        $summary['schema_version'] = 999;
+        $summary['validation']['english_only_manifest'] = false;
+        $summary['counts']['manifest_documents'] = 999;
+        unset($summary['artifact_hashes']['near_duplicate_review.jsonl']);
+        File::put($this->root.'/run_summary.json', json_encode($summary, JSON_THROW_ON_ERROR));
+
+        $this->artisan('geoflow:knowledge:import-governed', [
+            'manifest' => $manifest,
+            '--dry-run' => true,
+            '--keyword-library' => 42,
+        ])->assertFailed();
+
+        $this->assertNoImportWrites();
+    }
+
+    public function test_run_summary_discovered_source_counts_must_match_the_audit_artifacts(): void
+    {
+        $manifest = $this->writePackage();
+        $summary = json_decode(File::get($this->root.'/run_summary.json'), true, 512, JSON_THROW_ON_ERROR);
+        $summary['counts']['canonical_source_files']++;
+        File::put($this->root.'/run_summary.json', json_encode($summary, JSON_THROW_ON_ERROR));
+
+        $this->artisan('geoflow:knowledge:import-governed', [
+            'manifest' => $manifest,
+            '--dry-run' => true,
+            '--keyword-library' => 42,
+        ])->assertFailed();
+
+        $this->assertNoImportWrites();
+    }
+
+    public function test_preexisting_governed_document_is_updated_in_place_and_keeps_task_reference(): void
+    {
+        [$brand, $site, $directory] = $this->ownership();
+        $record = $this->documentRecord();
+        $existing = KnowledgeBase::query()->create([
+            ...$this->existingDocumentPayload($record, $brand, $site, $directory),
+            'source_name' => 'Old source label',
+        ]);
+        $task = Task::query()->create([
+            'name' => 'Referenced governed task',
+            'status' => 'paused',
+            'knowledge_base_id' => $existing->id,
+        ]);
+        $manifest = $this->writePackage([$record], []);
+
+        $this->artisan('geoflow:knowledge:import-governed', [
+            'manifest' => $manifest,
+            '--keyword-library' => 42,
+        ])->assertSuccessful();
+
+        $this->assertSame((int) $existing->id, (int) KnowledgeBase::query()->sole()->id);
+        $this->assertSame((int) $existing->id, (int) $task->fresh()->knowledge_base_id);
+        $this->assertSame($record['source_name'], $existing->fresh()->source_name);
+    }
+
+    public function test_exact_normalized_body_is_imported_without_trimming_leading_content(): void
+    {
+        $body = "\n# Returns\n\nReturn eligible items within 30 days.\n";
+        $record = $this->documentRecord(
+            'url:https://www.lightinthebox.com/leading-body',
+            $body,
+        );
+        $record['title'] = 'Returns';
+        $manifest = $this->writePackage([$record], []);
+
+        $this->artisan('geoflow:knowledge:import-governed', [
+            'manifest' => $manifest,
+            '--keyword-library' => 42,
+        ])->assertSuccessful();
+
+        $this->assertSame($body, KnowledgeBase::query()->sole()->content);
+    }
+
+    public function test_transaction_failure_rolls_back_owners_documents_and_audit_rows(): void
+    {
+        $second = $this->documentRecord(
+            'url:https://www.lightinthebox.com/company',
+            "# Company\n\nCompany information.\n",
+            'brand-company',
+        );
+        $manifest = $this->writePackage([$this->documentRecord(), $second], []);
+        DB::unprepared(<<<'SQL'
+CREATE TRIGGER governed_import_force_failure
+BEFORE INSERT ON knowledge_import_rows
+FOR EACH ROW WHEN NEW.row_number = 2
+BEGIN
+    SELECT RAISE(ABORT, 'forced transaction rollback');
+END
+SQL);
+
+        $this->artisan('geoflow:knowledge:import-governed', [
+            'manifest' => $manifest,
+            '--keyword-library' => 42,
+        ])->assertFailed();
+
+        $this->assertNoImportWrites();
+    }
+
+    public function test_transaction_failure_rolls_back_preexisting_document_update_and_keeps_task_reference(): void
+    {
+        [$brand, $site, $directory] = $this->ownership();
+        $record = $this->documentRecord();
+        $existing = KnowledgeBase::query()->create([
+            ...$this->existingDocumentPayload($record, $brand, $site, $directory),
+            'source_name' => 'Operator-approved old label',
+        ]);
+        $task = Task::query()->create([
+            'name' => 'Referenced governed task',
+            'status' => 'paused',
+            'knowledge_base_id' => $existing->id,
+        ]);
+        $second = $this->documentRecord(
+            'url:https://www.lightinthebox.com/company',
+            "# Company\n\nCompany information.\n",
+            'brand-company',
+        );
+        $manifest = $this->writePackage([$record, $second], []);
+        DB::unprepared(<<<'SQL'
+CREATE TRIGGER governed_import_update_force_failure
+BEFORE INSERT ON knowledge_import_rows
+FOR EACH ROW WHEN NEW.row_number = 2
+BEGIN
+    SELECT RAISE(ABORT, 'forced update transaction rollback');
+END
+SQL);
+
+        $this->artisan('geoflow:knowledge:import-governed', [
+            'manifest' => $manifest,
+            '--keyword-library' => 42,
+        ])->assertFailed();
+
+        $this->assertSame('Operator-approved old label', $existing->fresh()->source_name);
+        $this->assertSame((int) $existing->id, (int) $task->fresh()->knowledge_base_id);
+        $this->assertDatabaseCount('knowledge_bases', 1);
+        $this->assertDatabaseCount('knowledge_import_batches', 0);
+        $this->assertDatabaseCount('knowledge_import_rows', 0);
+        $this->assertDatabaseCount('knowledge_duplicates', 0);
+    }
+
+    public function test_failed_chunk_dispatch_is_auditable_and_rerun_reconciles_only_missing_dispatches(): void
+    {
+        $records = [
+            $this->documentRecord(),
+            $this->documentRecord(
+                'url:https://www.lightinthebox.com/company',
+                "# Company\n\nCompany information.\n",
+                'brand-company',
+            ),
+        ];
+        $manifest = $this->writePackage($records, []);
+        $firstCoordinator = new class extends KnowledgeChunkSyncCoordinator
+        {
+            /** @var list<int> */
+            public array $calls = [];
+
+            public function request(int $knowledgeBaseId, bool $requireRealEmbedding = false, bool $force = false): bool
+            {
+                $this->calls[] = $knowledgeBaseId;
+                if (count($this->calls) === 2) {
+                    throw new RuntimeException('queue unavailable');
+                }
+
+                return true;
+            }
+        };
+        $this->app->instance(KnowledgeChunkSyncCoordinator::class, $firstCoordinator);
+
+        $this->artisan('geoflow:knowledge:import-governed', [
+            'manifest' => $manifest,
+            '--keyword-library' => 42,
+        ])->assertFailed();
+
+        $batch = DB::table('knowledge_import_batches')->sole();
+        $this->assertSame('failed', $batch->status);
+        $this->assertSame(['chunk_dispatched', 'chunk_failed'], DB::table('knowledge_import_rows')->orderBy('row_number')->pluck('outcome')->all());
+        $this->assertStringContainsString('queue unavailable', (string) $batch->error_log);
+
+        $retryCoordinator = new class extends KnowledgeChunkSyncCoordinator
+        {
+            /** @var list<int> */
+            public array $calls = [];
+
+            public function request(int $knowledgeBaseId, bool $requireRealEmbedding = false, bool $force = false): bool
+            {
+                $this->calls[] = $knowledgeBaseId;
+
+                return true;
+            }
+        };
+        $this->app->instance(KnowledgeChunkSyncCoordinator::class, $retryCoordinator);
+        $this->app->forgetInstance(GovernedKnowledgeImporter::class);
+
+        $this->artisan('geoflow:knowledge:import-governed', [
+            'manifest' => $manifest,
+            '--keyword-library' => 42,
+        ])->assertSuccessful();
+
+        $this->assertCount(1, $retryCoordinator->calls);
+        $this->assertSame($firstCoordinator->calls[1], $retryCoordinator->calls[0]);
+        $this->assertDatabaseCount('knowledge_bases', 2);
+        $this->assertDatabaseCount('knowledge_import_batches', 1);
+        $this->assertDatabaseCount('knowledge_import_rows', 2);
+        $this->assertSame('completed', DB::table('knowledge_import_batches')->sole()->status);
+        $this->assertSame(['chunk_dispatched', 'chunk_dispatched'], DB::table('knowledge_import_rows')->orderBy('row_number')->pluck('outcome')->all());
+    }
+
+    public function test_import_batch_identity_is_enforced_by_the_database(): void
+    {
+        [$brand, $site] = $this->ownership();
+        $payload = [
+            'brand_id' => $brand->id,
+            'site_id' => $site->id,
+            'source_type' => 'governed_manifest',
+            'status' => 'staged',
+            'configuration_hash' => hash('sha256', 'config'),
+            'source_checksum' => hash('sha256', 'source'),
+            'created_at' => now(),
+            'updated_at' => now(),
+        ];
+        DB::table('knowledge_import_batches')->insert($payload);
+
+        $this->expectException(QueryException::class);
+        DB::table('knowledge_import_batches')->insert($payload);
+    }
+
     /**
      * @param  list<array<string, mixed>>|null  $records
      * @param  list<array<string, mixed>>|null  $duplicates
+     * @param  list<array<string, mixed>>|null  $exclusions
      */
-    private function writePackage(?array $records = null, ?array $duplicates = null): string
+    private function writePackage(?array $records = null, ?array $duplicates = null, ?array $exclusions = null): string
     {
         $records ??= [$this->documentRecord()];
-        foreach ($records as &$record) {
+        $manifest = [];
+        foreach ($records as $record) {
+            $body = (string) $record['_body'];
+            unset($record['_body']);
             $path = $this->root.'/'.$record['cleaned_file_path'];
             File::ensureDirectoryExists(dirname($path));
-            $content = "---\ndocument_id: \"{$record['document_id']}\"\n---\n\n# Returns\n\nReturn eligible items within 30 days.\n";
+            $content = $this->renderCleanedDocument($record, $body);
             File::put($path, $content);
             $record['cleaned_file_hash'] = hash('sha256', $content);
+            $manifest[] = $record;
         }
-        unset($record);
 
+        $exclusions ??= [$this->exclusionRecord()];
         $duplicates ??= [
-            [
-                'kind' => 'exact',
-                'source_file_path' => 'LightInTheBox_PT_Official_KB_TXT/03_Company_Policies/Returns.txt',
-                'source_file_hash' => hash('sha256', 'txt mirror'),
-                'normalized_content_hash' => $records[0]['normalized_content_hash'],
-                'duplicate_of_source_file_path' => $records[0]['source_file_path'],
-                'duplicate_of_document_id' => $records[0]['document_id'],
-                'reason' => 'markdown_over_txt',
-            ],
-            [
-                'kind' => 'exact',
-                'source_file_path' => 'LightInTheBox_PT_Official_KB_TXT/01_Company_Info/Excluded.txt',
-                'source_file_hash' => hash('sha256', 'excluded txt mirror'),
-                'normalized_content_hash' => hash('sha256', 'excluded normalized'),
-                'duplicate_of_source_file_path' => 'LightInTheBox_PT_Official_KB/01_Company_Info/Excluded.md',
-                'duplicate_of_document_id' => 'excluded-document',
-                'reason' => 'markdown_over_txt',
-            ],
+            $this->manifestDuplicate($manifest[0]),
+            $this->exclusionDuplicate($exclusions[0]),
         ];
 
-        $this->writeJsonLines($this->root.'/manifest.jsonl', $records);
+        $this->writeJsonLines($this->root.'/manifest.jsonl', $manifest);
         $this->writeJsonLines($this->root.'/duplicate_audit.jsonl', $duplicates);
-        $this->writeJsonLines($this->root.'/exclusion_audit.jsonl', [[
-            'document_id' => 'excluded-document',
-            'canonical_document_key' => 'path:excluded',
-            'source_file_path' => 'LightInTheBox_PT_Official_KB/01_Company_Info/Excluded.md',
-            'source_file_hash' => hash('sha256', 'excluded markdown'),
-            'normalized_content_hash' => hash('sha256', 'excluded normalized'),
-            'language_code' => 'pt',
-            'reason' => 'non_english_initial_corpus',
-            'source_kind' => 'canonical_md',
-            'warnings' => [],
-        ]]);
+        $this->writeJsonLines($this->root.'/exclusion_audit.jsonl', $exclusions);
+        $this->writeJsonLines($this->root.'/near_duplicate_review.jsonl', []);
+        $this->writeSummary();
 
         return $this->root.'/manifest.jsonl';
     }
 
     /** @return array<string, mixed> */
     private function documentRecord(
-        string $documentId = 'returns-document',
-        string $cleanedPath = 'cleaned/policy-compliance/returns-document.md',
+        string $canonicalKey = 'url:https://www.lightinthebox.com/returns',
+        string $body = "# Returns\n\nReturn eligible items within 30 days.\n",
+        string $directory = 'policy-compliance',
     ): array {
+        $contentHash = hash('sha256', $body);
+        $documentId = $this->documentId($canonicalKey, $contentHash);
+        $title = trim((string) preg_replace('/\A#\s+([^\n]+).*/s', '$1', $body));
+
         return [
             'document_id' => $documentId,
             'asset_key' => 'knowledge:'.$documentId,
-            'canonical_document_key' => 'url:https://www.lightinthebox.com/returns',
-            'version_label' => 'source-20260819',
+            'canonical_document_key' => $canonicalKey,
+            'version_label' => 'source-'.$contentHash,
             'lifecycle_status' => 'active',
             'brand_key' => 'lightinthebox',
             'site_key' => 'lightinthebox-main',
-            'directory_path' => 'policy-compliance',
+            'directory_path' => $directory,
             'language_code' => 'en',
             'authority_level' => 'first_party',
-            'risk_level' => 'high',
+            'risk_level' => $directory === 'policy-compliance' ? 'medium' : 'low',
             'review_status' => 'reviewed',
             'generation_eligible' => true,
             'citation_required' => true,
-            'title' => 'Returns',
+            'title' => $title,
             'source_name' => 'LightInTheBox official knowledge base',
-            'source_url' => 'https://www.lightinthebox.com/returns',
+            'source_url' => str_replace('url:', '', $canonicalKey),
             'source_type' => 'official_web_page',
-            'source_file_path' => 'LightInTheBox_PT_Official_KB/03_Company_Policies/Returns.md',
-            'source_file_hash' => hash('sha256', 'returns source'),
-            'normalized_content_hash' => hash('sha256', '# Returns\n\nReturn eligible items within 30 days.\n'),
+            'source_file_path' => 'LightInTheBox_PT_Official_KB/'.$directory.'/'.$documentId.'.md',
+            'source_file_hash' => hash('sha256', 'source-'.$documentId),
+            'normalized_content_hash' => $contentHash,
             'ingestion_method' => 'read_only_folder',
             'retrieved_at' => '2026-08-19',
             'effective_date' => '2026-08-01',
             'review_due_at' => '2027-08-01',
             'warnings' => [],
-            'cleaned_file_path' => $cleanedPath,
+            'cleaned_file_path' => 'cleaned/'.$directory.'/'.$documentId.'.md',
             'keyword_node_ids' => [$this->keywordNodeId],
             'keyword_cluster_ids' => [$this->keywordClusterId],
+            '_body' => $body,
+        ];
+    }
+
+    /** @return array<string, mixed> */
+    private function exclusionRecord(): array
+    {
+        $canonicalKey = 'path:excluded';
+        $contentHash = hash('sha256', "conteudo excluido\n");
+
+        return [
+            'document_id' => $this->documentId($canonicalKey, $contentHash),
+            'canonical_document_key' => $canonicalKey,
+            'source_file_path' => 'LightInTheBox_PT_Official_KB/01_Company_Info/Excluded.md',
+            'source_file_hash' => hash('sha256', 'excluded markdown'),
+            'normalized_content_hash' => $contentHash,
+            'language_code' => 'pt',
+            'reason' => 'non_english_initial_corpus',
+            'source_kind' => 'canonical_md',
+            'warnings' => [],
+        ];
+    }
+
+    /** @param array<string,mixed> $record
+     * @return array<string,mixed>
+     */
+    private function manifestDuplicate(array $record): array
+    {
+        return [
+            'kind' => 'exact',
+            'source_file_path' => str_replace('.md', '.txt', str_replace('Official_KB/', 'Official_KB_TXT/', $record['source_file_path'])),
+            'source_file_hash' => hash('sha256', 'txt-'.$record['document_id']),
+            'normalized_content_hash' => $record['normalized_content_hash'],
+            'duplicate_of_source_file_path' => $record['source_file_path'],
+            'duplicate_of_document_id' => $record['document_id'],
+            'reason' => 'markdown_over_txt',
+        ];
+    }
+
+    /** @param array<string,mixed> $record
+     * @return array<string,mixed>
+     */
+    private function exclusionDuplicate(array $record): array
+    {
+        return [
+            'kind' => 'exact',
+            'source_file_path' => 'LightInTheBox_PT_Official_KB_TXT/01_Company_Info/Excluded.txt',
+            'source_file_hash' => hash('sha256', 'excluded txt mirror'),
+            'normalized_content_hash' => $record['normalized_content_hash'],
+            'duplicate_of_source_file_path' => $record['source_file_path'],
+            'duplicate_of_document_id' => $record['document_id'],
+            'reason' => 'markdown_over_txt',
+        ];
+    }
+
+    /** @param array<string,mixed> $record */
+    private function renderCleanedDocument(array $record, string $body): string
+    {
+        $fields = [
+            'document_id', 'asset_key', 'canonical_document_key', 'version_label',
+            'lifecycle_status', 'brand_key', 'site_key', 'directory_path',
+            'language_code', 'authority_level', 'risk_level', 'review_status',
+            'generation_eligible', 'citation_required', 'title', 'source_name',
+            'source_url', 'source_type', 'source_file_path', 'source_file_hash',
+            'normalized_content_hash', 'ingestion_method', 'retrieved_at',
+            'effective_date', 'review_due_at', 'warnings',
+        ];
+        $lines = ['---'];
+        foreach ($fields as $field) {
+            $lines[] = $field.': '.json_encode($record[$field], JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES);
+        }
+        $lines[] = '---';
+        $lines[] = '';
+        $lines[] = rtrim($body, "\n");
+        $lines[] = '';
+
+        return implode("\n", $lines);
+    }
+
+    private function writeSummary(?string $sourceSetHash = null): void
+    {
+        $manifest = $this->readJsonLines($this->root.'/manifest.jsonl');
+        $duplicates = $this->readJsonLines($this->root.'/duplicate_audit.jsonl');
+        $exclusions = $this->readJsonLines($this->root.'/exclusion_audit.jsonl');
+        $near = $this->readJsonLines($this->root.'/near_duplicate_review.jsonl');
+        $sourcePaths = [];
+        foreach ([...$manifest, ...$duplicates, ...$exclusions] as $record) {
+            $sourcePaths[$record['source_file_path']] = true;
+        }
+        foreach ($near as $record) {
+            foreach ($record['source_file_paths'] as $path) {
+                $sourcePaths[$path] = true;
+            }
+        }
+        $canonicalSourceCount = count(array_filter(
+            array_keys($sourcePaths),
+            static fn (string $path): bool => strtolower((string) pathinfo($path, PATHINFO_EXTENSION)) === 'md',
+        ));
+        $txtMirrorCount = count($sourcePaths) - $canonicalSourceCount;
+        $summary = [
+            'schema_version' => 1,
+            'brand_key' => 'lightinthebox',
+            'site_key' => 'lightinthebox-main',
+            'source_set_hash' => $sourceSetHash ?? hash('sha256', 'fixture source set'),
+            'counts' => [
+                'canonical_source_files' => $canonicalSourceCount,
+                'txt_mirror_files' => $txtMirrorCount,
+                'source_files_hashed' => count($sourcePaths),
+                'manifest_documents' => count($manifest),
+                'active_documents' => count(array_filter($manifest, fn (array $record): bool => $record['lifecycle_status'] === 'active')),
+                'superseded_documents' => count(array_filter($manifest, fn (array $record): bool => $record['lifecycle_status'] === 'superseded')),
+                'duplicate_records' => count($duplicates),
+                'near_review_records' => count($near),
+                'excluded_sources' => count($exclusions),
+            ],
+            'validation' => [
+                'source_hashes_unchanged' => true,
+                'zero_active_exact_hash_duplicates' => true,
+                'no_unknown_owner' => true,
+                'english_only_manifest' => true,
+                'policy_eligibility_rules' => true,
+                'valid_duplicate_targets' => true,
+                'cleaned_manifest_paths_unique' => true,
+            ],
+            'artifact_hashes' => [],
+        ];
+        foreach (['manifest.jsonl', 'duplicate_audit.jsonl', 'exclusion_audit.jsonl', 'near_duplicate_review.jsonl'] as $name) {
+            $summary['artifact_hashes'][$name] = hash_file('sha256', $this->root.'/'.$name);
+        }
+        File::put($this->root.'/run_summary.json', json_encode($summary, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES));
+    }
+
+    /** @return list<array<string,mixed>> */
+    private function readJsonLines(string $path): array
+    {
+        $content = trim(File::get($path));
+        if ($content === '') {
+            return [];
+        }
+
+        return array_map(
+            static fn (string $line): array => json_decode($line, true, 512, JSON_THROW_ON_ERROR),
+            explode("\n", $content),
+        );
+    }
+
+    private function documentId(string $canonicalKey, string $contentHash): string
+    {
+        return substr(hash('sha256', implode("\0", [
+            'lightinthebox',
+            'lightinthebox-main',
+            $canonicalKey,
+            $contentHash,
+        ])), 0, 32);
+    }
+
+    /** @return array{KnowledgeBrand,KnowledgeSite,KnowledgeDirectory} */
+    private function ownership(): array
+    {
+        $brand = KnowledgeBrand::query()->firstOrCreate(['key' => 'lightinthebox'], ['name' => 'LightInTheBox']);
+        $site = KnowledgeSite::query()->firstOrCreate([
+            'brand_id' => $brand->id,
+            'key' => 'lightinthebox-main',
+        ], [
+            'canonical_host' => 'www.lightinthebox.com',
+            'role' => 'commerce-primary',
+        ]);
+        $directory = KnowledgeDirectory::query()->firstOrCreate([
+            'brand_id' => $brand->id,
+            'path' => 'policy-compliance',
+        ], [
+            'key' => 'policy-compliance',
+            'name' => 'Policy & Compliance',
+        ]);
+
+        return [$brand, $site, $directory];
+    }
+
+    /** @param array<string,mixed> $record
+     * @return array<string,mixed>
+     */
+    private function existingDocumentPayload(
+        array $record,
+        KnowledgeBrand $brand,
+        KnowledgeSite $site,
+        KnowledgeDirectory $directory,
+    ): array {
+        return [
+            'asset_key' => $record['asset_key'],
+            'name' => $record['title'],
+            'content' => $record['_body'],
+            'file_type' => 'markdown',
+            'brand_id' => $brand->id,
+            'site_id' => $site->id,
+            'primary_directory_id' => $directory->id,
+            'canonical_document_key' => $record['canonical_document_key'],
+            'language_code' => $record['language_code'],
+            'authority_level' => $record['authority_level'],
+            'version_label' => $record['version_label'],
+            'lifecycle_status' => $record['lifecycle_status'],
+            'generation_eligible' => $record['generation_eligible'],
+            'citation_required' => $record['citation_required'],
+            'normalized_content_hash' => $record['normalized_content_hash'],
+            'source_file_path' => $record['source_file_path'],
+            'source_file_hash' => $record['source_file_hash'],
+            'source_name' => $record['source_name'],
         ];
     }
 

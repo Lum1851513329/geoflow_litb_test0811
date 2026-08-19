@@ -10,10 +10,12 @@ use App\Models\KnowledgeImportBatch;
 use App\Models\KnowledgeImportRow;
 use App\Models\KnowledgeSite;
 use App\Services\GeoFlow\KnowledgeChunkSyncCoordinator;
+use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use RuntimeException;
+use Throwable;
 
 final class GovernedKnowledgeImporter
 {
@@ -44,12 +46,18 @@ final class GovernedKnowledgeImporter
             'source_checksum' => $package['source_checksum'],
             'configuration_hash' => $package['configuration_hash'],
         ];
+        $existing = $this->batchForPackage($package['configuration_hash'], $package['source_checksum']);
         if ($dryRun) {
             return $summary;
         }
-
-        $existing = $this->completedBatch($package['configuration_hash'], $package['source_checksum']);
         if ($existing !== null) {
+            if ($existing->status !== 'completed') {
+                return [
+                    ...$summary,
+                    ...$this->dispatchBatch((int) $existing->id),
+                ];
+            }
+
             return [
                 ...$summary,
                 'status' => 'idempotent',
@@ -59,23 +67,22 @@ final class GovernedKnowledgeImporter
             ];
         }
 
-        $committed = DB::transaction(
-            fn (): array => $this->commitPackage($package, $keywordLibraryId),
-            3,
-        );
-
-        if ($committed['status'] === 'completed') {
-            foreach ($committed['chunk_document_ids'] as $documentId) {
-                $this->chunkSyncCoordinator->request($documentId);
+        try {
+            $batchId = DB::transaction(
+                fn (): int => $this->commitPackage($package, $keywordLibraryId),
+                3,
+            );
+        } catch (UniqueConstraintViolationException $exception) {
+            $existing = $this->batchForPackage($package['configuration_hash'], $package['source_checksum']);
+            if ($existing === null) {
+                throw $exception;
             }
+            $batchId = (int) $existing->id;
         }
 
         return [
             ...$summary,
-            'status' => $committed['status'],
-            'batch_id' => $committed['batch_id'],
-            'imported_count' => $committed['imported_count'],
-            'duplicate_count' => $committed['duplicate_count'],
+            ...$this->dispatchBatch($batchId),
         ];
     }
 
@@ -88,55 +95,50 @@ final class GovernedKnowledgeImporter
      *   configuration_hash:string,
      *   manifest_path:string
      * } $package
-     * @return array{status:string,batch_id:int,imported_count:int,duplicate_count:int,chunk_document_ids:list<int>}
      */
-    private function commitPackage(array $package, int $keywordLibraryId): array
+    private function commitPackage(array $package, int $keywordLibraryId): int
     {
-        $brand = KnowledgeBrand::query()->where('key', KnowledgeImportValidator::BRAND_KEY)->lockForUpdate()->first();
-        if ($brand === null) {
-            $brand = KnowledgeBrand::query()->create([
-                'key' => KnowledgeImportValidator::BRAND_KEY,
-                'name' => 'LightInTheBox',
-            ]);
-        } elseif ($brand->name !== 'LightInTheBox') {
+        DB::table('knowledge_brands')->insertOrIgnore([
+            'key' => KnowledgeImportValidator::BRAND_KEY,
+            'name' => 'LightInTheBox',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        $brand = KnowledgeBrand::query()
+            ->where('key', KnowledgeImportValidator::BRAND_KEY)
+            ->lockForUpdate()
+            ->firstOrFail();
+        if ($brand->name !== 'LightInTheBox') {
             $brand->update(['name' => 'LightInTheBox']);
         }
 
+        DB::table('knowledge_sites')->insertOrIgnore([
+            'brand_id' => $brand->id,
+            'key' => KnowledgeImportValidator::SITE_KEY,
+            'canonical_host' => 'www.lightinthebox.com',
+            'role' => 'commerce-primary',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
         $site = KnowledgeSite::query()
             ->where('brand_id', $brand->id)
             ->where('key', KnowledgeImportValidator::SITE_KEY)
             ->lockForUpdate()
-            ->first();
-        if ($site === null) {
-            $site = KnowledgeSite::query()->create([
-                'brand_id' => $brand->id,
-                'key' => KnowledgeImportValidator::SITE_KEY,
-                'canonical_host' => 'www.lightinthebox.com',
-                'role' => 'commerce-primary',
-            ]);
-        } else {
-            $site->update([
-                'canonical_host' => 'www.lightinthebox.com',
-                'role' => 'commerce-primary',
-            ]);
-        }
+            ->firstOrFail();
+        $site->update([
+            'canonical_host' => 'www.lightinthebox.com',
+            'role' => 'commerce-primary',
+        ]);
 
         $existing = KnowledgeImportBatch::query()
             ->where('brand_id', $brand->id)
             ->where('site_id', $site->id)
             ->where('configuration_hash', $package['configuration_hash'])
             ->where('source_checksum', $package['source_checksum'])
-            ->where('status', 'completed')
             ->lockForUpdate()
             ->first();
         if ($existing !== null) {
-            return [
-                'status' => 'idempotent',
-                'batch_id' => (int) $existing->id,
-                'imported_count' => (int) $existing->imported_count,
-                'duplicate_count' => (int) $existing->duplicate_count,
-                'chunk_document_ids' => [],
-            ];
+            return (int) $existing->id;
         }
 
         $directories = [];
@@ -180,7 +182,6 @@ final class GovernedKnowledgeImporter
         ]);
 
         $documentsByExternalId = [];
-        $chunkDocumentIds = [];
         $rowNumber = 0;
         foreach ($package['manifest'] as $record) {
             $rowNumber++;
@@ -223,7 +224,7 @@ final class GovernedKnowledgeImporter
                 'batch_id' => $batch->id,
                 'row_number' => $rowNumber,
                 'staged_payload' => Arr::except($record, ['_content']),
-                'outcome' => $outcome,
+                'outcome' => 'chunk_pending',
                 'canonical_document_id' => $document->id,
                 'rollback_metadata' => [
                     'asset_key' => $record['asset_key'],
@@ -231,9 +232,6 @@ final class GovernedKnowledgeImporter
                 ],
             ]);
             $documentsByExternalId[(string) $record['document_id']] = $document;
-            if ($outcome !== 'unchanged') {
-                $chunkDocumentIds[] = (int) $document->id;
-            }
         }
 
         foreach ($package['duplicates'] as $record) {
@@ -275,22 +273,16 @@ final class GovernedKnowledgeImporter
         }
 
         $batch->update([
-            'status' => 'completed',
+            'status' => 'dispatching',
             'processed_count' => $rowNumber,
             'imported_count' => count($package['manifest']),
             'duplicate_count' => count($package['duplicates']),
             'rejected_count' => 0,
             'error_log' => [],
-            'completed_at' => now(),
+            'completed_at' => null,
         ]);
 
-        return [
-            'status' => 'completed',
-            'batch_id' => (int) $batch->id,
-            'imported_count' => count($package['manifest']),
-            'duplicate_count' => count($package['duplicates']),
-            'chunk_document_ids' => array_values(array_unique($chunkDocumentIds)),
-        ];
+        return (int) $batch->id;
     }
 
     /** @param array<string,mixed> $record
@@ -351,12 +343,77 @@ final class GovernedKnowledgeImporter
         ];
     }
 
-    private function completedBatch(string $configurationHash, string $sourceChecksum): ?KnowledgeImportBatch
+    /** @return array{status:string,batch_id:int,imported_count:int,duplicate_count:int} */
+    private function dispatchBatch(int $batchId): array
+    {
+        $batch = KnowledgeImportBatch::query()->findOrFail($batchId);
+        $batch->update([
+            'status' => 'dispatching',
+            'completed_at' => null,
+        ]);
+        $rows = KnowledgeImportRow::query()
+            ->where('batch_id', $batchId)
+            ->whereIn('outcome', ['chunk_pending', 'chunk_failed'])
+            ->whereNotNull('canonical_document_id')
+            ->orderBy('row_number')
+            ->get();
+
+        foreach ($rows as $row) {
+            try {
+                $this->chunkSyncCoordinator->request((int) $row->canonical_document_id);
+                $row->update([
+                    'outcome' => 'chunk_dispatched',
+                    'error_message' => null,
+                ]);
+            } catch (Throwable $exception) {
+                $message = mb_substr($exception->getMessage(), 0, 2000, 'UTF-8');
+                $row->update([
+                    'outcome' => 'chunk_failed',
+                    'error_message' => $message,
+                ]);
+                $errors = (array) $batch->error_log;
+                $errors[] = [
+                    'row_id' => (int) $row->id,
+                    'document_id' => (int) $row->canonical_document_id,
+                    'message' => $message,
+                    'failed_at' => now()->toAtomString(),
+                ];
+                $batch->update([
+                    'status' => 'failed',
+                    'error_log' => $errors,
+                    'completed_at' => null,
+                ]);
+
+                throw $exception;
+            }
+        }
+
+        $outstanding = KnowledgeImportRow::query()
+            ->where('batch_id', $batchId)
+            ->whereIn('outcome', ['chunk_pending', 'chunk_failed'])
+            ->exists();
+        if ($outstanding) {
+            throw new RuntimeException('governed_import.chunk_dispatch_incomplete');
+        }
+
+        $batch->update([
+            'status' => 'completed',
+            'completed_at' => now(),
+        ]);
+
+        return [
+            'status' => 'completed',
+            'batch_id' => (int) $batch->id,
+            'imported_count' => (int) $batch->imported_count,
+            'duplicate_count' => (int) $batch->duplicate_count,
+        ];
+    }
+
+    private function batchForPackage(string $configurationHash, string $sourceChecksum): ?KnowledgeImportBatch
     {
         return KnowledgeImportBatch::query()
             ->where('configuration_hash', $configurationHash)
             ->where('source_checksum', $sourceChecksum)
-            ->where('status', 'completed')
             ->whereHas('brand', fn ($query) => $query->where('key', KnowledgeImportValidator::BRAND_KEY))
             ->whereHas('site', fn ($query) => $query->where('key', KnowledgeImportValidator::SITE_KEY))
             ->first();
