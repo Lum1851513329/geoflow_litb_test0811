@@ -17,6 +17,7 @@
 - Retrieval filters brand/site before lexical or vector scoring.
 - Active policy/customer-service evidence requires source URL and retrieved date.
 - High-risk unreviewed research is citation-required and not verified evidence.
+- The initial formal corpus is English-only; accurately detected non-English/undetermined sources remain in exclusion audit output and are not imported.
 - Exact duplicates merge deterministically; uncertain near duplicates remain audited and separate.
 - Keyword associations target formal keyword library ID 42 without copying keywords into prose.
 - Existing task/article references remain valid through migration.
@@ -146,6 +147,7 @@
 - [ ] Run `python3 -m unittest tools.knowledge_corpus.tests.test_build -v`; expect failure.
 - [ ] Implement temporary-directory build, full validation and atomic rename.
 - [ ] Limit real-corpus discovery to `LightInTheBox_PT_Official_KB` and `officialknowege/LITB_Reports`; explicitly exclude TXT mirrors from canonical discovery after duplicate auditing, keyword-library directories, `.DS_Store` and `knowledge_cleanup_work`.
+- [ ] Include only documents classified as `en` in the formal manifest; write `pt`, `zh`, and `und` records to an exclusion audit with source path, detected language and reason, and never relabel them as English.
 - [ ] Group shared canonical URL/document keys as versions, select the newest reviewed version as active and retain older versions as `superseded` in the manifest.
 - [ ] Run the builder against the real source corpus and record canonical count, duplicate count, near-review count and directory/language/authority distributions.
 - [ ] Validate zero active exact-hash duplicates, no unknown owner, unchanged source hashes, policy eligibility rules and valid duplicate targets.

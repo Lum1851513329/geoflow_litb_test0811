@@ -16,7 +16,7 @@ Replace the current flat, duplicated knowledge collection with a governed knowle
 - connects knowledge to the governed keyword taxonomy without treating keywords as prose;
 - supports file/Excel imports now and store/API synchronization later.
 
-The first migration covers LightInTheBox only. The design must allow additional brands without changing the isolation model.
+The first migration covers LightInTheBox and English content only. The design retains language metadata so additional languages can be enabled later without changing the isolation model.
 
 ## 2. Current-State Findings
 
@@ -90,7 +90,7 @@ Each knowledge document stores:
 
 - ownership: brand, site, primary directory;
 - identity: stable asset key and canonical document key;
-- language: BCP-47-compatible language code; initial corpus uses `pt`, `en`, or `zh` based on content rather than filename;
+- language: BCP-47-compatible language code detected from content rather than filename; the initial active/importable corpus accepts only `en`, while `pt`, `zh`, and undetermined sources remain excluded and auditable;
 - provenance: source name, canonical URL, source type, source file, source checksum and ingestion method;
 - authority: `first_party`, `regulatory_filing`, `mixed_research`, or `third_party`;
 - lifecycle: published/effective date, retrieved date, expiry/review-due date, version and active/superseded state;
@@ -169,7 +169,7 @@ Retrieval order:
 
 1. Enforce brand and site.
 2. Exclude inactive/superseded and non-eligible documents.
-3. Filter language and directory based on the content brief.
+3. Require English for the initial corpus, then filter directory based on the content brief.
 4. Rank lexical/vector candidates.
 5. Apply authority and freshness weighting.
 6. Return citations and provenance with each chunk.
