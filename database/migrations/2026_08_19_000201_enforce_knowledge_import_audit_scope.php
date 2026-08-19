@@ -18,8 +18,21 @@ return new class extends Migration
         });
 
         Schema::table('knowledge_import_rows', function (Blueprint $table): void {
-            $table->unsignedBigInteger('brand_id');
-            $table->unsignedBigInteger('site_id');
+            $table->unsignedBigInteger('brand_id')->nullable();
+            $table->unsignedBigInteger('site_id')->nullable();
+        });
+
+        Schema::table('knowledge_duplicates', function (Blueprint $table): void {
+            $table->unsignedBigInteger('brand_id')->nullable();
+            $table->unsignedBigInteger('site_id')->nullable();
+        });
+
+        $this->backfillScopeColumns();
+        $this->assertScopeColumnsResolved();
+
+        Schema::table('knowledge_import_rows', function (Blueprint $table): void {
+            $table->unsignedBigInteger('brand_id')->nullable(false)->change();
+            $table->unsignedBigInteger('site_id')->nullable(false)->change();
 
             $table->foreign(['brand_id', 'site_id', 'batch_id'], 'knowledge_import_rows_batch_scope_foreign')
                 ->references(['brand_id', 'site_id', 'id'])
@@ -32,8 +45,8 @@ return new class extends Migration
         });
 
         Schema::table('knowledge_duplicates', function (Blueprint $table): void {
-            $table->unsignedBigInteger('brand_id');
-            $table->unsignedBigInteger('site_id');
+            $table->unsignedBigInteger('brand_id')->nullable(false)->change();
+            $table->unsignedBigInteger('site_id')->nullable(false)->change();
 
             $table->foreign(['brand_id', 'site_id', 'import_batch_id'], 'knowledge_duplicates_batch_scope_foreign')
                 ->references(['brand_id', 'site_id', 'id'])
@@ -57,16 +70,40 @@ return new class extends Migration
         $this->dropImportRowBatchCheck();
 
         Schema::table('knowledge_duplicates', function (Blueprint $table): void {
-            $table->dropForeign('knowledge_duplicates_canonical_document_scope_foreign');
-            $table->dropForeign('knowledge_duplicates_duplicate_document_scope_foreign');
-            $table->dropForeign('knowledge_duplicates_import_row_scope_foreign');
-            $table->dropForeign('knowledge_duplicates_batch_scope_foreign');
+            $this->dropScopeForeign(
+                $table,
+                'knowledge_duplicates_canonical_document_scope_foreign',
+                ['brand_id', 'site_id', 'canonical_document_id'],
+            );
+            $this->dropScopeForeign(
+                $table,
+                'knowledge_duplicates_duplicate_document_scope_foreign',
+                ['brand_id', 'site_id', 'duplicate_document_id'],
+            );
+            $this->dropScopeForeign(
+                $table,
+                'knowledge_duplicates_import_row_scope_foreign',
+                ['brand_id', 'site_id', 'import_batch_id', 'import_row_id'],
+            );
+            $this->dropScopeForeign(
+                $table,
+                'knowledge_duplicates_batch_scope_foreign',
+                ['brand_id', 'site_id', 'import_batch_id'],
+            );
             $table->dropColumn(['brand_id', 'site_id']);
         });
 
         Schema::table('knowledge_import_rows', function (Blueprint $table): void {
-            $table->dropForeign('knowledge_import_rows_canonical_scope_foreign');
-            $table->dropForeign('knowledge_import_rows_batch_scope_foreign');
+            $this->dropScopeForeign(
+                $table,
+                'knowledge_import_rows_canonical_scope_foreign',
+                ['brand_id', 'site_id', 'canonical_document_id'],
+            );
+            $this->dropScopeForeign(
+                $table,
+                'knowledge_import_rows_batch_scope_foreign',
+                ['brand_id', 'site_id', 'batch_id'],
+            );
             $table->dropUnique('knowledge_import_rows_scope_id_unique');
             $table->dropColumn(['brand_id', 'site_id']);
         });
@@ -122,5 +159,79 @@ BEGIN
     SELECT RAISE(ABORT, 'knowledge duplicate import rows require an import batch');
 END
 SQL);
+    }
+
+    private function backfillScopeColumns(): void
+    {
+        $batchScopes = DB::table('knowledge_import_batches')
+            ->get(['id', 'brand_id', 'site_id'])
+            ->mapWithKeys(fn (object $batch): array => [(int) $batch->id => [
+                'brand_id' => (int) $batch->brand_id,
+                'site_id' => (int) $batch->site_id,
+            ]])
+            ->all();
+
+        DB::table('knowledge_import_rows')
+            ->orderBy('id')
+            ->eachById(function (object $row) use ($batchScopes): void {
+                $scope = $this->batchScope($batchScopes, $row->batch_id, 'knowledge_import_rows', $row->id);
+
+                DB::table('knowledge_import_rows')
+                    ->where('id', $row->id)
+                    ->update($scope);
+            });
+
+        $rowBatchIds = DB::table('knowledge_import_rows')
+            ->pluck('batch_id', 'id')
+            ->mapWithKeys(fn (int|string $batchId, int|string $rowId): array => [(int) $rowId => (int) $batchId])
+            ->all();
+
+        DB::table('knowledge_duplicates')
+            ->orderBy('id')
+            ->eachById(function (object $duplicate) use ($batchScopes, $rowBatchIds): void {
+                $batchId = $duplicate->import_batch_id ?? $rowBatchIds[(int) $duplicate->import_row_id] ?? null;
+                $scope = $this->batchScope($batchScopes, $batchId, 'knowledge_duplicates', $duplicate->id);
+
+                DB::table('knowledge_duplicates')
+                    ->where('id', $duplicate->id)
+                    ->update($scope);
+            });
+    }
+
+    private function assertScopeColumnsResolved(): void
+    {
+        foreach (['knowledge_import_rows', 'knowledge_duplicates'] as $table) {
+            $unresolvedIds = DB::table($table)
+                ->whereNull('brand_id')
+                ->orWhereNull('site_id')
+                ->orderBy('id')
+                ->pluck('id')
+                ->all();
+
+            if ($unresolvedIds !== []) {
+                throw new RuntimeException("Unable to resolve brand/site scope for {$table} rows: ".implode(', ', $unresolvedIds));
+            }
+        }
+    }
+
+    /**
+     * @param  array<int, array{brand_id: int, site_id: int}>  $batchScopes
+     * @return array{brand_id: int, site_id: int}
+     */
+    private function batchScope(array $batchScopes, mixed $batchId, string $table, mixed $id): array
+    {
+        if ($batchId === null || ! isset($batchScopes[(int) $batchId])) {
+            throw new RuntimeException("Unable to resolve import batch scope for {$table} row {$id}.");
+        }
+
+        return $batchScopes[(int) $batchId];
+    }
+
+    /**
+     * @param  array<int, string>  $columns
+     */
+    private function dropScopeForeign(Blueprint $table, string $name, array $columns): void
+    {
+        $table->dropForeign(DB::getDriverName() === 'sqlite' ? $columns : $name);
     }
 };

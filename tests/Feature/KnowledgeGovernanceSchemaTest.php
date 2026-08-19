@@ -193,6 +193,70 @@ final class KnowledgeGovernanceSchemaTest extends TestCase
         ]);
     }
 
+    public function test_scope_migration_backfills_populated_import_audit_rows_before_enforcing_constraints(): void
+    {
+        $scopeMigration = require database_path('migrations/2026_08_19_000201_enforce_knowledge_import_audit_scope.php');
+        $scopeMigration->down();
+
+        [$brandId, $siteId, $directoryId] = $this->ownershipIds();
+        $canonicalDocument = $this->createDocument($brandId, $siteId, $directoryId, 'pt', 'canonical-content');
+        $duplicateDocument = $this->createDocument($brandId, $siteId, $directoryId, 'pt', 'duplicate-content');
+        $batch = $this->createBatch($brandId, $siteId);
+        $now = now();
+        $rowId = DB::table('knowledge_import_rows')->insertGetId([
+            'batch_id' => $batch->id,
+            'row_number' => 1,
+            'staged_payload' => json_encode(['source_file' => 'legacy-row.md'], JSON_THROW_ON_ERROR),
+            'outcome' => 'duplicate',
+            'canonical_document_id' => $canonicalDocument->id,
+            'duplicate_kind' => 'exact',
+            'created_at' => $now,
+            'updated_at' => $now,
+        ]);
+        $duplicateId = DB::table('knowledge_duplicates')->insertGetId([
+            'import_batch_id' => $batch->id,
+            'import_row_id' => $rowId,
+            'duplicate_document_id' => $duplicateDocument->id,
+            'canonical_document_id' => $canonicalDocument->id,
+            'duplicate_kind' => 'exact',
+            'created_at' => $now,
+            'updated_at' => $now,
+        ]);
+
+        $scopeMigration->up();
+
+        $this->assertDatabaseHas('knowledge_import_rows', [
+            'id' => $rowId,
+            'brand_id' => $brandId,
+            'site_id' => $siteId,
+        ]);
+        $this->assertDatabaseHas('knowledge_duplicates', [
+            'id' => $duplicateId,
+            'brand_id' => $brandId,
+            'site_id' => $siteId,
+        ]);
+
+        $otherScope = $this->scopedOwnership();
+        $otherBrandDocument = $this->createDocument(
+            $otherScope['brand_b'],
+            $otherScope['site_b'],
+            $otherScope['directory_b'],
+            'pt',
+            'other-brand-content',
+        );
+
+        $this->expectException(QueryException::class);
+
+        KnowledgeImportRow::query()->create([
+            'brand_id' => $brandId,
+            'site_id' => $siteId,
+            'batch_id' => $batch->id,
+            'row_number' => 2,
+            'staged_payload' => ['source_file' => 'invalid-after-upgrade.md'],
+            'canonical_document_id' => $otherBrandDocument->id,
+        ]);
+    }
+
     public function test_governance_and_import_audit_schema_expose_the_staged_document_contract(): void
     {
         $this->assertTrue(Schema::hasColumns('knowledge_bases', [
