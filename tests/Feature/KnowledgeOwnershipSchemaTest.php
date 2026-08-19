@@ -9,6 +9,7 @@ use App\Models\KnowledgeSite;
 use Illuminate\Database\QueryException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
 class KnowledgeOwnershipSchemaTest extends TestCase
@@ -90,6 +91,55 @@ class KnowledgeOwnershipSchemaTest extends TestCase
             'site_id' => $lightInTheBoxSiteId,
             'primary_directory_id' => $otherDirectoryId,
         ]);
+    }
+
+    public function test_legacy_document_can_omit_all_ownership_references(): void
+    {
+        $document = KnowledgeBase::query()->create([
+            'name' => 'Legacy knowledge document',
+            'content' => 'Legacy documents remain supported until migrated.',
+        ]);
+
+        $this->assertNull($document->brand_id);
+        $this->assertNull($document->site_id);
+        $this->assertNull($document->primary_directory_id);
+    }
+
+    #[DataProvider('partialOwnershipShapes')]
+    public function test_document_cannot_have_partial_ownership(
+        bool $includeBrand,
+        bool $includeSite,
+        bool $includeDirectory,
+    ): void {
+        [$brandId, , , $directoryId] = $this->ownershipIds();
+        $siteId = (int) DB::table('knowledge_sites')
+            ->where('brand_id', $brandId)
+            ->value('id');
+
+        $this->expectException(QueryException::class);
+
+        KnowledgeBase::query()->create([
+            'name' => 'Partial ownership is invalid',
+            'content' => 'Every ownership reference must be absent or present together.',
+            'brand_id' => $includeBrand ? $brandId : null,
+            'site_id' => $includeSite ? $siteId : null,
+            'primary_directory_id' => $includeDirectory ? $directoryId : null,
+        ]);
+    }
+
+    /**
+     * @return array<string, array{bool, bool, bool}>
+     */
+    public static function partialOwnershipShapes(): array
+    {
+        return [
+            'site only' => [false, true, false],
+            'directory only' => [false, false, true],
+            'site and directory without brand' => [false, true, true],
+            'brand only' => [true, false, false],
+            'brand and site without directory' => [true, true, false],
+            'brand and directory without site' => [true, false, true],
+        ];
     }
 
     /**

@@ -2,6 +2,7 @@
 
 use Illuminate\Database\Migrations\Migration;
 use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 
 return new class extends Migration
@@ -72,10 +73,14 @@ return new class extends Migration
             $table->index(['brand_id', 'site_id'], 'knowledge_bases_brand_site_ownership_index');
             $table->index(['brand_id', 'primary_directory_id'], 'knowledge_bases_brand_directory_ownership_index');
         });
+
+        $this->addOwnershipTupleConstraint();
     }
 
     public function down(): void
     {
+        $this->dropOwnershipTupleConstraint();
+
         Schema::table('knowledge_bases', function (Blueprint $table): void {
             $table->dropForeign('knowledge_bases_brand_directory_ownership_foreign');
             $table->dropForeign('knowledge_bases_brand_site_ownership_foreign');
@@ -88,5 +93,54 @@ return new class extends Migration
         Schema::dropIfExists('knowledge_directories');
         Schema::dropIfExists('knowledge_sites');
         Schema::dropIfExists('knowledge_brands');
+    }
+
+    private function addOwnershipTupleConstraint(): void
+    {
+        if (DB::getDriverName() === 'sqlite') {
+            $this->createSqliteOwnershipTupleTrigger('insert', 'INSERT');
+            $this->createSqliteOwnershipTupleTrigger('update', 'UPDATE OF brand_id, site_id, primary_directory_id');
+
+            return;
+        }
+
+        DB::statement(<<<'SQL'
+ALTER TABLE knowledge_bases
+ADD CONSTRAINT knowledge_bases_ownership_tuple_check
+CHECK (
+    (brand_id IS NULL AND site_id IS NULL AND primary_directory_id IS NULL)
+    OR
+    (brand_id IS NOT NULL AND site_id IS NOT NULL AND primary_directory_id IS NOT NULL)
+)
+SQL);
+    }
+
+    private function dropOwnershipTupleConstraint(): void
+    {
+        if (DB::getDriverName() === 'sqlite') {
+            DB::statement('DROP TRIGGER IF EXISTS knowledge_bases_ownership_tuple_insert_check');
+            DB::statement('DROP TRIGGER IF EXISTS knowledge_bases_ownership_tuple_update_check');
+
+            return;
+        }
+
+        DB::statement('ALTER TABLE knowledge_bases DROP CONSTRAINT knowledge_bases_ownership_tuple_check');
+    }
+
+    private function createSqliteOwnershipTupleTrigger(string $suffix, string $event): void
+    {
+        DB::unprepared(<<<SQL
+CREATE TRIGGER knowledge_bases_ownership_tuple_{$suffix}_check
+BEFORE {$event} ON knowledge_bases
+FOR EACH ROW
+WHEN NOT (
+    (NEW.brand_id IS NULL AND NEW.site_id IS NULL AND NEW.primary_directory_id IS NULL)
+    OR
+    (NEW.brand_id IS NOT NULL AND NEW.site_id IS NOT NULL AND NEW.primary_directory_id IS NOT NULL)
+)
+BEGIN
+    SELECT RAISE(ABORT, 'knowledge_bases ownership must be all null or all non-null');
+END
+SQL);
     }
 };
