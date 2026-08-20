@@ -3,7 +3,11 @@
 namespace Tests\Feature;
 
 use App\Models\KnowledgeBase;
+use App\Models\KnowledgeBrand;
 use App\Models\KnowledgeChunk;
+use App\Models\KnowledgeDirectory;
+use App\Models\KnowledgeSite;
+use App\Services\GeoFlow\KnowledgeGovernance\KnowledgeScope;
 use App\Services\GeoFlow\KnowledgeRetrievalService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
@@ -11,6 +15,9 @@ use Tests\TestCase;
 class KnowledgeRetrievalServiceTest extends TestCase
 {
     use RefreshDatabase;
+
+    /** @var array{brand:KnowledgeBrand,site:KnowledgeSite,directory:KnowledgeDirectory}|null */
+    private ?array $knowledgeOwnership = null;
 
     public function test_retrieval_context_includes_evidence_metadata_and_citation_ids(): void
     {
@@ -39,6 +46,7 @@ class KnowledgeRetrievalServiceTest extends TestCase
         ]);
 
         $context = app(KnowledgeRetrievalService::class)->retrieveContext(
+            $this->scope(),
             (int) $knowledgeBase->id,
             'GEOFlow 内容工程 知识库 分发渠道',
             1,
@@ -93,6 +101,7 @@ class KnowledgeRetrievalServiceTest extends TestCase
         ]);
 
         $evidence = app(KnowledgeRetrievalService::class)->retrieveEvidence(
+            $this->scope(),
             (int) $knowledgeBase->id,
             '品牌 GEO 诊断 优化建议',
             2
@@ -128,6 +137,7 @@ class KnowledgeRetrievalServiceTest extends TestCase
         ]);
 
         $context = app(KnowledgeRetrievalService::class)->retrieveContext(
+            $this->scope(),
             (int) $knowledgeBase->id,
             '高风险内容',
             1,
@@ -160,6 +170,7 @@ class KnowledgeRetrievalServiceTest extends TestCase
         ]);
 
         $context = app(KnowledgeRetrievalService::class)->retrieveContext(
+            $this->scope(),
             (int) $knowledgeBase->id,
             '已审核 高风险 证据',
             1,
@@ -195,6 +206,7 @@ class KnowledgeRetrievalServiceTest extends TestCase
         }
 
         $this->assertSame([], app(KnowledgeRetrievalService::class)->retrieveEvidence(
+            $this->scope(),
             (int) $knowledgeBase->id,
             '品牌 GEO 诊断 优化建议',
             3
@@ -215,6 +227,7 @@ class KnowledgeRetrievalServiceTest extends TestCase
         ]);
 
         $evidence = app(KnowledgeRetrievalService::class)->retrieveEvidence(
+            $this->scope(),
             (int) $knowledgeBase->id,
             '品牌 GEO 诊断 优化建议',
             3
@@ -268,6 +281,7 @@ class KnowledgeRetrievalServiceTest extends TestCase
         ]);
 
         $context = app(KnowledgeRetrievalService::class)->retrieveContext(
+            $this->scope(),
             (int) $knowledgeBase->id,
             '标准版 套餐 价格',
             2,
@@ -316,6 +330,7 @@ class KnowledgeRetrievalServiceTest extends TestCase
         ]);
 
         $context = app(KnowledgeRetrievalService::class)->retrieveContext(
+            $this->scope(),
             (int) $knowledgeBase->id,
             'GEO 诊断 流程',
             2,
@@ -372,6 +387,7 @@ class KnowledgeRetrievalServiceTest extends TestCase
         ]);
 
         $context = app(KnowledgeRetrievalService::class)->retrieveContextFromMany(
+            $this->scope(),
             [(int) $strategyKnowledgeBase->id, (int) $distributionKnowledgeBase->id],
             '品牌 GEO 策略 多站 分发 同步 状态',
             4,
@@ -388,6 +404,8 @@ class KnowledgeRetrievalServiceTest extends TestCase
 
     private function createKnowledgeBase(array $overrides = []): KnowledgeBase
     {
+        $ownership = $this->knowledgeOwnership();
+
         return KnowledgeBase::query()->create(array_merge([
             'name' => '测试知识库',
             'description' => '',
@@ -402,6 +420,54 @@ class KnowledgeRetrievalServiceTest extends TestCase
             'effective_date' => null,
             'risk_level' => 'medium',
             'review_status' => 'unreviewed',
+            'brand_id' => $ownership['brand']->id,
+            'site_id' => $ownership['site']->id,
+            'primary_directory_id' => $ownership['directory']->id,
+            'language_code' => 'en',
+            'authority_level' => 'first_party',
+            'lifecycle_status' => 'active',
+            'generation_eligible' => true,
+            'citation_required' => true,
         ], $overrides));
+    }
+
+    private function scope(): KnowledgeScope
+    {
+        $ownership = $this->knowledgeOwnership();
+
+        return new KnowledgeScope(
+            (int) $ownership['brand']->id,
+            (int) $ownership['site']->id,
+            'en',
+        );
+    }
+
+    /**
+     * @return array{brand:KnowledgeBrand,site:KnowledgeSite,directory:KnowledgeDirectory}
+     */
+    private function knowledgeOwnership(): array
+    {
+        if ($this->knowledgeOwnership !== null) {
+            return $this->knowledgeOwnership;
+        }
+
+        $brand = KnowledgeBrand::query()->create([
+            'key' => 'retrieval-test-brand',
+            'name' => 'Retrieval Test Brand',
+        ]);
+        $site = KnowledgeSite::query()->create([
+            'brand_id' => $brand->id,
+            'key' => 'retrieval-test-main',
+            'canonical_host' => 'retrieval.test',
+            'role' => 'commerce-primary',
+        ]);
+        $directory = KnowledgeDirectory::query()->create([
+            'brand_id' => $brand->id,
+            'key' => 'brand-company',
+            'path' => 'brand-company',
+            'name' => 'Brand company',
+        ]);
+
+        return $this->knowledgeOwnership = compact('brand', 'site', 'directory');
     }
 }

@@ -9,6 +9,7 @@ use App\Models\Prompt;
 use App\Models\Title;
 use App\Services\GeoFlow\ArticleContentGenerationService;
 use App\Services\GeoFlow\ArticleContentPromptRenderer;
+use App\Services\GeoFlow\KnowledgeGovernance\KnowledgeScope;
 use App\Services\GeoFlow\KnowledgeRetrievalService;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
@@ -103,7 +104,7 @@ final class ArticleEditorAssistantController extends Controller
 
         $knowledgeBase = KnowledgeBase::query()
             ->whereKey((int) $validated['knowledge_base_id'])
-            ->firstOrFail(['id']);
+            ->firstOrFail(['id', 'brand_id', 'site_id', 'primary_directory_id', 'language_code']);
         $prompt = Prompt::query()->whereKey((int) $validated['prompt_id'])->where('type', 'content')->firstOrFail();
         $aiModel = AiModel::query()
             ->whereKey((int) $validated['ai_model_id'])
@@ -113,7 +114,15 @@ final class ArticleEditorAssistantController extends Controller
             })
             ->firstOrFail();
 
+        $knowledgeScope = $this->knowledgeScope($knowledgeBase);
+        if ($knowledgeScope === null) {
+            return response()->json([
+                'message' => __('admin.article_assistant.generate.knowledge_unavailable'),
+            ], 422);
+        }
+
         $knowledgeContext = $this->knowledgeRetrievalService->retrieveContext(
+            $knowledgeScope,
             (int) $knowledgeBase->id,
             implode("\n", array_filter([
                 trim((string) $validated['title']),
@@ -169,5 +178,19 @@ final class ArticleEditorAssistantController extends Controller
         $response->headers->set('X-Accel-Buffering', 'no');
 
         return $response;
+    }
+
+    private function knowledgeScope(KnowledgeBase $knowledgeBase): ?KnowledgeScope
+    {
+        $brandId = (int) ($knowledgeBase->brand_id ?? 0);
+        $siteId = (int) ($knowledgeBase->site_id ?? 0);
+        $directoryId = (int) ($knowledgeBase->primary_directory_id ?? 0);
+        $languageCode = trim((string) ($knowledgeBase->language_code ?? ''));
+
+        if ($brandId <= 0 || $siteId <= 0 || $directoryId <= 0 || $languageCode === '') {
+            return null;
+        }
+
+        return new KnowledgeScope($brandId, $siteId, $languageCode, $directoryId);
     }
 }

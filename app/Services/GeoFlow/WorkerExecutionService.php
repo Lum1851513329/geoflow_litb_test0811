@@ -21,9 +21,11 @@ use App\Models\Prompt;
 use App\Models\PromptPreset;
 use App\Models\Task;
 use App\Models\Title;
+use App\Services\GeoFlow\KnowledgeGovernance\KnowledgeScope;
 use App\Support\GeoFlow\ArticleWorkflow;
 use App\Support\GeoFlow\ImageUrlNormalizer;
 use App\Support\GeoFlow\OpenAiRuntimeProvider;
+use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
@@ -772,11 +774,24 @@ class WorkerExecutionService
 
         $knowledgeBases = KnowledgeBase::query()
             ->whereIn('id', $knowledgeBaseIds)
-            ->select(['id'])
+            ->select([
+                'id',
+                'brand_id',
+                'site_id',
+                'primary_directory_id',
+                'language_code',
+                'lifecycle_status',
+                'generation_eligible',
+            ])
             ->selectRaw('SUBSTR(content, 1, ?) AS content_excerpt', [2400])
             ->get()
             ->keyBy('id');
-        if ($knowledgeBases->isEmpty()) {
+        if ($knowledgeBases->count() !== count($knowledgeBaseIds)) {
+            return '';
+        }
+
+        $knowledgeScope = $this->knowledgeScope($knowledgeBases, $knowledgeBaseIds);
+        if ($knowledgeScope === null) {
             return '';
         }
 
@@ -801,7 +816,7 @@ class WorkerExecutionService
         }
 
         $query = trim($title."\n".$keyword);
-        $context = $this->knowledgeRetrievalService->retrieveContextFromMany($knowledgeBaseIds, $query, 5, 3200);
+        $context = $this->knowledgeRetrievalService->retrieveContextFromMany($knowledgeScope, $knowledgeBaseIds, $query, 5, 3200);
         if ($context !== '') {
             return $context;
         }
@@ -812,6 +827,48 @@ class WorkerExecutionService
         }
 
         return $this->fallbackKnowledgeContext($fallbackContents, 2400);
+    }
+
+    /**
+     * @param  Collection<int,KnowledgeBase>  $knowledgeBases
+     * @param  list<int>  $knowledgeBaseIds
+     */
+    private function knowledgeScope(Collection $knowledgeBases, array $knowledgeBaseIds): ?KnowledgeScope
+    {
+        /** @var KnowledgeBase|null $firstKnowledgeBase */
+        $firstKnowledgeBase = $knowledgeBases->get($knowledgeBaseIds[0] ?? 0);
+        if (! $firstKnowledgeBase) {
+            return null;
+        }
+
+        $brandId = (int) ($firstKnowledgeBase->brand_id ?? 0);
+        $siteId = (int) ($firstKnowledgeBase->site_id ?? 0);
+        $languageCode = trim((string) ($firstKnowledgeBase->language_code ?? ''));
+        $directoryIds = [];
+
+        foreach ($knowledgeBaseIds as $knowledgeBaseId) {
+            /** @var KnowledgeBase|null $knowledgeBase */
+            $knowledgeBase = $knowledgeBases->get($knowledgeBaseId);
+            $directoryId = (int) ($knowledgeBase?->primary_directory_id ?? 0);
+            if (! $knowledgeBase
+                || $brandId <= 0
+                || $siteId <= 0
+                || $languageCode === ''
+                || (int) ($knowledgeBase->brand_id ?? 0) !== $brandId
+                || (int) ($knowledgeBase->site_id ?? 0) !== $siteId
+                || trim((string) ($knowledgeBase->language_code ?? '')) !== $languageCode
+                || $directoryId <= 0
+                || trim((string) ($knowledgeBase->lifecycle_status ?? '')) !== 'active'
+                || ! (bool) $knowledgeBase->generation_eligible) {
+                return null;
+            }
+
+            $directoryIds[$directoryId] = true;
+        }
+
+        $directoryId = count($directoryIds) === 1 ? (int) array_key_first($directoryIds) : null;
+
+        return new KnowledgeScope($brandId, $siteId, $languageCode, $directoryId);
     }
 
     /**
