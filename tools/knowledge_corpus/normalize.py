@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import ipaddress
 import re
 import unicodedata
 from urllib.parse import urlsplit
@@ -144,9 +145,30 @@ def _is_http_url(destination: str) -> bool:
         return False
     try:
         parsed = urlsplit(destination)
+        port = parsed.port
+        hostname = parsed.hostname
     except ValueError:
         return False
-    return parsed.scheme.casefold() in {"http", "https"} and bool(parsed.netloc)
+    if (
+        parsed.scheme.casefold() not in {"http", "https"}
+        or not hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or (port is not None and not 1 <= port <= 65535)
+    ):
+        return False
+    try:
+        ipaddress.ip_address(hostname)
+        return True
+    except ValueError:
+        pass
+    if any(ord(character) > 127 for character in hostname) or len(hostname) > 253:
+        return False
+    labels = hostname.split(".")
+    return all(
+        re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label)
+        for label in labels
+    )
 
 
 def _extract_urls(markdown: str) -> tuple[str, ...]:

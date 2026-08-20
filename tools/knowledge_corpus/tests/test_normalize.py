@@ -1,9 +1,22 @@
+import json
+from pathlib import Path
 import unittest
 
 from tools.knowledge_corpus.normalize import normalize_document
 
 
 class NormalizeDocumentTest(unittest.TestCase):
+    def test_shared_canonicalization_vectors_match_text_and_hash(self):
+        fixture = Path(__file__).parent / "fixtures" / "canonicalization_vectors.json"
+        vectors = json.loads(fixture.read_text(encoding="utf-8"))
+
+        for vector in vectors:
+            with self.subTest(vector=vector["name"]):
+                document = normalize_document(vector["raw"])
+
+                self.assertEqual(vector["canonical"], document.markdown)
+                self.assertEqual(vector["sha256"], document.normalized_hash)
+
     def test_normalizes_formatting_without_rewriting_claims_and_is_idempotent(self):
         raw = (
             "# Cafe\u0301  \r\n"

@@ -170,9 +170,20 @@ final class GovernedKnowledgeContentNormalizer
     private function isHttpUrl(string $value): bool
     {
         $parts = parse_url($value);
+        $host = is_array($parts) ? trim((string) ($parts['host'] ?? '')) : '';
+        $ipHost = str_starts_with($host, '[') && str_ends_with($host, ']')
+            ? substr($host, 1, -1)
+            : $host;
 
         return is_array($parts)
             && in_array(strtolower((string) ($parts['scheme'] ?? '')), ['http', 'https'], true)
-            && trim((string) ($parts['host'] ?? '')) !== '';
+            && $host !== ''
+            && ! array_key_exists('user', $parts)
+            && ! array_key_exists('pass', $parts)
+            && (! isset($parts['port']) || ((int) $parts['port'] >= 1 && (int) $parts['port'] <= 65535))
+            && (
+                filter_var($ipHost, FILTER_VALIDATE_IP) !== false
+                || filter_var($host, FILTER_VALIDATE_DOMAIN, FILTER_FLAG_HOSTNAME) !== false
+            );
     }
 }

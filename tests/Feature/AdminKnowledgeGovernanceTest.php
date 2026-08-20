@@ -15,7 +15,6 @@ use Illuminate\Foundation\Http\Middleware\ValidateCsrfToken;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Pagination\LengthAwarePaginator;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\Storage;
 use Tests\TestCase;
@@ -662,67 +661,6 @@ final class AdminKnowledgeGovernanceTest extends TestCase
             'content' => "Detail   safe\n\nbody.\n",
             'normalized_content_hash' => hash('sha256', "Detail   safe\n\nbody.\n"),
         ]);
-    }
-
-    public function test_both_edit_routes_reload_under_a_transaction_before_appending_operator_history(): void
-    {
-        Queue::fake();
-        $scope = $this->createOwnership('lightinthebox', 'LightInTheBox');
-
-        foreach (['form', 'detail'] as $routeKind) {
-            $knowledgeBase = $this->createDocument($scope, [
-                'name' => 'Concurrent provenance '.$routeKind,
-                'content' => "Original {$routeKind} body.\n",
-                'normalized_content_hash' => hash('sha256', "Original {$routeKind} body.\n"),
-                'asset_provenance' => ['ingestion_method' => 'read_only_folder'],
-            ]);
-            $interleaved = false;
-            $baselineTransactionLevel = DB::transactionLevel();
-            KnowledgeBase::retrieved(function (KnowledgeBase $retrieved) use ($knowledgeBase, &$interleaved, $baselineTransactionLevel): void {
-                if ($interleaved || (int) $retrieved->id !== (int) $knowledgeBase->id) {
-                    return;
-                }
-                $interleaved = true;
-                $provenance = (array) $retrieved->asset_provenance;
-                $provenance['operator_edits'] = [[
-                    'operation' => 'interleaved_operator_update',
-                    'admin_id' => 999,
-                    'edited_at' => '2026-08-20T00:00:00+00:00',
-                ]];
-                DB::table('knowledge_bases')->where('id', $retrieved->id)->update([
-                    'asset_provenance' => json_encode($provenance, JSON_THROW_ON_ERROR),
-                ]);
-
-                if (DB::transactionLevel() > $baselineTransactionLevel) {
-                    $retrieved->asset_provenance = $provenance;
-                }
-            });
-
-            if ($routeKind === 'form') {
-                $this->put(
-                    route('admin.knowledge-bases.update', ['knowledgeBaseId' => $knowledgeBase->id]),
-                    $this->governedPayload($scope, [
-                        'name' => 'Concurrent provenance form',
-                        'content' => 'Form route update body.',
-                    ]),
-                )->assertRedirect(route('admin.knowledge-bases.index'));
-            } else {
-                $this->put(route('admin.knowledge-bases.detail.update', ['knowledgeBaseId' => $knowledgeBase->id]), [
-                    'name' => 'Concurrent provenance detail',
-                    'description' => '',
-                    'content' => 'Detail route update body.',
-                    'file_type' => 'markdown',
-                ])->assertRedirect(route('admin.knowledge-bases.detail', ['knowledgeBaseId' => $knowledgeBase->id]));
-            }
-
-            $operations = collect((array) ($knowledgeBase->fresh()->asset_provenance['operator_edits'] ?? []))
-                ->pluck('operation')
-                ->all();
-            $this->assertSame([
-                'interleaved_operator_update',
-                $routeKind === 'form' ? 'admin_form_update' : 'admin_detail_update',
-            ], $operations);
-        }
     }
 
     public function test_admin_language_is_canonicalized_with_knowledge_scope_and_round_trips_through_retrieval(): void

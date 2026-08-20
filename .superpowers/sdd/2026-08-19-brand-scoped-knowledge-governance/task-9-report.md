@@ -131,3 +131,32 @@ Broad suites:
 - tests/Feature/AdminEnterpriseKnowledgeTest.php
 - tests/Feature/KnowledgeChunkAsyncSyncTest.php
 - tests/Feature/ImportGovernedKnowledgeCommandTest.php
+
+## Review fix round 3 — 2026-08-20
+
+- Added one canonicalization vector fixture consumed by both the Python corpus normalizer tests and the PHP governed-content normalizer tests. It pins canonical text and SHA-256 identity for NFC, CRLF, internal spacing, terminal newlines, safe wrappers, invalid schemes, malformed ports, userinfo, invalid hostname labels, missing hosts, and IPv6 hosts.
+- Aligned both URL validators to fail closed. Wrapper conversion now requires HTTP(S), a valid port, no userinfo, and either a valid IP address or hostname; unsafe or malformed destinations remain unchanged for audit instead of becoming Markdown links.
+- Replaced the retrieved-model mutation regression with an autocommit migration-backed test. It loads a stale model, independently commits a prior provenance event, exercises both real edit routes, and confirms both events survive.
+- The concurrency test installs a test-only SQLite grammar that exposes actual `lockForUpdate` compilation as a harmless SQL comment and records transaction depth. Both controller locks and downstream sync locks are observed inside transactions. A mutation run with the two controller locks removed failed with two observed lock reads instead of four, then the locks were restored.
+- A read-only audit of all 154 real artifact source paths found zero normalized-hash mismatches and zero wrapper-validity changes. The stricter vectors therefore do not alter the currently generated real corpus artifacts; no corpus rebuild or database import was performed.
+
+Round-three vector RED:
+
+    Python: 3 vector failures (malformed port, userinfo, invalid host)
+    PHP: 1 vector failure (userinfo)
+
+Round-three Python GREEN:
+
+    Ran 51 tests
+    OK
+
+Round-three focused PHP GREEN:
+
+    Tests: 69 passed (578 assertions)
+
+Round-three broad PHP GREEN:
+
+    Tests: 177 passed (1381 assertions)
+    Duration: 8.01s
+
+Round-three quality checks include Pint, PHP lint, Python syntax/JSON validation, Blade compilation, and scoped diff checks.
