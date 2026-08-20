@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Admin;
 
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Admin\StoreGovernedKnowledgeRequest;
+use App\Models\Admin;
 use App\Models\AiModel;
 use App\Models\KnowledgeBase;
 use App\Models\KnowledgeBrand;
@@ -12,11 +13,14 @@ use App\Models\KnowledgeDirectory;
 use App\Models\KnowledgeSite;
 use App\Models\Task;
 use App\Services\GeoFlow\KnowledgeChunkSyncCoordinator;
+use App\Services\GeoFlow\KnowledgeSourceParser;
 use App\Support\AdminWeb;
 use Illuminate\Database\Eloquent\Collection as EloquentCollection;
+use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\UploadedFile;
+use Illuminate\Pagination\LengthAwarePaginator;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
@@ -36,7 +40,10 @@ class KnowledgeBaseController extends Controller
 
     private const MAX_DOCX_COMPRESSION_RATIO = 100;
 
-    public function __construct(private readonly KnowledgeChunkSyncCoordinator $chunkSyncCoordinator) {}
+    public function __construct(
+        private readonly KnowledgeChunkSyncCoordinator $chunkSyncCoordinator,
+        private readonly KnowledgeSourceParser $sourceParser,
+    ) {}
 
     /**
      * 列表页。
@@ -123,17 +130,46 @@ class KnowledgeBaseController extends Controller
             'content.required' => __('admin.knowledge_bases.error.content_required'),
         ]);
 
-        $content = trim((string) $payload['content']);
+        $content = $this->normalizeKnowledgeText((string) $payload['content']);
         $this->assertKnowledgeContentSize($content);
-        $knowledgeBase->update([
-            'name' => trim((string) $payload['name']),
-            'description' => trim((string) ($payload['description'] ?? '')),
-            'content' => $content,
-            'file_type' => (string) $payload['file_type'],
-            'character_count' => mb_strlen($content, 'UTF-8'),
-            'word_count' => mb_strlen(strip_tags($content), 'UTF-8'),
-            'normalized_content_hash' => null,
-        ]);
+        $normalizedContentHash = $this->normalizedContentHash($content);
+        $this->assertActiveContentHashAvailable(
+            (int) $knowledgeBase->brand_id,
+            (string) $knowledgeBase->language_code,
+            (string) $knowledgeBase->lifecycle_status,
+            $normalizedContentHash,
+            $knowledgeBaseId,
+        );
+
+        try {
+            $knowledgeBase->update([
+                'name' => trim((string) $payload['name']),
+                'description' => trim((string) ($payload['description'] ?? '')),
+                'content' => $content,
+                'file_type' => (string) $payload['file_type'],
+                'character_count' => mb_strlen($content, 'UTF-8'),
+                'word_count' => mb_strlen(strip_tags($content), 'UTF-8'),
+                'normalized_content_hash' => $normalizedContentHash,
+                'asset_provenance' => $this->appendOperatorEditProvenance(
+                    $knowledgeBase,
+                    $request->user('admin'),
+                    'admin_detail_update',
+                ),
+            ]);
+        } catch (UniqueConstraintViolationException $exception) {
+            if ($this->activeContentHashExists(
+                (int) $knowledgeBase->brand_id,
+                (string) $knowledgeBase->language_code,
+                $normalizedContentHash,
+                $knowledgeBaseId,
+            )) {
+                throw ValidationException::withMessages([
+                    'content' => __('admin.knowledge_bases.error.active_content_duplicate'),
+                ]);
+            }
+
+            throw $exception;
+        }
 
         return $this->redirectAfterChunkSync(
             $knowledgeBase,
@@ -211,17 +247,46 @@ class KnowledgeBaseController extends Controller
         $knowledgeBase = KnowledgeBase::query()->whereKey($knowledgeBaseId)->firstOrFail();
 
         $payload = $request->validated();
-        $content = trim((string) $payload['content']);
+        $content = $this->normalizeKnowledgeText((string) $payload['content']);
+        $this->assertKnowledgeContentSize($content);
+        $normalizedContentHash = $this->normalizedContentHash($content);
+        $this->assertActiveContentHashAvailable(
+            (int) $payload['brand_id'],
+            (string) $payload['language_code'],
+            (string) $payload['lifecycle_status'],
+            $normalizedContentHash,
+            $knowledgeBaseId,
+        );
 
-        $knowledgeBase->update([
-            'name' => trim((string) $payload['name']),
-            'description' => trim((string) ($payload['description'] ?? '')),
-            'content' => $content,
-            'file_type' => (string) $payload['file_type'],
-            'character_count' => mb_strlen($content, 'UTF-8'),
-            'word_count' => mb_strlen(strip_tags($content), 'UTF-8'),
-            'normalized_content_hash' => null,
-        ] + $this->knowledgeMetadataPayload($payload, $knowledgeBase));
+        try {
+            $knowledgeBase->update([
+                'name' => trim((string) $payload['name']),
+                'description' => trim((string) ($payload['description'] ?? '')),
+                'content' => $content,
+                'file_type' => (string) $payload['file_type'],
+                'character_count' => mb_strlen($content, 'UTF-8'),
+                'word_count' => mb_strlen(strip_tags($content), 'UTF-8'),
+                'normalized_content_hash' => $normalizedContentHash,
+            ] + $this->knowledgeMetadataPayload(
+                $payload,
+                $knowledgeBase,
+                operator: $request->user('admin'),
+                operatorOperation: 'admin_form_update',
+            ));
+        } catch (UniqueConstraintViolationException $exception) {
+            if ($this->activeContentHashExists(
+                (int) $payload['brand_id'],
+                (string) $payload['language_code'],
+                $normalizedContentHash,
+                $knowledgeBaseId,
+            )) {
+                throw ValidationException::withMessages([
+                    'content' => __('admin.knowledge_bases.error.active_content_duplicate'),
+                ]);
+            }
+
+            throw $exception;
+        }
 
         return $this->redirectAfterChunkSync(
             $knowledgeBase,
@@ -284,9 +349,9 @@ class KnowledgeBaseController extends Controller
     /**
      * @param  array<string, int|string|null>  $filters
      * @param  list<int>  $directoryIds
-     * @return array<int, array<string,mixed>>
+     * @return LengthAwarePaginator<int, array<string,mixed>>
      */
-    private function loadKnowledgeBases(array $filters, array $directoryIds): array
+    private function loadKnowledgeBases(array $filters, array $directoryIds): LengthAwarePaginator
     {
         $query = KnowledgeBase::query()
             ->select([
@@ -342,7 +407,8 @@ class KnowledgeBaseController extends Controller
         $this->applyKnowledgeFilters($query, $filters, $directoryIds);
         $query->orderByDesc('created_at')->orderByDesc('id');
 
-        return $query->get()->map(static function (KnowledgeBase $knowledgeBase): array {
+        $paginator = $query->paginate(20)->withQueryString();
+        $paginator->setCollection($paginator->getCollection()->map(static function (KnowledgeBase $knowledgeBase): array {
             $duplicateKinds = $knowledgeBase->duplicateAuditRows
                 ->concat($knowledgeBase->canonicalDuplicateAuditRows)
                 ->pluck('duplicate_kind')
@@ -383,10 +449,14 @@ class KnowledgeBaseController extends Controller
                 'source_url' => (string) ($knowledgeBase->source_url ?? ''),
                 'retrieved_at' => $knowledgeBase->retrieved_at?->format('Y-m-d'),
                 'review_due_at' => $knowledgeBase->review_due_at?->format('Y-m-d'),
+                'freshness_stale' => $knowledgeBase->retrieved_at?->lt(now()->subYear()) ?? false,
+                'review_overdue' => $knowledgeBase->review_due_at?->lt(today()) ?? false,
                 'created_at' => $knowledgeBase->created_at?->format('Y-m-d H:i:s'),
                 'updated_at' => $knowledgeBase->updated_at?->format('Y-m-d H:i:s'),
             ];
-        })->all();
+        }));
+
+        return $paginator;
     }
 
     /**
@@ -598,10 +668,23 @@ SQL)->first();
         ?KnowledgeBase $existing = null,
         string $sourceFilePath = '',
         ?string $sourceFileHash = null,
+        ?Admin $operator = null,
+        ?string $operatorOperation = null,
     ): array {
         $canonicalKey = trim((string) ($payload['canonical_document_key'] ?? ''));
         if ($canonicalKey === '') {
             $canonicalKey = trim((string) ($existing?->canonical_document_key ?? '')) ?: 'manual:'.Str::uuid();
+        }
+
+        $assetProvenance = (array) ($existing?->asset_provenance ?? []);
+        if ($existing === null) {
+            $assetProvenance = [
+                'ingestion_method' => $sourceFilePath === '' ? 'admin_manual' : 'admin_upload',
+                'source_name' => trim((string) $payload['source_name']),
+                'source_url' => trim((string) ($payload['source_url'] ?? '')),
+            ];
+        } elseif ($operator !== null && $operatorOperation !== null) {
+            $assetProvenance = $this->appendOperatorEditProvenance($existing, $operator, $operatorOperation);
         }
 
         return [
@@ -609,11 +692,7 @@ SQL)->first();
             'site_id' => (int) $payload['site_id'],
             'primary_directory_id' => (int) $payload['primary_directory_id'],
             'asset_key' => $existing?->asset_key ?: 'knowledge:admin:'.Str::uuid(),
-            'asset_provenance' => [
-                'ingestion_method' => $sourceFilePath === '' ? 'admin_manual' : 'admin_upload',
-                'source_name' => trim((string) $payload['source_name']),
-                'source_url' => trim((string) ($payload['source_url'] ?? '')),
-            ],
+            'asset_provenance' => $assetProvenance,
             'canonical_document_key' => $canonicalKey,
             'language_code' => (string) $payload['language_code'],
             'authority_level' => (string) $payload['authority_level'],
@@ -637,11 +716,29 @@ SQL)->first();
         ];
     }
 
+    /** @return array<string, mixed> */
+    private function appendOperatorEditProvenance(KnowledgeBase $knowledgeBase, Admin $operator, string $operation): array
+    {
+        $assetProvenance = (array) ($knowledgeBase->asset_provenance ?? []);
+        $operatorEdits = is_array($assetProvenance['operator_edits'] ?? null)
+            ? array_values($assetProvenance['operator_edits'])
+            : [];
+        $operatorEdits[] = [
+            'operation' => $operation,
+            'admin_id' => (int) $operator->id,
+            'edited_at' => now()->toAtomString(),
+        ];
+        $assetProvenance['operator_edits'] = $operatorEdits;
+
+        return $assetProvenance;
+    }
+
     private function createKnowledgeBaseFromRequest(StoreGovernedKnowledgeRequest $request, string $errorMessageKey): RedirectResponse
     {
         $payload = $request->validated();
         $storedPaths = [];
         $knowledgeBase = null;
+        $normalizedContentHash = null;
 
         try {
             $manualContent = $this->normalizeKnowledgeText((string) ($payload['content'] ?? ''));
@@ -670,6 +767,13 @@ SQL)->first();
                     'content' => __('admin.knowledge_bases.error.content_required'),
                 ]);
             }
+            $normalizedContentHash = $this->normalizedContentHash($content);
+            $this->assertActiveContentHashAvailable(
+                (int) $payload['brand_id'],
+                (string) $payload['language_code'],
+                (string) $payload['lifecycle_status'],
+                $normalizedContentHash,
+            );
 
             $knowledgeName = trim((string) ($payload['name'] ?? ''));
             if ($knowledgeName === '') {
@@ -692,7 +796,7 @@ SQL)->first();
             $encodedFilePath = $this->encodeKnowledgeFilePaths($storedPaths);
             $sourceFileHash = $this->sourceFileHash($storedPaths);
 
-            $knowledgeBase = DB::transaction(function () use ($knowledgeName, $payload, $content, $fileType, $encodedFilePath, $sourceFileHash): KnowledgeBase {
+            $knowledgeBase = DB::transaction(function () use ($knowledgeName, $payload, $content, $fileType, $encodedFilePath, $sourceFileHash, $normalizedContentHash): KnowledgeBase {
                 return KnowledgeBase::query()->create([
                     'name' => $knowledgeName,
                     'description' => trim((string) ($payload['description'] ?? '')),
@@ -703,6 +807,7 @@ SQL)->first();
                     'usage_count' => 0,
                     'used_task_count' => 0,
                     'file_path' => $encodedFilePath,
+                    'normalized_content_hash' => $normalizedContentHash,
                 ] + $this->knowledgeMetadataPayload(
                     $payload,
                     sourceFilePath: $encodedFilePath,
@@ -723,6 +828,19 @@ SQL)->first();
             );
         } catch (ValidationException $exception) {
             $this->cleanupKnowledgeFiles($storedPaths);
+
+            throw $exception;
+        } catch (UniqueConstraintViolationException $exception) {
+            $this->cleanupKnowledgeFiles($storedPaths);
+            if ($normalizedContentHash !== null && $this->activeContentHashExists(
+                (int) $payload['brand_id'],
+                (string) $payload['language_code'],
+                $normalizedContentHash,
+            )) {
+                throw ValidationException::withMessages([
+                    'content' => __('admin.knowledge_bases.error.active_content_duplicate'),
+                ]);
+            }
 
             throw $exception;
         } catch (\Throwable $exception) {
@@ -756,17 +874,26 @@ SQL)->first();
             return null;
         }
 
-        $hash = hash_init('sha256');
+        $fileHashes = [];
         foreach ($storedPaths as $path) {
             $absolutePath = Storage::disk('local')->path($path);
             $fileHash = is_file($absolutePath) ? hash_file('sha256', $absolutePath) : false;
             if (! is_string($fileHash)) {
-                return null;
+                throw ValidationException::withMessages([
+                    'knowledge_files' => __('admin.knowledge_bases.error.source_hash_failed'),
+                ]);
             }
-            hash_update($hash, $path."\0".$fileHash."\n");
+            $fileHashes[] = $fileHash;
         }
 
-        return hash_final($hash);
+        if (count($fileHashes) === 1) {
+            return $fileHashes[0];
+        }
+
+        sort($fileHashes, SORT_STRING);
+
+        // Versioned, order/name/path-independent aggregate of the uploaded raw-byte hashes.
+        return hash('sha256', "geoflow-source-files-v1\0".implode("\0", $fileHashes));
     }
 
     private function assertGovernedOwnership(KnowledgeBase $knowledgeBase): void
@@ -1231,11 +1358,45 @@ SQL)->first();
      */
     private function normalizeKnowledgeText(string $text): string
     {
-        $text = str_replace(["\r\n", "\r"], "\n", $text);
-        $text = preg_replace("/\n{3,}/u", "\n\n", $text);
-        $text = preg_replace('/[ \t]{2,}/u', ' ', (string) $text);
+        return $this->sourceParser->normalizeKnowledgeText($text);
+    }
 
-        return trim((string) $text);
+    private function normalizedContentHash(string $content): string
+    {
+        return hash('sha256', $this->sourceParser->normalizeKnowledgeText($content));
+    }
+
+    private function assertActiveContentHashAvailable(
+        int $brandId,
+        string $languageCode,
+        string $lifecycleStatus,
+        string $normalizedContentHash,
+        ?int $exceptKnowledgeBaseId = null,
+    ): void {
+        if ($lifecycleStatus !== 'active') {
+            return;
+        }
+
+        if ($this->activeContentHashExists($brandId, $languageCode, $normalizedContentHash, $exceptKnowledgeBaseId)) {
+            throw ValidationException::withMessages([
+                'content' => __('admin.knowledge_bases.error.active_content_duplicate'),
+            ]);
+        }
+    }
+
+    private function activeContentHashExists(
+        int $brandId,
+        string $languageCode,
+        string $normalizedContentHash,
+        ?int $exceptKnowledgeBaseId = null,
+    ): bool {
+        return KnowledgeBase::query()
+            ->where('brand_id', $brandId)
+            ->where('language_code', $languageCode)
+            ->where('lifecycle_status', 'active')
+            ->where('normalized_content_hash', $normalizedContentHash)
+            ->when($exceptKnowledgeBaseId !== null, fn ($query) => $query->whereKeyNot($exceptKnowledgeBaseId))
+            ->exists();
     }
 
     /**

@@ -505,7 +505,7 @@ class AdminMaterialsPagesTest extends TestCase
             'name' => '更新后的知识库',
             'description' => '更新说明',
             'content' => '更新后的正文内容',
-            'normalized_content_hash' => null,
+            'normalized_content_hash' => hash('sha256', '更新后的正文内容'),
         ]);
     }
 

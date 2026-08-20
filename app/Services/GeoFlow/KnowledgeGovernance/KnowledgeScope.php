@@ -19,7 +19,7 @@ final readonly class KnowledgeScope
             throw new InvalidArgumentException('Knowledge scope requires positive brand and site IDs.');
         }
 
-        $languageCode = $this->canonicalLanguageTag($languageCode);
+        $languageCode = self::canonicalizeLanguageTag($languageCode);
         if ($languageCode === null) {
             throw new InvalidArgumentException('Knowledge scope requires a valid BCP 47-compatible language code.');
         }
@@ -35,7 +35,7 @@ final readonly class KnowledgeScope
         $this->languageCode = $languageCode;
     }
 
-    private function canonicalLanguageTag(string $value): ?string
+    public static function canonicalizeLanguageTag(string $value): ?string
     {
         $parts = explode('-', str_replace('_', '-', trim($value)));
         if ($parts === [] || in_array('', $parts, true)) {
@@ -82,7 +82,7 @@ final readonly class KnowledgeScope
         }
 
         $variants = [];
-        while ($index < $partCount && $this->isVariantSubtag($parts[$index])) {
+        while ($index < $partCount && self::isVariantSubtag($parts[$index])) {
             $variant = strtolower($parts[$index]);
             if (isset($variants[$variant])) {
                 return null;
@@ -93,7 +93,7 @@ final readonly class KnowledgeScope
         }
 
         $extensionSingletons = [];
-        while ($index < $partCount && $this->isExtensionSingleton($parts[$index])) {
+        while ($index < $partCount && self::isExtensionSingleton($parts[$index])) {
             $singleton = strtolower($parts[$index]);
             if (isset($extensionSingletons[$singleton])) {
                 return null;
@@ -128,13 +128,13 @@ final readonly class KnowledgeScope
         return $index === $partCount ? implode('-', $normalized) : null;
     }
 
-    private function isVariantSubtag(string $part): bool
+    private static function isVariantSubtag(string $part): bool
     {
         return preg_match('/^[A-Za-z0-9]{5,8}$/', $part) === 1
             || preg_match('/^\d[A-Za-z0-9]{3}$/', $part) === 1;
     }
 
-    private function isExtensionSingleton(string $part): bool
+    private static function isExtensionSingleton(string $part): bool
     {
         return strlen($part) === 1
             && ctype_alnum($part)

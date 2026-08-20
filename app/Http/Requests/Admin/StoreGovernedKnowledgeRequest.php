@@ -4,6 +4,7 @@ namespace App\Http\Requests\Admin;
 
 use App\Models\Admin;
 use App\Models\KnowledgeDirectory;
+use App\Services\GeoFlow\KnowledgeGovernance\KnowledgeScope;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\Rules\File;
@@ -103,13 +104,15 @@ final class StoreGovernedKnowledgeRequest extends FormRequest
                 $validator->errors()->add('retrieved_at', __('admin.knowledge_bases.error.policy_retrieved_at_required'));
             }
 
-            $isUnreviewedHighRiskResearch = (string) $directory->path === 'research-reference'
+            $isResearch = $this->isResearchDirectory((string) $directory->path)
+                || $this->input('authority_level') === 'mixed_research';
+            $isUnreviewedHighRiskResearch = $isResearch
                 && $this->input('risk_level') === 'high'
                 && $this->input('review_status') === 'unreviewed';
             if ($isUnreviewedHighRiskResearch && $this->boolean('generation_eligible')) {
                 $validator->errors()->add('generation_eligible', __('admin.knowledge_bases.error.research_generation_ineligible'));
             }
-            if ($isUnreviewedHighRiskResearch && ! $this->boolean('citation_required', true)) {
+            if ($isResearch && ! $this->boolean('citation_required', true)) {
                 $validator->errors()->add('citation_required', __('admin.knowledge_bases.error.research_citation_required'));
             }
         }];
@@ -131,7 +134,7 @@ final class StoreGovernedKnowledgeRequest extends FormRequest
 
     protected function prepareForValidation(): void
     {
-        $language = str_replace('_', '-', trim((string) $this->input('language_code')));
+        $language = KnowledgeScope::canonicalizeLanguageTag((string) $this->input('language_code'));
 
         $this->merge([
             'language_code' => $language,
@@ -151,5 +154,10 @@ final class StoreGovernedKnowledgeRequest extends FormRequest
         }
 
         return false;
+    }
+
+    private function isResearchDirectory(string $path): bool
+    {
+        return $path === 'research-reference' || str_starts_with($path, 'research-reference/');
     }
 }

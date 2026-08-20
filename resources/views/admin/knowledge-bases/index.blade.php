@@ -206,7 +206,7 @@
             <div class="px-6 py-4 border-b border-gray-200">
                 <h3 class="text-lg font-medium text-gray-900">{{ __('admin.knowledge_bases.list_title') }}</h3>
             </div>
-            @if (empty($knowledgeBases))
+            @if ($knowledgeBases->isEmpty())
                 <div class="px-6 py-8 text-center">
                     <i data-lucide="brain" class="w-12 h-12 mx-auto text-gray-400 mb-4"></i>
                     <h3 class="text-lg font-medium text-gray-900 mb-2">{{ __('admin.knowledge_bases.empty') }}</h3>
@@ -268,6 +268,16 @@
                                                 {{ __('admin.knowledge_bases.badge_duplicate_'.$duplicateKind) }}
                                             </span>
                                         @endforeach
+                                        @if ($item['freshness_stale'] ?? false)
+                                            <span class="inline-flex items-center rounded bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800">
+                                                {{ __('admin.knowledge_bases.badge_freshness_stale') }}
+                                            </span>
+                                        @endif
+                                        @if ($item['review_overdue'] ?? false)
+                                            <span class="inline-flex items-center rounded bg-red-100 px-2 py-0.5 text-xs font-medium text-red-800">
+                                                {{ __('admin.knowledge_bases.badge_review_overdue') }}
+                                            </span>
+                                        @endif
                                         @php
                                             $syncStatus = (string) ($item['chunk_sync_status'] ?? 'idle');
                                             $syncStatusClass = match ($syncStatus) {
@@ -375,6 +385,11 @@
                         </div>
                     @endforeach
                 </div>
+                @if ($knowledgeBases->hasPages())
+                    <div class="border-t border-gray-200 px-6 py-4">
+                        {{ $knowledgeBases->links() }}
+                    </div>
+                @endif
             @endif
         </div>
     </div>
