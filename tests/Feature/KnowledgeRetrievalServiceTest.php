@@ -300,6 +300,7 @@ class KnowledgeRetrievalServiceTest extends TestCase
             'name' => '流程知识库',
             'risk_level' => 'low',
             'review_status' => 'reviewed',
+            'canonical_document_key' => 'geo-diagnostic-process',
         ]);
 
         KnowledgeChunk::query()->create([

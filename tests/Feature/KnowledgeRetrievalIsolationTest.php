@@ -486,6 +486,75 @@ final class KnowledgeRetrievalIsolationTest extends TestCase
         $this->assertStringNotContainsString('Newer market research', json_encode($evidence, JSON_THROW_ON_ERROR));
     }
 
+    public function test_canonical_version_resolution_excludes_every_losing_section_when_titles_and_paths_differ(): void
+    {
+        $ownership = $this->createOwnership('canonical-version-sections-brand');
+        $researchDirectory = KnowledgeDirectory::query()->create([
+            'brand_id' => $ownership['brand']->id,
+            'key' => 'research-reference',
+            'path' => 'research-reference',
+            'name' => 'Research reference',
+        ]);
+        $policy = $this->createDocument($ownership, [
+            'name' => 'Official returns policy',
+            'content' => 'Policy return windows are governed here.',
+            'canonical_document_key' => 'returns-sections',
+            'effective_date' => '2025-01-01',
+        ]);
+        $policy->chunks()->update([
+            'chunk_title' => 'Policy return window',
+            'section_path' => 'Policy > Return window',
+        ]);
+        KnowledgeChunk::query()->create([
+            'knowledge_base_id' => $policy->id,
+            'chunk_index' => 1,
+            'content' => 'Policy refund processing is governed here.',
+            'content_hash' => hash('sha256', 'returns-sections-policy-refunds'),
+            'chunk_title' => 'Policy refund processing',
+            'section_path' => 'Policy > Refund processing',
+            'metadata_json' => '{}',
+            'embedding_json' => '[]',
+        ]);
+        $research = $this->createDocument($ownership, [
+            'name' => 'Returns market research',
+            'content' => 'Research estimates return-window preferences.',
+            'canonical_document_key' => 'returns-sections',
+            'primary_directory_id' => $researchDirectory->id,
+            'authority_level' => 'mixed_research',
+            'effective_date' => '2026-08-01',
+        ]);
+        $research->chunks()->update([
+            'chunk_title' => 'Research return-window survey',
+            'section_path' => 'Research > Window survey',
+        ]);
+        KnowledgeChunk::query()->create([
+            'knowledge_base_id' => $research->id,
+            'chunk_index' => 1,
+            'content' => 'Research-only exceptions have no policy counterpart.',
+            'content_hash' => hash('sha256', 'returns-sections-research-only'),
+            'chunk_title' => 'Research-only exceptions',
+            'section_path' => 'Research > Exceptions',
+            'metadata_json' => '{}',
+            'embedding_json' => '[]',
+        ]);
+
+        $evidence = app(KnowledgeRetrievalService::class)->retrieveEvidenceFromMany(
+            $ownership['scope'],
+            [(int) $research->id, (int) $policy->id],
+            'returns policy research window refund exceptions',
+            10,
+        );
+
+        $this->assertCount(2, $evidence);
+        $this->assertSame([(int) $policy->id, (int) $policy->id], collect($evidence)->pluck('metadata.knowledge_base_id')->all());
+        $this->assertEqualsCanonicalizing(
+            ['Policy return window', 'Policy refund processing'],
+            collect($evidence)->pluck('chunk_title')->all(),
+        );
+        $this->assertSame([2, 2], collect($evidence)->pluck('conflict_merged_count')->all());
+        $this->assertStringNotContainsString('Research', json_encode($evidence, JSON_THROW_ON_ERROR));
+    }
+
     public function test_scope_trims_and_canonicalizes_bcp47_compatible_language_tags(): void
     {
         $scope = new KnowledgeScope(10, 20, '  ZH_hANS_cn  ');

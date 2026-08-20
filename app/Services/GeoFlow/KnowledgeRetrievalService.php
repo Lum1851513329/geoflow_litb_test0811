@@ -541,7 +541,7 @@ class KnowledgeRetrievalService
     }
 
     /**
-     * 同主题证据只保留最可信版本，避免新旧资料同时进入提示词造成生成冲突。
+     * 同一规范文档只保留最可信版本，避免新旧资料同时进入提示词造成生成冲突。
      *
      * @param  list<array<string,mixed>>  $scored
      * @return list<array<string,mixed>>
@@ -550,7 +550,7 @@ class KnowledgeRetrievalService
     {
         $groups = [];
         foreach ($scored as $candidate) {
-            $groups[$this->conflictTopicKey($candidate)][] = $candidate;
+            $groups[$this->conflictDocumentKey($candidate)][] = $candidate;
         }
 
         $resolved = [];
@@ -634,34 +634,22 @@ class KnowledgeRetrievalService
     /**
      * @param  array<string,mixed>  $candidate
      */
-    private function conflictTopicKey(array $candidate): string
+    private function conflictDocumentKey(array $candidate): string
     {
         $metadata = is_array($candidate['metadata'] ?? null) ? $candidate['metadata'] : [];
         $canonicalDocumentKey = trim((string) ($metadata['canonical_document_key'] ?? ''));
         if ($canonicalDocumentKey === '') {
-            return 'evidence:'.(int) ($metadata['knowledge_base_id'] ?? 0).':'.(int) ($candidate['chunk_index'] ?? 0);
+            return 'document:'.(int) ($metadata['knowledge_base_id'] ?? 0);
         }
 
-        $title = $this->normalizeTopicKey((string) ($candidate['chunk_title'] ?? ''));
-        $sectionPath = $this->normalizeTopicKey((string) ($candidate['section_path'] ?? ''));
         $identity = implode('|', [
             (int) ($metadata['brand_id'] ?? 0),
             (int) ($metadata['site_id'] ?? 0),
             (string) ($metadata['language_code'] ?? ''),
             $canonicalDocumentKey,
-            $sectionPath,
-            $title,
         ]);
 
         return 'version:'.sha1($identity);
-    }
-
-    private function normalizeTopicKey(string $value): string
-    {
-        $value = mb_strtolower(trim($value), 'UTF-8');
-        $value = preg_replace('/[\s\p{P}\p{S}]+/u', '', $value);
-
-        return is_string($value) ? $value : '';
     }
 
     private function riskLevelRank(string $riskLevel): int

@@ -123,3 +123,38 @@
 - Neither PHP `intl`/`Locale` nor an installed BCP 47 normalization library is available in the app container, so `KnowledgeScope` implements the required project-compatible grammar directly.
 - The existing SQLite/pgvector caveat remains unchanged; no formal database import, corpus mutation or external write was performed.
 - Unrelated pre-existing preset seeding, Docker Compose and `HANDOFF.md` changes remain outside this review-fix scope.
+
+## Review fix round 3
+
+### Changed files
+
+- `app/Services/GeoFlow/KnowledgeRetrievalService.php`
+- `tests/Feature/KnowledgeRetrievalIsolationTest.php`
+- `tests/Feature/KnowledgeRetrievalServiceTest.php`
+- `.superpowers/sdd/2026-08-19-brand-scoped-knowledge-governance/task-8-report.md`
+
+### Before / RED evidence
+
+- The cross-section canonical-version regression initially failed with one failure, 39 passing tests and 110 assertions.
+- A two-section policy version and a two-section research version returned all four chunks when their titles/section paths differed, allowing research-only sections to escape conflict resolution.
+- The existing canonical single-document fixture remained passing, isolating the defect to cross-document version grouping.
+
+### Implementation
+
+- Conflict candidates now group once by scoped canonical document identity: brand, site, language and canonical document key. Chunk title and section path no longer participate in version identity.
+- The governance-first document winner chosen for that canonical identity applies to every candidate section. All losing-document chunks are removed, including sections with no title/path counterpart in the winner.
+- All distinct winning-document chunks continue through the existing deterministic global rank and citation assignment.
+- The complementary-chunk regression now gives its single document an explicit canonical key, protecting the no-version behavior while exercising the same grouping path.
+
+### Verification
+
+- Focused retrieval suite: 40 tests and 114 assertions passed.
+- Retrieval, article assistant, worker, task and content-generation regression suites: 183 tests and 780 assertions passed.
+- Pint passed for the three review-owned PHP files.
+- PHP syntax checks passed for the three review-owned PHP files.
+- `git diff --check` passed.
+
+### Caveats
+
+- The existing SQLite/pgvector caveat remains unchanged; no formal database import, corpus mutation or external write was performed.
+- Unrelated pre-existing preset seeding, Docker Compose and `HANDOFF.md` changes remain outside this review-fix scope.
