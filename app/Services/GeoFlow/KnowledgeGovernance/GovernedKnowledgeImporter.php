@@ -12,6 +12,7 @@ use App\Models\KnowledgeSite;
 use App\Services\GeoFlow\KnowledgeChunkSyncCoordinator;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Arr;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use RuntimeException;
@@ -19,6 +20,8 @@ use Throwable;
 
 final class GovernedKnowledgeImporter
 {
+    private const DISPATCH_CLAIM_LEASE_SECONDS = 300;
+
     public function __construct(
         private readonly KnowledgeImportValidator $validator,
         private readonly KnowledgeKeywordAssociationService $keywordAssociations,
@@ -346,67 +349,156 @@ final class GovernedKnowledgeImporter
     /** @return array{status:string,batch_id:int,imported_count:int,duplicate_count:int} */
     private function dispatchBatch(int $batchId): array
     {
-        $batch = KnowledgeImportBatch::query()->findOrFail($batchId);
-        $batch->update([
+        KnowledgeImportBatch::query()->whereKey($batchId)->update([
             'status' => 'dispatching',
             'completed_at' => null,
         ]);
-        $rows = KnowledgeImportRow::query()
+        $staleBefore = now()->subSeconds(self::DISPATCH_CLAIM_LEASE_SECONDS);
+        $rowIds = KnowledgeImportRow::query()
             ->where('batch_id', $batchId)
-            ->whereIn('outcome', ['chunk_pending', 'chunk_failed'])
+            ->where(function ($query) use ($staleBefore): void {
+                $query->whereIn('outcome', ['chunk_pending', 'chunk_failed'])
+                    ->orWhere(function ($claimed) use ($staleBefore): void {
+                        $claimed->where('outcome', 'chunk_claimed')
+                            ->where(function ($lease) use ($staleBefore): void {
+                                $lease->whereNull('dispatch_claimed_at')
+                                    ->orWhere('dispatch_claimed_at', '<=', $staleBefore);
+                            });
+                    });
+            })
             ->whereNotNull('canonical_document_id')
             ->orderBy('row_number')
-            ->get();
+            ->pluck('id');
 
-        foreach ($rows as $row) {
+        foreach ($rowIds as $rowId) {
+            $claim = $this->claimDispatchRow((int) $rowId, $staleBefore);
+            if ($claim === null) {
+                continue;
+            }
             try {
-                $this->chunkSyncCoordinator->request((int) $row->canonical_document_id);
-                $row->update([
-                    'outcome' => 'chunk_dispatched',
-                    'error_message' => null,
-                ]);
+                $requested = $this->chunkSyncCoordinator->request($claim['document_id']);
+                if (! $requested) {
+                    $syncStatus = KnowledgeBase::query()
+                        ->whereKey($claim['document_id'])
+                        ->value('chunk_sync_status');
+                    if (! in_array($syncStatus, ['pending', 'processing', 'ready'], true)) {
+                        throw new RuntimeException('governed_import.chunk_dispatch_not_scheduled.'.($syncStatus ?? 'missing'));
+                    }
+                }
+                $this->completeDispatchClaim($claim['row_id'], $claim['token']);
             } catch (Throwable $exception) {
-                $message = mb_substr($exception->getMessage(), 0, 2000, 'UTF-8');
-                $row->update([
-                    'outcome' => 'chunk_failed',
-                    'error_message' => $message,
-                ]);
-                $errors = (array) $batch->error_log;
-                $errors[] = [
-                    'row_id' => (int) $row->id,
-                    'document_id' => (int) $row->canonical_document_id,
-                    'message' => $message,
-                    'failed_at' => now()->toAtomString(),
-                ];
-                $batch->update([
-                    'status' => 'failed',
-                    'error_log' => $errors,
-                    'completed_at' => null,
-                ]);
+                $this->failDispatchClaim($batchId, $claim, $exception);
 
                 throw $exception;
             }
         }
 
-        $outstanding = KnowledgeImportRow::query()
-            ->where('batch_id', $batchId)
-            ->whereIn('outcome', ['chunk_pending', 'chunk_failed'])
-            ->exists();
-        if ($outstanding) {
-            throw new RuntimeException('governed_import.chunk_dispatch_incomplete');
-        }
+        return $this->finalizeDispatchBatch($batchId);
+    }
 
-        $batch->update([
-            'status' => 'completed',
-            'completed_at' => now(),
-        ]);
+    /** @return array{row_id:int,document_id:int,token:string}|null */
+    private function claimDispatchRow(int $rowId, Carbon $staleBefore): ?array
+    {
+        return DB::transaction(function () use ($rowId, $staleBefore): ?array {
+            $row = KnowledgeImportRow::query()->whereKey($rowId)->lockForUpdate()->first();
+            if ($row === null || $row->canonical_document_id === null) {
+                return null;
+            }
+            $claimable = in_array($row->outcome, ['chunk_pending', 'chunk_failed'], true)
+                || ($row->outcome === 'chunk_claimed'
+                    && ($row->dispatch_claimed_at === null || $row->dispatch_claimed_at->lessThanOrEqualTo($staleBefore)));
+            if (! $claimable) {
+                return null;
+            }
+            $token = (string) Str::uuid();
+            $row->update([
+                'outcome' => 'chunk_claimed',
+                'error_message' => null,
+                'dispatch_claim_token' => $token,
+                'dispatch_claimed_at' => now(),
+                'dispatch_attempt_count' => (int) $row->dispatch_attempt_count + 1,
+            ]);
 
-        return [
-            'status' => 'completed',
-            'batch_id' => (int) $batch->id,
-            'imported_count' => (int) $batch->imported_count,
-            'duplicate_count' => (int) $batch->duplicate_count,
-        ];
+            return [
+                'row_id' => (int) $row->id,
+                'document_id' => (int) $row->canonical_document_id,
+                'token' => $token,
+            ];
+        });
+    }
+
+    private function completeDispatchClaim(int $rowId, string $token): void
+    {
+        KnowledgeImportRow::query()
+            ->whereKey($rowId)
+            ->where('outcome', 'chunk_claimed')
+            ->where('dispatch_claim_token', $token)
+            ->update([
+                'outcome' => 'chunk_dispatched',
+                'error_message' => null,
+                'dispatch_claim_token' => null,
+                'dispatch_claimed_at' => null,
+            ]);
+    }
+
+    /** @param array{row_id:int,document_id:int,token:string} $claim */
+    private function failDispatchClaim(int $batchId, array $claim, Throwable $exception): void
+    {
+        DB::transaction(function () use ($batchId, $claim, $exception): void {
+            $message = mb_substr($exception->getMessage(), 0, 2000, 'UTF-8');
+            $updated = KnowledgeImportRow::query()
+                ->whereKey($claim['row_id'])
+                ->where('outcome', 'chunk_claimed')
+                ->where('dispatch_claim_token', $claim['token'])
+                ->update([
+                    'outcome' => 'chunk_failed',
+                    'error_message' => $message,
+                    'dispatch_claim_token' => null,
+                    'dispatch_claimed_at' => null,
+                ]);
+            if ($updated !== 1) {
+                return;
+            }
+            $batch = KnowledgeImportBatch::query()->whereKey($batchId)->lockForUpdate()->firstOrFail();
+            $errors = (array) $batch->error_log;
+            $errors[] = [
+                'row_id' => $claim['row_id'],
+                'document_id' => $claim['document_id'],
+                'message' => $message,
+                'failed_at' => now()->toAtomString(),
+            ];
+            $batch->update([
+                'status' => 'failed',
+                'error_log' => $errors,
+                'completed_at' => null,
+            ]);
+        });
+    }
+
+    /** @return array{status:string,batch_id:int,imported_count:int,duplicate_count:int} */
+    private function finalizeDispatchBatch(int $batchId): array
+    {
+        return DB::transaction(function () use ($batchId): array {
+            $batch = KnowledgeImportBatch::query()->whereKey($batchId)->lockForUpdate()->firstOrFail();
+            $outcomes = KnowledgeImportRow::query()
+                ->where('batch_id', $batchId)
+                ->whereIn('outcome', ['chunk_pending', 'chunk_failed', 'chunk_claimed'])
+                ->pluck('outcome');
+            $status = $outcomes->isEmpty()
+                ? 'completed'
+                : ($outcomes->contains('chunk_failed') ? 'failed' : 'dispatching');
+            $batch->update([
+                'status' => $status,
+                'completed_at' => $status === 'completed' ? now() : null,
+            ]);
+
+            return [
+                'status' => $status,
+                'batch_id' => (int) $batch->id,
+                'imported_count' => (int) $batch->imported_count,
+                'duplicate_count' => (int) $batch->duplicate_count,
+            ];
+        });
     }
 
     private function batchForPackage(string $configurationHash, string $sourceChecksum): ?KnowledgeImportBatch

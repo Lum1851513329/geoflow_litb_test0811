@@ -15,6 +15,7 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Queue;
+use Illuminate\Support\Facades\Schema;
 use RuntimeException;
 use Tests\TestCase;
 
@@ -214,8 +215,13 @@ final class ImportGovernedKnowledgeCommandTest extends TestCase
     public function test_formal_package_uses_the_builder_source_set_hash_for_batch_identity(): void
     {
         $manifest = $this->writePackage();
-        $sourceSetHash = hash('sha256', 'complete governed source set');
-        $this->writeSummary($sourceSetHash);
+        $sourceSetHash = 'adef92e7e18acb5105878d6a03a5c23f5e711aafd7f0a515690815b3a080a86e';
+        $this->assertSame($sourceSetHash, json_decode(
+            File::get($this->root.'/run_summary.json'),
+            true,
+            512,
+            JSON_THROW_ON_ERROR,
+        )['source_set_hash']);
 
         $this->artisan('geoflow:knowledge:import-governed', [
             'manifest' => $manifest,
@@ -223,6 +229,25 @@ final class ImportGovernedKnowledgeCommandTest extends TestCase
         ])->assertSuccessful();
 
         $this->assertSame($sourceSetHash, DB::table('knowledge_import_batches')->sole()->source_checksum);
+    }
+
+    public function test_tampered_summary_source_set_hash_is_rejected_without_creating_a_new_batch(): void
+    {
+        $manifest = $this->writePackage();
+        $arguments = [
+            'manifest' => $manifest,
+            '--keyword-library' => 42,
+        ];
+        $this->artisan('geoflow:knowledge:import-governed', $arguments)->assertSuccessful();
+        $summary = json_decode(File::get($this->root.'/run_summary.json'), true, 512, JSON_THROW_ON_ERROR);
+        $summary['source_set_hash'] = hash('sha256', 'tampered source mapping');
+        File::put($this->root.'/run_summary.json', json_encode($summary, JSON_THROW_ON_ERROR));
+
+        $this->artisan('geoflow:knowledge:import-governed', $arguments)->assertFailed();
+
+        $this->assertDatabaseCount('knowledge_import_batches', 1);
+        $this->assertDatabaseCount('knowledge_bases', 1);
+        $this->assertDatabaseCount('knowledge_import_rows', 3);
     }
 
     public function test_invalid_ownership_in_a_later_manifest_row_leaves_the_whole_database_unchanged(): void
@@ -416,6 +441,37 @@ final class ImportGovernedKnowledgeCommandTest extends TestCase
         $this->assertDatabaseCount('knowledge_import_batches', 0);
     }
 
+    public function test_preflight_models_package_final_state_when_superseding_v1_with_active_v2(): void
+    {
+        [$brand, $site, $directory] = $this->ownership();
+        $canonicalKey = 'url:https://www.lightinthebox.com/versioned-returns';
+        $v1 = $this->documentRecord(
+            $canonicalKey,
+            "# Returns v1\n\nOld policy content.\n",
+        );
+        KnowledgeBase::query()->create($this->existingDocumentPayload($v1, $brand, $site, $directory));
+        $v1['lifecycle_status'] = 'superseded';
+        $v2 = $this->documentRecord(
+            $canonicalKey,
+            "# Returns v2\n\nCurrent policy content.\n",
+        );
+        $manifest = $this->writePackage([$v1, $v2], []);
+        $arguments = [
+            'manifest' => $manifest,
+            '--keyword-library' => 42,
+        ];
+
+        $this->artisan('geoflow:knowledge:import-governed', $arguments)->assertSuccessful();
+        $this->artisan('geoflow:knowledge:import-governed', $arguments)->assertSuccessful();
+
+        $this->assertDatabaseCount('knowledge_bases', 2);
+        $this->assertDatabaseCount('knowledge_import_batches', 1);
+        $this->assertSame(
+            ['superseded', 'active'],
+            KnowledgeBase::query()->orderBy('id')->pluck('lifecycle_status')->all(),
+        );
+    }
+
     public function test_manifest_enums_urls_and_single_active_version_are_strictly_validated(): void
     {
         $invalidFields = [
@@ -466,6 +522,60 @@ final class ImportGovernedKnowledgeCommandTest extends TestCase
         $duplicate = $this->manifestDuplicate($record);
         $duplicate['normalized_content_hash'] = hash('sha256', "different\n");
         $manifest = $this->writePackage([$record], [$duplicate]);
+        $this->artisan('geoflow:knowledge:import-governed', [
+            'manifest' => $manifest,
+            '--dry-run' => true,
+            '--keyword-library' => 42,
+        ])->assertFailed();
+
+        $this->assertNoImportWrites();
+    }
+
+    public function test_exclusion_and_duplicate_dual_role_source_identity_is_consistent_with_task_six(): void
+    {
+        [$exclusions, $duplicate] = $this->dualRoleAuditFixture();
+        $manifest = $this->writePackage([$this->documentRecord()], [$duplicate], $exclusions);
+
+        $this->artisan('geoflow:knowledge:import-governed', [
+            'manifest' => $manifest,
+            '--dry-run' => true,
+            '--keyword-library' => 42,
+        ])->assertSuccessful();
+
+        $this->assertNoImportWrites();
+    }
+
+    public function test_duplicate_sources_cannot_diverge_from_exclusions_reuse_manifest_or_self_target(): void
+    {
+        [$exclusions, $duplicate] = $this->dualRoleAuditFixture();
+        $divergent = [...$duplicate, 'source_file_hash' => hash('sha256', 'divergent bytes')];
+        $manifest = $this->writePackage([$this->documentRecord()], [$divergent], $exclusions);
+        $this->artisan('geoflow:knowledge:import-governed', [
+            'manifest' => $manifest,
+            '--dry-run' => true,
+            '--keyword-library' => 42,
+        ])->assertFailed();
+
+        $record = $this->documentRecord();
+        $manifestReuse = [
+            ...$duplicate,
+            'source_file_path' => $record['source_file_path'],
+            'source_file_hash' => $record['source_file_hash'],
+        ];
+        $manifest = $this->writePackage([$record], [$manifestReuse], $exclusions);
+        $this->artisan('geoflow:knowledge:import-governed', [
+            'manifest' => $manifest,
+            '--dry-run' => true,
+            '--keyword-library' => 42,
+        ])->assertFailed();
+
+        $source = $exclusions[1];
+        $selfTarget = [
+            ...$duplicate,
+            'duplicate_of_source_file_path' => $source['source_file_path'],
+            'duplicate_of_document_id' => $source['document_id'],
+        ];
+        $manifest = $this->writePackage([$record], [$selfTarget], $exclusions);
         $this->artisan('geoflow:knowledge:import-governed', [
             'manifest' => $manifest,
             '--dry-run' => true,
@@ -532,6 +642,54 @@ final class ImportGovernedKnowledgeCommandTest extends TestCase
             '--dry-run' => true,
             '--keyword-library' => 42,
         ])->assertFailed();
+
+        $this->assertNoImportWrites();
+    }
+
+    public function test_nonempty_near_duplicate_review_resolves_two_formal_same_scope_documents(): void
+    {
+        $records = [
+            $this->documentRecord(),
+            $this->documentRecord(
+                'url:https://www.lightinthebox.com/exchanges',
+                "# Exchanges\n\nExchange eligible items within 30 days.\n",
+            ),
+        ];
+        $nearReview = $this->nearReviewRecord($records[0], $records[1]);
+        $manifest = $this->writePackage($records, [], null, [$nearReview]);
+
+        $this->artisan('geoflow:knowledge:import-governed', [
+            'manifest' => $manifest,
+            '--dry-run' => true,
+            '--keyword-library' => 42,
+        ])->assertSuccessful();
+
+        $this->assertNoImportWrites();
+    }
+
+    public function test_near_duplicate_review_rejects_invalid_resolution_score_and_identity_scope(): void
+    {
+        $records = [
+            $this->documentRecord(),
+            $this->documentRecord(
+                'url:https://www.lightinthebox.com/exchanges',
+                "# Exchanges\n\nExchange eligible items within 30 days.\n",
+            ),
+        ];
+        $valid = $this->nearReviewRecord($records[0], $records[1]);
+        $invalidRecords = [
+            [...$valid, 'action' => 'merge'],
+            [...$valid, 'similarity' => 0.50],
+            [...$valid, 'source_file_paths' => [$records[0]['source_file_path'], 'missing.md']],
+        ];
+        foreach ($invalidRecords as $invalid) {
+            $manifest = $this->writePackage($records, [], null, [$invalid]);
+            $this->artisan('geoflow:knowledge:import-governed', [
+                'manifest' => $manifest,
+                '--dry-run' => true,
+                '--keyword-library' => 42,
+            ])->assertFailed();
+        }
 
         $this->assertNoImportWrites();
     }
@@ -712,6 +870,157 @@ SQL);
         $this->assertSame(['chunk_dispatched', 'chunk_dispatched'], DB::table('knowledge_import_rows')->orderBy('row_number')->pluck('outcome')->all());
     }
 
+    public function test_interleaved_reconciler_cannot_double_claim_or_dispatch_the_same_row(): void
+    {
+        $manifest = $this->writePackage([$this->documentRecord()], []);
+        $coordinator = new class extends KnowledgeChunkSyncCoordinator
+        {
+            public int $calls = 0;
+
+            /** @var callable():void */
+            public $duringFirstRequest;
+
+            public function request(int $knowledgeBaseId, bool $requireRealEmbedding = false, bool $force = false): bool
+            {
+                $this->calls++;
+                if ($this->calls === 1) {
+                    ($this->duringFirstRequest)();
+                }
+
+                return true;
+            }
+        };
+        $this->app->instance(KnowledgeChunkSyncCoordinator::class, $coordinator);
+        $coordinator->duringFirstRequest = function () use ($manifest): void {
+            $this->app->make(GovernedKnowledgeImporter::class)->import($manifest, false, 42);
+        };
+
+        $this->app->make(GovernedKnowledgeImporter::class)->import($manifest, false, 42);
+
+        $this->assertSame(1, $coordinator->calls);
+        $this->assertSame('chunk_dispatched', DB::table('knowledge_import_rows')->sole()->outcome);
+        $this->assertSame('completed', DB::table('knowledge_import_batches')->sole()->status);
+        $this->assertSame(1, (int) DB::table('knowledge_import_rows')->sole()->dispatch_attempt_count);
+    }
+
+    public function test_false_coordinator_result_uses_actual_chunk_state_and_never_marks_idle_as_dispatched(): void
+    {
+        $manifest = $this->writePackage([$this->documentRecord()], []);
+        $coordinator = new class extends KnowledgeChunkSyncCoordinator
+        {
+            public int $calls = 0;
+
+            public function request(int $knowledgeBaseId, bool $requireRealEmbedding = false, bool $force = false): bool
+            {
+                $this->calls++;
+
+                return false;
+            }
+        };
+        $this->app->instance(KnowledgeChunkSyncCoordinator::class, $coordinator);
+        $arguments = [
+            'manifest' => $manifest,
+            '--keyword-library' => 42,
+        ];
+
+        $this->artisan('geoflow:knowledge:import-governed', $arguments)->assertFailed();
+        $this->assertSame('chunk_failed', DB::table('knowledge_import_rows')->sole()->outcome);
+        $this->assertSame('failed', DB::table('knowledge_import_batches')->sole()->status);
+
+        DB::table('knowledge_bases')->update(['chunk_sync_status' => 'failed']);
+        $this->app->forgetInstance(GovernedKnowledgeImporter::class);
+        $this->artisan('geoflow:knowledge:import-governed', $arguments)->assertFailed();
+        $this->assertSame('chunk_failed', DB::table('knowledge_import_rows')->sole()->outcome);
+
+        DB::table('knowledge_bases')->update([
+            'chunk_sync_status' => 'pending',
+            'chunk_source_hash' => hash('sha256', (string) DB::table('knowledge_bases')->sole()->content),
+        ]);
+        $this->app->forgetInstance(GovernedKnowledgeImporter::class);
+        $this->artisan('geoflow:knowledge:import-governed', $arguments)->assertSuccessful();
+
+        $row = DB::table('knowledge_import_rows')->sole();
+        $this->assertSame('chunk_dispatched', $row->outcome);
+        $this->assertSame(3, (int) $row->dispatch_attempt_count);
+        $this->assertNull($row->dispatch_claim_token);
+        $this->assertNull($row->dispatch_claimed_at);
+        $this->assertSame(3, $coordinator->calls);
+    }
+
+    public function test_concurrent_batch_error_append_is_preserved_when_dispatch_fails(): void
+    {
+        $manifest = $this->writePackage([$this->documentRecord()], []);
+        $coordinator = new class extends KnowledgeChunkSyncCoordinator
+        {
+            public function request(int $knowledgeBaseId, bool $requireRealEmbedding = false, bool $force = false): bool
+            {
+                DB::table('knowledge_import_batches')->update([
+                    'error_log' => json_encode([[
+                        'message' => 'interleaved reconciler failure',
+                    ]], JSON_THROW_ON_ERROR),
+                ]);
+
+                throw new RuntimeException('primary reconciler failure');
+            }
+        };
+        $this->app->instance(KnowledgeChunkSyncCoordinator::class, $coordinator);
+
+        $this->artisan('geoflow:knowledge:import-governed', [
+            'manifest' => $manifest,
+            '--keyword-library' => 42,
+        ])->assertFailed();
+
+        $errors = json_decode((string) DB::table('knowledge_import_batches')->sole()->error_log, true, 512, JSON_THROW_ON_ERROR);
+        $this->assertCount(2, $errors);
+        $this->assertSame('interleaved reconciler failure', $errors[0]['message']);
+        $this->assertSame('primary reconciler failure', $errors[1]['message']);
+    }
+
+    public function test_stale_dispatch_claim_is_recoverable_without_duplicate_import_rows(): void
+    {
+        $manifest = $this->writePackage([$this->documentRecord()], []);
+        $failing = new class extends KnowledgeChunkSyncCoordinator
+        {
+            public function request(int $knowledgeBaseId, bool $requireRealEmbedding = false, bool $force = false): bool
+            {
+                throw new RuntimeException('initial dispatch failure');
+            }
+        };
+        $this->app->instance(KnowledgeChunkSyncCoordinator::class, $failing);
+        $arguments = [
+            'manifest' => $manifest,
+            '--keyword-library' => 42,
+        ];
+        $this->artisan('geoflow:knowledge:import-governed', $arguments)->assertFailed();
+        DB::table('knowledge_import_rows')->update([
+            'outcome' => 'chunk_claimed',
+            'dispatch_claim_token' => 'stranded-claim',
+            'dispatch_claimed_at' => now()->subMinutes(10),
+        ]);
+
+        $successful = new class extends KnowledgeChunkSyncCoordinator
+        {
+            public int $calls = 0;
+
+            public function request(int $knowledgeBaseId, bool $requireRealEmbedding = false, bool $force = false): bool
+            {
+                $this->calls++;
+
+                return true;
+            }
+        };
+        $this->app->instance(KnowledgeChunkSyncCoordinator::class, $successful);
+        $this->app->forgetInstance(GovernedKnowledgeImporter::class);
+        $this->artisan('geoflow:knowledge:import-governed', $arguments)->assertSuccessful();
+
+        $row = DB::table('knowledge_import_rows')->sole();
+        $this->assertSame('chunk_dispatched', $row->outcome);
+        $this->assertSame(2, (int) $row->dispatch_attempt_count);
+        $this->assertSame(1, $successful->calls);
+        $this->assertDatabaseCount('knowledge_import_rows', 1);
+        $this->assertDatabaseCount('knowledge_import_batches', 1);
+    }
+
     public function test_import_batch_identity_is_enforced_by_the_database(): void
     {
         [$brand, $site] = $this->ownership();
@@ -731,13 +1040,94 @@ SQL);
         DB::table('knowledge_import_batches')->insert($payload);
     }
 
+    public function test_batch_identity_migration_reconciles_populated_duplicates_without_losing_audits(): void
+    {
+        $migration = require database_path('migrations/2026_08_19_000400_harden_governed_knowledge_import_batches.php');
+        $migration->down();
+        [$brand, $site] = $this->ownership();
+        $configurationHash = hash('sha256', 'legacy duplicate config');
+        $sourceChecksum = hash('sha256', 'legacy duplicate source');
+        $batchIds = [];
+        foreach ([1, 2] as $number) {
+            $batchIds[] = DB::table('knowledge_import_batches')->insertGetId([
+                'brand_id' => $brand->id,
+                'site_id' => $site->id,
+                'source_type' => 'governed_manifest',
+                'status' => 'completed',
+                'configuration_hash' => $configurationHash,
+                'source_checksum' => $sourceChecksum,
+                'rollback_metadata' => json_encode(['legacy_marker' => $number], JSON_THROW_ON_ERROR),
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+        }
+        foreach ($batchIds as $index => $batchId) {
+            $rowId = DB::table('knowledge_import_rows')->insertGetId([
+                'brand_id' => $brand->id,
+                'site_id' => $site->id,
+                'batch_id' => $batchId,
+                'row_number' => 1,
+                'staged_payload' => json_encode(['legacy_row' => $index + 1], JSON_THROW_ON_ERROR),
+                'outcome' => 'duplicate',
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+            DB::table('knowledge_duplicates')->insert([
+                'brand_id' => $brand->id,
+                'site_id' => $site->id,
+                'import_batch_id' => $batchId,
+                'import_row_id' => $rowId,
+                'duplicate_kind' => 'exact',
+                'duplicate_reason' => 'legacy audit record',
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+        }
+
+        $migration->up();
+
+        $batches = DB::table('knowledge_import_batches')->orderBy('id')->get();
+        $this->assertCount(2, $batches);
+        $this->assertDatabaseCount('knowledge_import_rows', 2);
+        $this->assertDatabaseCount('knowledge_duplicates', 2);
+        $this->assertSame($configurationHash, $batches[0]->configuration_hash);
+        $this->assertNotSame($configurationHash, $batches[1]->configuration_hash);
+        $metadata = json_decode((string) $batches[1]->rollback_metadata, true, 512, JSON_THROW_ON_ERROR);
+        $this->assertSame(2, $metadata['legacy_marker']);
+        $this->assertSame($configurationHash, $metadata['identity_reconciliation']['original_configuration_hash']);
+        $this->assertSame($sourceChecksum, $metadata['identity_reconciliation']['original_source_checksum']);
+        $this->assertSame((int) $batches[0]->id, $metadata['identity_reconciliation']['canonical_batch_id']);
+        $this->assertTrue(Schema::hasColumns('knowledge_import_rows', [
+            'dispatch_claim_token',
+            'dispatch_claimed_at',
+            'dispatch_attempt_count',
+        ]));
+
+        $this->expectException(QueryException::class);
+        DB::table('knowledge_import_batches')->insert([
+            'brand_id' => $brand->id,
+            'site_id' => $site->id,
+            'source_type' => 'governed_manifest',
+            'status' => 'staged',
+            'configuration_hash' => $configurationHash,
+            'source_checksum' => $sourceChecksum,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+    }
+
     /**
      * @param  list<array<string, mixed>>|null  $records
      * @param  list<array<string, mixed>>|null  $duplicates
      * @param  list<array<string, mixed>>|null  $exclusions
+     * @param  list<array<string, mixed>>|null  $nearReviews
      */
-    private function writePackage(?array $records = null, ?array $duplicates = null, ?array $exclusions = null): string
-    {
+    private function writePackage(
+        ?array $records = null,
+        ?array $duplicates = null,
+        ?array $exclusions = null,
+        ?array $nearReviews = null,
+    ): string {
         $records ??= [$this->documentRecord()];
         $manifest = [];
         foreach ($records as $record) {
@@ -760,7 +1150,7 @@ SQL);
         $this->writeJsonLines($this->root.'/manifest.jsonl', $manifest);
         $this->writeJsonLines($this->root.'/duplicate_audit.jsonl', $duplicates);
         $this->writeJsonLines($this->root.'/exclusion_audit.jsonl', $exclusions);
-        $this->writeJsonLines($this->root.'/near_duplicate_review.jsonl', []);
+        $this->writeJsonLines($this->root.'/near_duplicate_review.jsonl', $nearReviews ?? []);
         $this->writeSummary();
 
         return $this->root.'/manifest.jsonl';
@@ -861,6 +1251,54 @@ SQL);
         ];
     }
 
+    /** @return array{list<array<string,mixed>>,array<string,mixed>} */
+    private function dualRoleAuditFixture(): array
+    {
+        $target = $this->exclusionRecord();
+        $sourceCanonicalKey = 'path:excluded-txt-mirror';
+        $source = [
+            'document_id' => $this->documentId($sourceCanonicalKey, $target['normalized_content_hash']),
+            'canonical_document_key' => $sourceCanonicalKey,
+            'source_file_path' => 'LightInTheBox_PT_Official_KB_TXT/01_Company_Info/Excluded.txt',
+            'source_file_hash' => hash('sha256', 'excluded txt mirror'),
+            'normalized_content_hash' => $target['normalized_content_hash'],
+            'language_code' => 'pt',
+            'reason' => 'non_english_initial_corpus',
+            'source_kind' => 'txt_mirror',
+            'warnings' => [],
+        ];
+        $duplicate = [
+            'kind' => 'exact',
+            'source_file_path' => $source['source_file_path'],
+            'source_file_hash' => $source['source_file_hash'],
+            'normalized_content_hash' => $source['normalized_content_hash'],
+            'duplicate_of_source_file_path' => $target['source_file_path'],
+            'duplicate_of_document_id' => $target['document_id'],
+            'reason' => 'markdown_over_txt',
+        ];
+
+        return [[$target, $source], $duplicate];
+    }
+
+    /**
+     * @param  array<string,mixed>  $first
+     * @param  array<string,mixed>  $second
+     * @return array<string,mixed>
+     */
+    private function nearReviewRecord(array $first, array $second): array
+    {
+        $paths = [$first['source_file_path'], $second['source_file_path']];
+        sort($paths, SORT_STRING);
+
+        return [
+            'kind' => 'near',
+            'action' => 'review',
+            'source_file_paths' => $paths,
+            'reason' => 'near_duplicate_requires_review',
+            'similarity' => 0.95,
+        ];
+    }
+
     /** @param array<string,mixed> $record */
     private function renderCleanedDocument(array $record, string $body): string
     {
@@ -892,8 +1330,10 @@ SQL);
         $exclusions = $this->readJsonLines($this->root.'/exclusion_audit.jsonl');
         $near = $this->readJsonLines($this->root.'/near_duplicate_review.jsonl');
         $sourcePaths = [];
-        foreach ([...$manifest, ...$duplicates, ...$exclusions] as $record) {
+        $sourceHashes = [];
+        foreach ([...$manifest, ...$exclusions, ...$duplicates] as $record) {
             $sourcePaths[$record['source_file_path']] = true;
+            $sourceHashes[$record['source_file_path']] ??= $record['source_file_hash'];
         }
         foreach ($near as $record) {
             foreach ($record['source_file_paths'] as $path) {
@@ -905,11 +1345,16 @@ SQL);
             static fn (string $path): bool => strtolower((string) pathinfo($path, PATHINFO_EXTENSION)) === 'md',
         ));
         $txtMirrorCount = count($sourcePaths) - $canonicalSourceCount;
+        ksort($sourceHashes, SORT_STRING);
+        $computedSourceSetHash = hash('sha256', json_encode(
+            $sourceHashes,
+            JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE,
+        ));
         $summary = [
             'schema_version' => 1,
             'brand_key' => 'lightinthebox',
             'site_key' => 'lightinthebox-main',
-            'source_set_hash' => $sourceSetHash ?? hash('sha256', 'fixture source set'),
+            'source_set_hash' => $sourceSetHash ?? $computedSourceSetHash,
             'counts' => [
                 'canonical_source_files' => $canonicalSourceCount,
                 'txt_mirror_files' => $txtMirrorCount,

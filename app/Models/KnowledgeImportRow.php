@@ -20,6 +20,9 @@ class KnowledgeImportRow extends Model
         'duplicate_score',
         'duplicate_reason',
         'error_message',
+        'dispatch_claim_token',
+        'dispatch_claimed_at',
+        'dispatch_attempt_count',
         'rollback_metadata',
     ];
 
@@ -33,6 +36,8 @@ class KnowledgeImportRow extends Model
             'staged_payload' => 'array',
             'canonical_document_id' => 'integer',
             'duplicate_score' => 'decimal:4',
+            'dispatch_claimed_at' => 'datetime',
+            'dispatch_attempt_count' => 'integer',
             'rollback_metadata' => 'array',
         ];
     }

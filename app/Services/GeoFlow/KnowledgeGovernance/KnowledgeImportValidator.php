@@ -123,7 +123,8 @@ final class KnowledgeImportValidator
         foreach ($manifest as $record) {
             $this->addIdentity($targets, $paths, $record, true, 'manifest');
         }
-        $this->validateDuplicates($duplicates, $targets);
+        $this->validateNearReviews($nearReviews, $targets, $paths);
+        $this->validateDuplicates($duplicates, $targets, $paths);
         $this->validateKeywordTargets($manifest, $keywordLibraryId);
         $artifactBytes = [
             'manifest.jsonl' => $manifestBytes,
@@ -131,6 +132,7 @@ final class KnowledgeImportValidator
             'exclusion_audit.jsonl' => $exclusionBytes,
             'near_duplicate_review.jsonl' => $nearReviewBytes,
         ];
+        $computedSourceSetHash = $this->sourceSetHash($manifest, $duplicates, $exclusions);
         $sourceSetHash = $this->validateSummary(
             $root,
             $artifactBytes,
@@ -138,6 +140,7 @@ final class KnowledgeImportValidator
             $duplicates,
             $exclusions,
             $nearReviews,
+            $computedSourceSetHash,
         );
         $this->preflightDatabase($manifest);
         $artifactHashes = [
@@ -304,7 +307,7 @@ final class KnowledgeImportValidator
 
     /**
      * @param  list<array<string,mixed>>  $records
-     * @return array{array<string,array{path:string,hash:string,formal:bool}>,array<string,string>}
+     * @return array{array<string,array{path:string,hash:string,source_hash:string,canonical_key:string,directory:?string,formal:bool}>,array<string,string>}
      */
     private function validateExclusions(array $records): array
     {
@@ -359,9 +362,10 @@ final class KnowledgeImportValidator
     }
 
     /** @param list<array<string,mixed>> $records
-     * @param  array<string,array{path:string,hash:string,formal:bool}>  $targets
+     * @param  array<string,array{path:string,hash:string,source_hash:string,canonical_key:string,directory:?string,formal:bool}>  $targets
+     * @param  array<string,string>  $paths
      */
-    private function validateDuplicates(array $records, array $targets): void
+    private function validateDuplicates(array $records, array $targets, array $paths): void
     {
         $sourcePaths = [];
         foreach ($records as $index => $record) {
@@ -382,6 +386,20 @@ final class KnowledgeImportValidator
             }
             $sourcePaths[$record['source_file_path']] = true;
 
+            $sourceIdentityId = $paths[$record['source_file_path']] ?? null;
+            if ($sourceIdentityId !== null) {
+                $sourceIdentity = $targets[$sourceIdentityId];
+                if ($sourceIdentity['formal']) {
+                    throw new RuntimeException("governed_import.duplicate_row_{$row}.source_reuses_manifest");
+                }
+                if (
+                    ! hash_equals($sourceIdentity['source_hash'], (string) $record['source_file_hash'])
+                    || ! hash_equals($sourceIdentity['hash'], (string) $record['normalized_content_hash'])
+                ) {
+                    throw new RuntimeException("governed_import.duplicate_row_{$row}.source_identity_mismatch");
+                }
+            }
+
             $hasTargetId = $this->nonEmptyString($record['duplicate_of_document_id'] ?? null);
             $hasTargetPath = $this->nonEmptyString($record['duplicate_of_source_file_path'] ?? null);
             if ($hasTargetId !== $hasTargetPath || ($record['kind'] !== 'txt_mirror_excluded' && ! $hasTargetId)) {
@@ -390,6 +408,9 @@ final class KnowledgeImportValidator
             if ($hasTargetId) {
                 $targetId = (string) $record['duplicate_of_document_id'];
                 $targetPath = (string) $record['duplicate_of_source_file_path'];
+                if ($record['source_file_path'] === $targetPath || $sourceIdentityId === $targetId) {
+                    throw new RuntimeException("governed_import.duplicate_row_{$row}.self_target");
+                }
                 $target = $targets[$targetId] ?? null;
                 if ($target === null || $target['path'] !== $targetPath) {
                     throw new RuntimeException("governed_import.duplicate_row_{$row}.target_invalid");
@@ -405,6 +426,73 @@ final class KnowledgeImportValidator
                 if ($record['similarity'] < 0 || $record['similarity'] > 1) {
                     throw new RuntimeException("governed_import.duplicate_row_{$row}.similarity_invalid");
                 }
+            }
+        }
+    }
+
+    /**
+     * @param  list<array<string,mixed>>  $records
+     * @param  array<string,array{path:string,hash:string,source_hash:string,canonical_key:string,directory:?string,formal:bool}>  $targets
+     * @param  array<string,string>  $paths
+     */
+    private function validateNearReviews(array $records, array $targets, array $paths): void
+    {
+        $pairs = [];
+        foreach ($records as $index => $record) {
+            $row = $index + 1;
+            $required = ['kind', 'action', 'source_file_paths', 'reason', 'similarity'];
+            $this->requireFields($record, $required, "near review row {$row}");
+            if (array_diff(array_keys($record), $required) !== []) {
+                throw new RuntimeException("governed_import.near_review_row_{$row}.field_invalid");
+            }
+            if (
+                ($record['kind'] ?? null) !== 'near'
+                || ($record['action'] ?? null) !== 'review'
+                || ! in_array($record['reason'] ?? null, [
+                    'near_duplicate_requires_review',
+                    'strict_subset_canonical_lacks_content',
+                ], true)
+                || (! is_int($record['similarity'] ?? null) && ! is_float($record['similarity'] ?? null))
+                || ! is_finite((float) $record['similarity'])
+                || $record['similarity'] < 0.92
+                || $record['similarity'] > 1
+            ) {
+                throw new RuntimeException("governed_import.near_review_row_{$row}.resolution_invalid");
+            }
+            $sourcePaths = $record['source_file_paths'] ?? null;
+            if (! is_array($sourcePaths) || ! array_is_list($sourcePaths) || count($sourcePaths) !== 2) {
+                throw new RuntimeException("governed_import.near_review_row_{$row}.paths_invalid");
+            }
+            foreach ($sourcePaths as $sourcePath) {
+                if (! $this->nonEmptyString($sourcePath)) {
+                    throw new RuntimeException("governed_import.near_review_row_{$row}.paths_invalid");
+                }
+            }
+            $sortedPaths = $sourcePaths;
+            sort($sortedPaths, SORT_STRING);
+            if ($sourcePaths !== $sortedPaths || $sourcePaths[0] === $sourcePaths[1]) {
+                throw new RuntimeException("governed_import.near_review_row_{$row}.paths_invalid");
+            }
+            $pairKey = implode("\0", $sourcePaths);
+            if (isset($pairs[$pairKey])) {
+                throw new RuntimeException("governed_import.near_review_row_{$row}.pair_not_unique");
+            }
+            $pairs[$pairKey] = true;
+
+            $firstId = $paths[$sourcePaths[0]] ?? null;
+            $secondId = $paths[$sourcePaths[1]] ?? null;
+            $first = $firstId === null ? null : $targets[$firstId];
+            $second = $secondId === null ? null : $targets[$secondId];
+            if (
+                $first === null
+                || $second === null
+                || ! $first['formal']
+                || ! $second['formal']
+                || $first['directory'] !== $second['directory']
+                || $first['canonical_key'] === $second['canonical_key']
+                || hash_equals($first['hash'], $second['hash'])
+            ) {
+                throw new RuntimeException("governed_import.near_review_row_{$row}.identity_scope_invalid");
             }
         }
     }
@@ -465,6 +553,7 @@ final class KnowledgeImportValidator
         array $duplicates,
         array $exclusions,
         array $nearReviews,
+        string $computedSourceSetHash,
     ): string {
         $path = $this->regularFile($root.'/run_summary.json', 'run_summary');
         try {
@@ -480,6 +569,9 @@ final class KnowledgeImportValidator
         }
         $sourceSetHash = $summary['source_set_hash'] ?? null;
         $this->requireHash($sourceSetHash, 'run_summary source_set_hash');
+        if (! hash_equals($computedSourceSetHash, $sourceSetHash)) {
+            throw new RuntimeException('governed_import.run_summary_source_set_hash_mismatch');
+        }
         foreach (self::SUMMARY_VALIDATIONS as $validation) {
             if (($summary['validation'][$validation] ?? null) !== true) {
                 throw new RuntimeException("governed_import.run_summary_validation_failed.{$validation}");
@@ -528,6 +620,26 @@ final class KnowledgeImportValidator
         }
 
         return $sourceSetHash;
+    }
+
+    /**
+     * @param  list<array<string,mixed>>  $manifest
+     * @param  list<array<string,mixed>>  $duplicates
+     * @param  list<array<string,mixed>>  $exclusions
+     */
+    private function sourceSetHash(array $manifest, array $duplicates, array $exclusions): string
+    {
+        $mapping = [];
+        foreach ([...$manifest, ...$exclusions, ...$duplicates] as $record) {
+            $path = (string) $record['source_file_path'];
+            $mapping[$path] ??= (string) $record['source_file_hash'];
+        }
+        ksort($mapping, SORT_STRING);
+
+        return hash('sha256', json_encode(
+            $mapping,
+            JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE,
+        ));
     }
 
     /**
@@ -605,10 +717,13 @@ final class KnowledgeImportValidator
             ->where('key', self::SITE_KEY)
             ->first(['id']);
         foreach ($manifest as $record) {
+            if ($record['lifecycle_status'] !== 'active') {
+                continue;
+            }
             $hashConflict = KnowledgeBase::query()
                 ->where('brand_id', $brand->id)
                 ->where('lifecycle_status', 'active')
-                ->where('asset_key', '!=', $record['asset_key'])
+                ->whereNotIn('asset_key', $assets)
                 ->where('language_code', $record['language_code'])
                 ->where('normalized_content_hash', $record['normalized_content_hash'])
                 ->exists();
@@ -616,7 +731,7 @@ final class KnowledgeImportValidator
                 ->where('brand_id', $brand->id)
                 ->where('site_id', $site->id)
                 ->where('lifecycle_status', 'active')
-                ->where('asset_key', '!=', $record['asset_key'])
+                ->whereNotIn('asset_key', $assets)
                 ->where('canonical_document_key', $record['canonical_document_key'])
                 ->exists();
             if ($hashConflict || $canonicalConflict) {
@@ -626,7 +741,7 @@ final class KnowledgeImportValidator
     }
 
     /**
-     * @param  array<string,array{path:string,hash:string,formal:bool}>  $targets
+     * @param  array<string,array{path:string,hash:string,source_hash:string,canonical_key:string,directory:?string,formal:bool}>  $targets
      * @param  array<string,string>  $paths
      * @param  array<string,mixed>  $record
      */
@@ -640,6 +755,9 @@ final class KnowledgeImportValidator
         $targets[$id] = [
             'path' => $path,
             'hash' => (string) $record['normalized_content_hash'],
+            'source_hash' => (string) $record['source_file_hash'],
+            'canonical_key' => (string) $record['canonical_document_key'],
+            'directory' => $formal ? (string) $record['directory_path'] : null,
             'formal' => $formal,
         ];
         $paths[$path] = $id;
