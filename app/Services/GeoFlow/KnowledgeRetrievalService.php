@@ -572,15 +572,44 @@ class KnowledgeRetrievalService
                 continue;
             }
 
-            $winner = $group[0];
-            foreach (array_slice($group, 1) as $candidate) {
-                if ($this->compareRankedEvidence($candidate, $winner) < 0) {
-                    $winner = $candidate;
+            $documents = [];
+            foreach ($group as $candidate) {
+                $metadata = is_array($candidate['metadata'] ?? null) ? $candidate['metadata'] : [];
+                $documents[(int) ($metadata['knowledge_base_id'] ?? 0)][] = $candidate;
+            }
+
+            $winningDocumentId = array_key_first($documents);
+            $winningRepresentative = null;
+            foreach ($documents as $knowledgeBaseId => $candidates) {
+                $representative = $candidates[0];
+                foreach (array_slice($candidates, 1) as $candidate) {
+                    if ($this->compareRankedEvidence($candidate, $representative) < 0) {
+                        $representative = $candidate;
+                    }
+                }
+
+                if ($winningRepresentative === null || $this->compareRankedEvidence($representative, $winningRepresentative) < 0) {
+                    $winningDocumentId = $knowledgeBaseId;
+                    $winningRepresentative = $representative;
                 }
             }
 
-            $winner['conflict_merged_count'] = count($group) - 1;
-            $resolved[] = $winner;
+            $winningCandidates = $documents[$winningDocumentId] ?? [];
+            $mergedCount = count($group) - count($winningCandidates);
+            $seenChunks = [];
+            foreach ($winningCandidates as $candidate) {
+                $chunkIdentity = sha1(implode('|', [
+                    (string) ($candidate['chunk_title'] ?? ''),
+                    (string) ($candidate['section_path'] ?? ''),
+                    (string) ($candidate['content'] ?? ''),
+                ]));
+                if (isset($seenChunks[$chunkIdentity])) {
+                    continue;
+                }
+                $seenChunks[$chunkIdentity] = true;
+                $candidate['conflict_merged_count'] = $mergedCount;
+                $resolved[] = $candidate;
+            }
         }
 
         return $resolved;

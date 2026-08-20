@@ -438,11 +438,77 @@ final class KnowledgeRetrievalIsolationTest extends TestCase
         $this->assertSame(1, $evidence[0]['conflict_merged_count'] ?? null);
     }
 
+    public function test_canonical_version_resolution_keeps_all_relevant_chunks_from_the_winning_policy_document(): void
+    {
+        $ownership = $this->createOwnership('canonical-version-siblings-brand');
+        $researchDirectory = KnowledgeDirectory::query()->create([
+            'brand_id' => $ownership['brand']->id,
+            'key' => 'research-reference',
+            'path' => 'research-reference',
+            'name' => 'Research reference',
+        ]);
+        $policy = $this->createDocument($ownership, [
+            'name' => 'Returns guidance',
+            'content' => 'Official returns policy covers the return window.',
+            'canonical_document_key' => 'returns-guidance-siblings',
+            'effective_date' => '2025-01-01',
+        ]);
+        KnowledgeChunk::query()->create([
+            'knowledge_base_id' => $policy->id,
+            'chunk_index' => 1,
+            'content' => 'Official returns policy also covers refund processing.',
+            'content_hash' => hash('sha256', 'returns-guidance-policy-sibling'),
+            'chunk_title' => 'Returns guidance',
+            'section_path' => 'Returns guidance',
+            'metadata_json' => '{}',
+            'embedding_json' => '[]',
+        ]);
+        $research = $this->createDocument($ownership, [
+            'name' => 'Returns guidance',
+            'content' => 'Newer market research discusses returns and refunds.',
+            'canonical_document_key' => 'returns-guidance-siblings',
+            'primary_directory_id' => $researchDirectory->id,
+            'authority_level' => 'mixed_research',
+            'effective_date' => '2026-08-01',
+        ]);
+
+        $evidence = app(KnowledgeRetrievalService::class)->retrieveEvidenceFromMany(
+            $ownership['scope'],
+            [(int) $research->id, (int) $policy->id],
+            'returns policy refund',
+            5,
+        );
+
+        $this->assertCount(2, $evidence);
+        $this->assertSame([(int) $policy->id, (int) $policy->id], collect($evidence)->pluck('metadata.knowledge_base_id')->all());
+        $this->assertSame([1, 0], collect($evidence)->pluck('chunk_index')->all());
+        $this->assertSame(['K1', 'K2'], collect($evidence)->pluck('citation_id')->all());
+        $this->assertStringNotContainsString('Newer market research', json_encode($evidence, JSON_THROW_ON_ERROR));
+    }
+
     public function test_scope_trims_and_canonicalizes_bcp47_compatible_language_tags(): void
     {
         $scope = new KnowledgeScope(10, 20, '  ZH_hANS_cn  ');
 
         $this->assertSame('zh-Hans-CN', $scope->languageCode);
+    }
+
+    #[DataProvider('languageTagsWithExtensions')]
+    public function test_scope_canonicalizes_bcp47_extensions_and_private_use_contextually(string $input, string $expected): void
+    {
+        $scope = new KnowledgeScope(10, 20, $input);
+
+        $this->assertSame($expected, $scope->languageCode);
+    }
+
+    /** @return iterable<string,array{string,string}> */
+    public static function languageTagsWithExtensions(): iterable
+    {
+        yield 'unicode extension' => [' EN-U-CA-GREGORY ', 'en-u-ca-gregory'];
+        yield 'script region and extension' => ['zh-hant-cn-U-NU-HANIDEC', 'zh-Hant-CN-u-nu-hanidec'];
+        yield 'language private use' => ['en-X-Internal-42', 'en-x-internal-42'];
+        yield 'private use only' => ['X-Internal-42', 'x-internal-42'];
+        yield 'multiple extensions' => ['de-A-FOO-U-CA-GREGORY', 'de-a-foo-u-ca-gregory'];
     }
 
     #[DataProvider('invalidLanguageTags')]
@@ -463,6 +529,13 @@ final class KnowledgeRetrievalIsolationTest extends TestCase
         yield 'invalid punctuation' => ['en-@US'];
         yield 'numeric primary language' => ['123-US'];
         yield 'overlong subtag' => ['en-abcdefghi'];
+        yield 'incomplete unicode extension' => ['en-u'];
+        yield 'incomplete generic extension' => ['en-a'];
+        yield 'extension without payload before private use' => ['en-u-x-private'];
+        yield 'extension without payload before another extension' => ['en-u-a-foo'];
+        yield 'incomplete language private use' => ['en-x'];
+        yield 'incomplete private use only' => ['x'];
+        yield 'duplicate extension singleton' => ['en-u-ca-u-nu'];
     }
 
     /**

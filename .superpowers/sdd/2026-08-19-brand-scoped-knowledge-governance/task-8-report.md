@@ -87,3 +87,39 @@
 
 - The existing SQLite/pgvector caveat remains unchanged; no formal database import, corpus mutation or external write was performed.
 - Unrelated pre-existing preset seeding, Docker Compose and `HANDOFF.md` changes remain outside this review-fix scope.
+
+## Review fix round 2
+
+### Changed files
+
+- `app/Services/GeoFlow/KnowledgeGovernance/KnowledgeScope.php`
+- `app/Services/GeoFlow/KnowledgeRetrievalService.php`
+- `tests/Feature/KnowledgeRetrievalIsolationTest.php`
+- `.superpowers/sdd/2026-08-19-brand-scoped-knowledge-governance/task-8-report.md`
+
+### Before / RED evidence
+
+- The sibling-chunk and language-boundary regressions initially produced 11 failures with 20 passing tests and 76 assertions.
+- When a two-chunk policy document competed with one newer research version, conflict resolution returned only one policy chunk instead of retaining both relevant chunks from the winning document.
+- Extension payloads such as `ca`/`nu` were incorrectly region-cased, private-use-only tags were rejected, and incomplete or duplicate extension singletons were accepted.
+
+### Implementation
+
+- Conflict resolution now groups candidates by document record, compares each document through its strongest representative with the governance-first ranking policy, and retains every distinct relevant chunk belonging to the winning document.
+- Exact duplicate winning chunks are suppressed by title, section and content identity. The retained candidates continue through the existing global comparator, preserving deterministic score/chunk rank and citation ordering.
+- Language normalization now parses primary language, extlang, script, region, variants, extensions and private-use in context. Extension/private-use subtags normalize lowercase, while script and region retain the stored title/uppercase convention.
+- Incomplete singletons, missing private-use payloads, duplicate extension singleton keys and malformed extension transitions fail closed.
+
+### Verification
+
+- Focused retrieval suite: 39 tests and 109 assertions passed.
+- Retrieval, article assistant, worker, task and content-generation regression suites: 182 tests and 775 assertions passed.
+- Pint passed for the three review-owned PHP files.
+- PHP syntax checks passed for the three review-owned PHP files.
+- `git diff --check` passed.
+
+### Caveats
+
+- Neither PHP `intl`/`Locale` nor an installed BCP 47 normalization library is available in the app container, so `KnowledgeScope` implements the required project-compatible grammar directly.
+- The existing SQLite/pgvector caveat remains unchanged; no formal database import, corpus mutation or external write was performed.
+- Unrelated pre-existing preset seeding, Docker Compose and `HANDOFF.md` changes remain outside this review-fix scope.
