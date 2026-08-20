@@ -141,7 +141,15 @@ class CorpusBuilderTest(unittest.TestCase):
         self.assertEqual(4, len(manifest))
         self.assertEqual({"en"}, {record["language_code"] for record in manifest})
         self.assertEqual({"pt", "zh", "und"}, {record["language_code"] for record in exclusions})
-        self.assertEqual(4, len(exclusions))
+        # 3, not 4: the Portuguese MD canonical and its byte-identical TXT
+        # mirror must not each get their own exclusion_audit row -- the
+        # mirror is already accounted for once in duplicate_audit. See
+        # test_exact_duplicate_txt_mirror_of_non_english_markdown_gets_single_exclusion_row
+        # for the full regression coverage of this invariant.
+        self.assertEqual(3, len(exclusions))
+        self.assertEqual(
+            len(exclusions), len({record["document_id"] for record in exclusions})
+        )
         self.assertTrue(all(record["reason"] == "non_english_initial_corpus" for record in exclusions))
 
         self.assertEqual(2, len(duplicates))
@@ -204,7 +212,7 @@ class CorpusBuilderTest(unittest.TestCase):
         self.assertEqual(2, summary["counts"]["txt_mirror_files"])
         self.assertEqual(4, summary["counts"]["manifest_documents"])
         self.assertEqual(2, summary["counts"]["duplicate_records"])
-        self.assertEqual(4, summary["counts"]["excluded_sources"])
+        self.assertEqual(3, summary["counts"]["excluded_sources"])
         self.assertTrue(summary["validation"]["source_hashes_unchanged"])
         self.assertTrue(summary["validation"]["zero_active_exact_hash_duplicates"])
         self.assertTrue(summary["validation"]["valid_duplicate_targets"])
@@ -445,6 +453,79 @@ class CorpusBuilderTest(unittest.TestCase):
         self.assertEqual(target["source_file_path"], exact_orphan["duplicate_of_source_file_path"])
         self.assertEqual(target["document_id"], exact_orphan["duplicate_of_document_id"])
         self.assertTrue(orphan_paths.isdisjoint({record["source_file_path"] for record in manifest}))
+        self.assertTrue(summary["validation"]["valid_duplicate_targets"])
+
+    def test_exact_duplicate_txt_mirror_of_non_english_markdown_gets_single_exclusion_row(self):
+        # Regression test for the Task 11 dry-run failure against the real
+        # corpus: governed_import.exclusion_row_67.identity_collision. When a
+        # non-English MD canonical has a byte-identical TXT mirror,
+        # resolve_exact() drops the mirror from canonical_documents *before*
+        # _build_exclusion_audit runs. If _build_exclusion_audit is (bug)
+        # handed the pre-dedup `documents` list instead, it independently
+        # classifies and exclusion-audits both the MD and its already-dropped
+        # TXT mirror. Because document_id is content-addressed
+        # (brand, site, canonical_document_key, normalized_content_hash),
+        # the byte-identical MD and TXT rows collide on document_id, which
+        # violates the PHP importer's (document_id, source_file_path)
+        # uniqueness invariant across manifest.jsonl + exclusion_audit.jsonl.
+        fixture = self.make_governed_fixture()
+
+        summary = build_corpus(
+            self.source, self.output, brand="lightinthebox", site="lightinthebox-main",
+        )
+
+        manifest = self.jsonl(self.output, "manifest.jsonl")
+        duplicates = self.jsonl(self.output, "duplicate_audit.jsonl")
+        exclusions = self.jsonl(self.output, "exclusion_audit.jsonl")
+
+        portuguese_path = fixture["portuguese"].relative_to(self.source).as_posix()
+        portuguese_mirror_path = fixture["portuguese_mirror"].relative_to(self.source).as_posix()
+
+        # The MD canonical gets exactly one exclusion_audit row.
+        portuguese_exclusions = [
+            record for record in exclusions if record["source_file_path"] == portuguese_path
+        ]
+        self.assertEqual(1, len(portuguese_exclusions))
+        portuguese_exclusion = portuguese_exclusions[0]
+
+        # The TXT mirror does NOT get its own independent exclusion_audit row.
+        self.assertFalse(any(
+            record["source_file_path"] == portuguese_mirror_path for record in exclusions
+        ))
+
+        # No two exclusion rows may ever share a document_id: that is exactly
+        # the identity collision the PHP importer validator rejects.
+        exclusion_ids = [record["document_id"] for record in exclusions]
+        self.assertEqual(len(exclusion_ids), len(set(exclusion_ids)))
+
+        # The TXT mirror IS represented (once) in duplicate_audit, pointing at
+        # the MD as its target, and that target resolves to the MD's own
+        # exclusion row.
+        mirror_duplicates = [
+            record for record in duplicates
+            if record["source_file_path"] == portuguese_mirror_path
+        ]
+        self.assertEqual(1, len(mirror_duplicates))
+        mirror_duplicate = mirror_duplicates[0]
+        self.assertEqual(portuguese_path, mirror_duplicate["duplicate_of_source_file_path"])
+        self.assertEqual(
+            portuguese_exclusion["document_id"], mirror_duplicate["duplicate_of_document_id"]
+        )
+
+        # Every raw source file constructed for this scenario is accounted
+        # for in exactly one of manifest/duplicate_audit/exclusion_audit.
+        all_paths = (
+            [record["source_file_path"] for record in manifest]
+            + [record["source_file_path"] for record in duplicates]
+            + [record["source_file_path"] for record in exclusions]
+        )
+        self.assertEqual(1, all_paths.count(portuguese_path))
+        self.assertEqual(1, all_paths.count(portuguese_mirror_path))
+
+        # The builder's own internal-consistency invariant (every
+        # duplicate_audit target resolves against manifest+exclusions) must
+        # hold -- i.e. the artifact set is genuinely self-consistent, not
+        # just superficially row-counted.
         self.assertTrue(summary["validation"]["valid_duplicate_targets"])
 
     def test_newest_lifecycle_date_wins_across_retrieved_and_effective_fields(self):

@@ -115,7 +115,7 @@ def build_corpus(
         document for document in canonical_documents
         if document["source_kind"] == "canonical_md"
     ]
-    exclusions = _build_exclusion_audit(documents, brand, site)
+    exclusions = _build_exclusion_audit(canonical_documents, brand, site)
     exclusions.extend(
         _build_orphan_txt_exclusions(canonical_documents, documents, brand, site)
     )
