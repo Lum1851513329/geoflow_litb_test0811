@@ -14,6 +14,7 @@
         'es_ES' => 'es_ES',
     ];
     $vditorLang = $vditorLocaleMap[str_replace('-', '_', app()->getLocale())] ?? 'en_US';
+    $duplicateRows = $knowledgeBase->duplicateAuditRows->concat($knowledgeBase->canonicalDuplicateAuditRows);
 @endphp
 
 @push('styles')
@@ -72,6 +73,80 @@
                     <p class="mt-1 text-sm text-gray-600">{{ $knowledgeBase->name }}</p>
                 </div>
             </div>
+        </div>
+
+        <div class="bg-white shadow rounded-lg mb-6">
+            <div class="flex flex-col gap-3 border-b border-gray-200 px-6 py-4 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                    <h3 class="text-lg font-medium text-gray-900">{{ __('admin.knowledge_detail.governance_title') }}</h3>
+                    <p class="mt-1 text-sm text-gray-500">{{ __('admin.knowledge_detail.governance_desc') }}</p>
+                </div>
+                <div class="flex flex-wrap gap-2">
+                    @if (filled($knowledgeBase->version_label))
+                        <span class="inline-flex items-center rounded bg-indigo-50 px-2.5 py-1 text-xs font-medium text-indigo-700">
+                            {{ __('admin.knowledge_bases.badge_version', ['version' => $knowledgeBase->version_label]) }}
+                        </span>
+                    @endif
+                    @foreach ($duplicateRows->pluck('duplicate_kind')->filter()->unique() as $duplicateKind)
+                        <span class="inline-flex items-center rounded bg-rose-50 px-2.5 py-1 text-xs font-medium text-rose-700">
+                            {{ __('admin.knowledge_bases.badge_duplicate_'.$duplicateKind) }}
+                        </span>
+                    @endforeach
+                </div>
+            </div>
+            <dl class="grid grid-cols-1 gap-x-6 gap-y-5 px-6 py-6 sm:grid-cols-2 lg:grid-cols-4">
+                @foreach ([
+                    __('admin.knowledge_bases.field_brand') => $knowledgeBase->brand?->name,
+                    __('admin.knowledge_bases.field_site') => $knowledgeBase->site?->canonical_host,
+                    __('admin.knowledge_bases.field_directory') => $knowledgeBase->primaryDirectory?->path,
+                    __('admin.knowledge_bases.field_language') => $knowledgeBase->language_code,
+                    __('admin.knowledge_bases.field_authority') => $knowledgeBase->authority_level,
+                    __('admin.knowledge_bases.field_risk_level') => $knowledgeBase->risk_level,
+                    __('admin.knowledge_bases.field_review_status') => $knowledgeBase->review_status,
+                    __('admin.knowledge_bases.field_lifecycle') => $knowledgeBase->lifecycle_status,
+                    __('admin.knowledge_bases.field_source_name') => $knowledgeBase->source_name,
+                    __('admin.knowledge_bases.field_retrieved_at') => $knowledgeBase->retrieved_at?->format('Y-m-d'),
+                    __('admin.knowledge_bases.field_effective_date') => $knowledgeBase->effective_date?->format('Y-m-d'),
+                    __('admin.knowledge_bases.field_review_due_at') => $knowledgeBase->review_due_at?->format('Y-m-d'),
+                    __('admin.knowledge_bases.field_version') => $knowledgeBase->version_label,
+                    __('admin.knowledge_bases.field_generation_eligible') => $knowledgeBase->generation_eligible ? __('admin.common.yes') : __('admin.common.no'),
+                    __('admin.knowledge_bases.field_citation_required') => $knowledgeBase->citation_required ? __('admin.common.yes') : __('admin.common.no'),
+                    __('admin.knowledge_detail.keyword_links') => __('admin.knowledge_detail.keyword_link_counts', [
+                        'nodes' => (int) ($knowledgeBase->keyword_nodes_count ?? 0),
+                        'clusters' => (int) ($knowledgeBase->keyword_clusters_count ?? 0),
+                    ]),
+                ] as $label => $value)
+                    <div>
+                        <dt class="text-xs font-medium uppercase tracking-wide text-gray-500">{{ $label }}</dt>
+                        <dd class="mt-1 break-words text-sm font-medium text-gray-900">{{ filled($value) ? $value : '-' }}</dd>
+                    </div>
+                @endforeach
+                <div class="sm:col-span-2 lg:col-span-4">
+                    <dt class="text-xs font-medium uppercase tracking-wide text-gray-500">{{ __('admin.knowledge_bases.field_source_url') }}</dt>
+                    <dd class="mt-1 break-all text-sm font-medium text-gray-900">
+                        @if (filled($knowledgeBase->source_url))
+                            <a href="{{ $knowledgeBase->source_url }}" target="_blank" rel="noopener noreferrer" class="text-orange-700 hover:underline">{{ $knowledgeBase->source_url }}</a>
+                        @else
+                            -
+                        @endif
+                    </dd>
+                </div>
+            </dl>
+            @if ($duplicateRows->isNotEmpty())
+                <div class="border-t border-gray-200 px-6 py-5">
+                    <h4 class="text-sm font-semibold text-gray-900">{{ __('admin.knowledge_detail.duplicate_history') }}</h4>
+                    <div class="mt-3 space-y-2">
+                        @foreach ($duplicateRows as $duplicate)
+                            <div class="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-700">
+                                <span class="font-semibold">{{ __('admin.knowledge_bases.badge_duplicate_'.$duplicate->duplicate_kind) }}</span>
+                                @if (filled($duplicate->duplicate_reason))
+                                    <span> · {{ $duplicate->duplicate_reason }}</span>
+                                @endif
+                            </div>
+                        @endforeach
+                    </div>
+                </div>
+            @endif
         </div>
 
         <div class="bg-white shadow rounded-lg mb-6">

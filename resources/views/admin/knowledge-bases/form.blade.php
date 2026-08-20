@@ -9,6 +9,8 @@
     $selectClass = 'admin-knowledge-select h-11 w-full rounded-lg border border-gray-300 bg-white py-2.5 pl-3 pr-11 text-sm leading-6 shadow-sm transition focus:border-orange-500 focus:ring-orange-500';
     $textareaClass = 'w-full rounded-lg border border-gray-300 px-3 py-3 text-sm leading-6 shadow-sm transition focus:border-orange-500 focus:ring-orange-500';
     $sourceTypeOptions = [
+        'official_web_page' => __('admin.knowledge_bases.source_type_official_web_page'),
+        'compiled_report' => __('admin.knowledge_bases.source_type_compiled_report'),
         'document' => __('admin.knowledge_bases.source_type_document'),
         'website' => __('admin.knowledge_bases.source_type_website'),
         'business' => __('admin.knowledge_bases.source_type_business'),
@@ -23,6 +25,16 @@
     $reviewStatusOptions = [
         'unreviewed' => __('admin.knowledge_bases.review_status_unreviewed'),
         'reviewed' => __('admin.knowledge_bases.review_status_reviewed'),
+    ];
+    $authorityOptions = [
+        'first_party' => __('admin.knowledge_bases.authority_first_party'),
+        'regulatory_filing' => __('admin.knowledge_bases.authority_regulatory_filing'),
+        'mixed_research' => __('admin.knowledge_bases.authority_mixed_research'),
+        'third_party' => __('admin.knowledge_bases.authority_third_party'),
+    ];
+    $lifecycleOptions = [
+        'active' => __('admin.knowledge_bases.lifecycle_active'),
+        'superseded' => __('admin.knowledge_bases.lifecycle_superseded'),
     ];
 @endphp
 
@@ -86,6 +98,91 @@
                 @method('PUT')
             @endif
 
+            <div class="bg-white shadow rounded-lg" data-governance-ownership-panel>
+                <div class="border-b border-gray-200 px-6 py-5">
+                    <h2 class="text-lg font-semibold text-gray-900">{{ __('admin.knowledge_bases.governance_form_title') }}</h2>
+                    <p class="mt-1 text-sm text-gray-600">{{ __('admin.knowledge_bases.governance_form_desc') }}</p>
+                </div>
+                <div class="grid grid-cols-1 gap-5 px-6 py-6 md:grid-cols-2 xl:grid-cols-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-2">{{ __('admin.knowledge_bases.field_brand') }} *</label>
+                        <select name="brand_id" required class="{{ $selectClass }}" data-knowledge-brand-select>
+                            <option value="">{{ __('admin.knowledge_bases.filter_all_brands') }}</option>
+                            @foreach ($brandOptions as $brand)
+                                <option value="{{ (int) $brand->id }}" @selected((int) old('brand_id', (int) ($knowledgeForm['brand_id'] ?? 0)) === (int) $brand->id)>{{ $brand->name }} ({{ $brand->key }})</option>
+                            @endforeach
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-2">{{ __('admin.knowledge_bases.field_site') }} *</label>
+                        <select name="site_id" required class="{{ $selectClass }}" data-knowledge-site-select>
+                            <option value="">{{ __('admin.knowledge_bases.filter_all_sites') }}</option>
+                            @foreach ($siteOptions as $site)
+                                <option value="{{ (int) $site->id }}" data-brand-id="{{ (int) $site->brand_id }}" @selected((int) old('site_id', (int) ($knowledgeForm['site_id'] ?? 0)) === (int) $site->id)>{{ $site->canonical_host }} ({{ $site->key }})</option>
+                            @endforeach
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-2">{{ __('admin.knowledge_bases.field_directory') }} *</label>
+                        <select name="primary_directory_id" required class="{{ $selectClass }}" data-knowledge-directory-select>
+                            <option value="">{{ __('admin.knowledge_bases.filter_all_directories') }}</option>
+                            @foreach ($directoryOptions as $directory)
+                                <option value="{{ (int) $directory->id }}" data-brand-id="{{ (int) $directory->brand_id }}" @selected((int) old('primary_directory_id', (int) ($knowledgeForm['primary_directory_id'] ?? 0)) === (int) $directory->id)>{{ $directory->name }} · {{ $directory->path }}</option>
+                            @endforeach
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-2">{{ __('admin.knowledge_bases.field_language') }} *</label>
+                        <input type="text" name="language_code" required maxlength="35" value="{{ old('language_code', (string) ($knowledgeForm['language_code'] ?? 'en')) }}" class="{{ $fieldClass }}" placeholder="en">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-2">{{ __('admin.knowledge_bases.field_authority') }} *</label>
+                        <select name="authority_level" required class="{{ $selectClass }}">
+                            @foreach ($authorityOptions as $value => $label)
+                                <option value="{{ $value }}" @selected(old('authority_level', (string) ($knowledgeForm['authority_level'] ?? 'first_party')) === $value)>{{ $label }}</option>
+                            @endforeach
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-2">{{ __('admin.knowledge_bases.field_lifecycle') }} *</label>
+                        <select name="lifecycle_status" required class="{{ $selectClass }}">
+                            @foreach ($lifecycleOptions as $value => $label)
+                                <option value="{{ $value }}" @selected(old('lifecycle_status', (string) ($knowledgeForm['lifecycle_status'] ?? 'active')) === $value)>{{ $label }}</option>
+                            @endforeach
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-2">{{ __('admin.knowledge_bases.field_retrieved_at') }}</label>
+                        <input type="date" name="retrieved_at" value="{{ old('retrieved_at', (string) ($knowledgeForm['retrieved_at'] ?? '')) }}" class="{{ $fieldClass }}">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-2">{{ __('admin.knowledge_bases.field_review_due_at') }}</label>
+                        <input type="date" name="review_due_at" value="{{ old('review_due_at', (string) ($knowledgeForm['review_due_at'] ?? '')) }}" class="{{ $fieldClass }}">
+                    </div>
+                    <div class="md:col-span-2">
+                        <label class="block text-sm font-medium text-gray-700 mb-2">{{ __('admin.knowledge_bases.field_canonical_key') }}</label>
+                        <input type="text" name="canonical_document_key" maxlength="190" value="{{ old('canonical_document_key', (string) ($knowledgeForm['canonical_document_key'] ?? '')) }}" class="{{ $fieldClass }}" placeholder="url:https://example.com/page">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-2">{{ __('admin.knowledge_bases.field_version') }}</label>
+                        <input type="text" name="version_label" maxlength="100" value="{{ old('version_label', (string) ($knowledgeForm['version_label'] ?? '')) }}" class="{{ $fieldClass }}" placeholder="v1">
+                    </div>
+                    <div class="flex flex-wrap items-center gap-5 pt-7">
+                        <label class="inline-flex items-center gap-2 text-sm text-gray-700">
+                            <input type="hidden" name="generation_eligible" value="0">
+                            <input type="checkbox" name="generation_eligible" value="1" class="rounded border-gray-300 text-orange-600 focus:ring-orange-500" @checked((bool) old('generation_eligible', (bool) ($knowledgeForm['generation_eligible'] ?? false)))>
+                            {{ __('admin.knowledge_bases.field_generation_eligible') }}
+                        </label>
+                        <label class="inline-flex items-center gap-2 text-sm text-gray-700">
+                            <input type="hidden" name="citation_required" value="0">
+                            <input type="checkbox" name="citation_required" value="1" class="rounded border-gray-300 text-orange-600 focus:ring-orange-500" @checked((bool) old('citation_required', (bool) ($knowledgeForm['citation_required'] ?? true)))>
+                            {{ __('admin.knowledge_bases.field_citation_required') }}
+                        </label>
+                    </div>
+                    <p class="text-xs leading-5 text-amber-700 md:col-span-2 xl:col-span-4">{{ __('admin.knowledge_bases.policy_eligibility_hint') }}</p>
+                </div>
+            </div>
+
             @if ($isEdit)
                 <div class="bg-white shadow rounded-lg">
                     <div class="px-6 py-6 space-y-6">
@@ -111,15 +208,15 @@
                             <div class="mt-4 grid grid-cols-1 gap-5 lg:grid-cols-2">
                                 <div>
                                     <label class="block text-sm font-medium text-gray-700 mb-2">{{ __('admin.knowledge_bases.field_source_name') }}</label>
-                                    <input type="text" name="source_name" value="{{ old('source_name', (string) ($knowledgeForm['source_name'] ?? '')) }}" class="{{ $fieldClass }}" placeholder="{{ __('admin.knowledge_bases.placeholder_source_name') }}">
+                                    <input type="text" name="source_name" required value="{{ old('source_name', (string) ($knowledgeForm['source_name'] ?? '')) }}" class="{{ $fieldClass }}" placeholder="{{ __('admin.knowledge_bases.placeholder_source_name') }}">
                                 </div>
                                 <div>
                                     <label class="block text-sm font-medium text-gray-700 mb-2">{{ __('admin.knowledge_bases.field_source_url') }}</label>
-                                    <input type="text" name="source_url" value="{{ old('source_url', (string) ($knowledgeForm['source_url'] ?? '')) }}" class="{{ $fieldClass }}" placeholder="{{ __('admin.knowledge_bases.placeholder_source_url') }}">
+                                    <input type="url" name="source_url" value="{{ old('source_url', (string) ($knowledgeForm['source_url'] ?? '')) }}" class="{{ $fieldClass }}" placeholder="{{ __('admin.knowledge_bases.placeholder_source_url') }}">
                                 </div>
                                 <div>
                                     <label class="block text-sm font-medium text-gray-700 mb-2">{{ __('admin.knowledge_bases.field_source_type') }}</label>
-                                    <select name="source_type" class="{{ $selectClass }}">
+                                    <select name="source_type" required class="{{ $selectClass }}">
                                         @foreach ($sourceTypeOptions as $value => $label)
                                             <option value="{{ $value }}" @selected(old('source_type', (string) ($knowledgeForm['source_type'] ?? 'document')) === $value)>{{ $label }}</option>
                                         @endforeach
@@ -202,15 +299,15 @@
                                     <div class="grid grid-cols-1 gap-5 border-t border-gray-200 bg-white px-4 py-4 lg:grid-cols-3">
                                         <div>
                                             <label class="block text-sm font-medium text-gray-700 mb-2">{{ __('admin.knowledge_bases.field_source_name') }}</label>
-                                            <input type="text" name="source_name" value="{{ old('source_name', (string) ($knowledgeForm['source_name'] ?? '')) }}" class="{{ $fieldClass }}" placeholder="{{ __('admin.knowledge_bases.placeholder_source_name') }}">
+                                            <input type="text" name="source_name" required value="{{ old('source_name', (string) ($knowledgeForm['source_name'] ?? '')) }}" class="{{ $fieldClass }}" placeholder="{{ __('admin.knowledge_bases.placeholder_source_name') }}">
                                         </div>
                                         <div>
                                             <label class="block text-sm font-medium text-gray-700 mb-2">{{ __('admin.knowledge_bases.field_source_url') }}</label>
-                                            <input type="text" name="source_url" value="{{ old('source_url', (string) ($knowledgeForm['source_url'] ?? '')) }}" class="{{ $fieldClass }}" placeholder="{{ __('admin.knowledge_bases.placeholder_source_url') }}">
+                                            <input type="url" name="source_url" value="{{ old('source_url', (string) ($knowledgeForm['source_url'] ?? '')) }}" class="{{ $fieldClass }}" placeholder="{{ __('admin.knowledge_bases.placeholder_source_url') }}">
                                         </div>
                                         <div>
                                             <label class="block text-sm font-medium text-gray-700 mb-2">{{ __('admin.knowledge_bases.field_source_type') }}</label>
-                                            <select name="source_type" class="{{ $selectClass }}">
+                                            <select name="source_type" required class="{{ $selectClass }}">
                                                 @foreach ($sourceTypeOptions as $value => $label)
                                                     <option value="{{ $value }}" @selected(old('source_type', (string) ($knowledgeForm['source_type'] ?? 'document')) === $value)>{{ $label }}</option>
                                                 @endforeach
@@ -360,6 +457,41 @@
         </form>
     </div>
 @endsection
+
+@push('scripts')
+    <script>
+        document.addEventListener('DOMContentLoaded', function () {
+            const brandSelect = document.querySelector('[data-knowledge-brand-select]');
+            const dependentSelects = [
+                document.querySelector('[data-knowledge-site-select]'),
+                document.querySelector('[data-knowledge-directory-select]'),
+            ].filter(Boolean);
+            if (!brandSelect) {
+                return;
+            }
+
+            const refreshOwnershipOptions = function () {
+                const brandId = brandSelect.value;
+                dependentSelects.forEach(function (select) {
+                    Array.from(select.options).forEach(function (option) {
+                        if (!option.dataset.brandId) {
+                            return;
+                        }
+                        const visible = brandId !== '' && option.dataset.brandId === brandId;
+                        option.hidden = !visible;
+                        option.disabled = !visible;
+                    });
+                    if (select.selectedOptions.length > 0 && select.selectedOptions[0].disabled) {
+                        select.value = '';
+                    }
+                });
+            };
+
+            brandSelect.addEventListener('change', refreshOwnershipOptions);
+            refreshOwnershipOptions();
+        });
+    </script>
+@endpush
 
 @if (! $isEdit)
     @push('scripts')
