@@ -92,20 +92,80 @@ final class ReconcileKnowledgeImportRowsDispatchColumnsTest extends TestCase
         ]));
         $this->assertTrue($this->hasIndex('knowledge_import_rows_dispatch_claim_index'));
 
-        // down() should also be idempotent: it drops what it finds, and a
-        // second call must not throw ("column doesn't exist").
+        // down() is intentionally a no-op (see the migration's own doc
+        // comment): it must not drop the columns/index, because in every
+        // normal environment those objects belong to
+        // 2026_08_19_000400...'s own up()/down() pair, not this
+        // migration's. Calling down() here must be silent and leave the
+        // schema untouched.
         $migration->down();
+
+        $this->assertTrue(Schema::hasColumns('knowledge_import_rows', [
+            'dispatch_claim_token',
+            'dispatch_claimed_at',
+            'dispatch_attempt_count',
+        ]));
+        $this->assertTrue($this->hasIndex('knowledge_import_rows_dispatch_claim_index'));
+    }
+
+    /**
+     * Regression test for the Critical review finding: a down() that
+     * dropped objects based on current existence (rather than being a
+     * true no-op) broke an ordinary migrate -> rollback cycle. When
+     * 2026_08_19_000400_harden_governed_knowledge_import_batches.php and
+     * this migration land in the same `migrate` batch (the normal case
+     * everywhere except the one already-drifted dev database),
+     * `migrate:rollback` reverses that batch in order: this migration's
+     * down() runs first, then 2026_08_19_000400...'s own down() -- which
+     * unconditionally drops the same index and columns (see its lines
+     * 38-45). If this migration's down() had already dropped them, that
+     * second call would fail with a Postgres "does not exist" error.
+     *
+     * This reproduces exactly that sequence and asserts it completes
+     * without throwing, and that the columns/index are gone afterward
+     * (dropped by 2026_08_19_000400...'s down(), the migration that
+     * actually owns them).
+     */
+    public function test_rolling_back_both_migrations_in_the_same_batch_does_not_collide(): void
+    {
+        $hardenMigration = require database_path(
+            'migrations/2026_08_19_000400_harden_governed_knowledge_import_batches.php',
+        );
+        $reconcileMigration = require database_path(
+            'migrations/2026_08_20_000100_reconcile_knowledge_import_rows_dispatch_columns.php',
+        );
+
+        // RefreshDatabase already ran the full migration set for this
+        // test, so 2026_08_19_000400...'s current content already created
+        // the columns/index -- it is NOT guarded/idempotent (that's the
+        // very drift this reconcile migration exists to patch elsewhere),
+        // so we must not call its up() a second time here. We only need
+        // to exercise the reconcile migration's up() (a no-op, since the
+        // columns/index already exist), matching the same `migrate`
+        // batch this pair would land in on a real fresh install.
+        $reconcileMigration->up();
+
+        $this->assertTrue(Schema::hasColumns('knowledge_import_rows', [
+            'dispatch_claim_token',
+            'dispatch_claimed_at',
+            'dispatch_attempt_count',
+        ]));
+        $this->assertTrue($this->hasIndex('knowledge_import_rows_dispatch_claim_index'));
+
+        // `migrate:rollback` reverses a batch in the order the
+        // migrations ran, i.e. this migration's down() first, then
+        // 2026_08_19_000400...'s down().
+        $reconcileMigration->down();
+        $hardenMigration->down();
 
         $this->assertFalse(Schema::hasColumn('knowledge_import_rows', 'dispatch_claim_token'));
         $this->assertFalse(Schema::hasColumn('knowledge_import_rows', 'dispatch_claimed_at'));
         $this->assertFalse(Schema::hasColumn('knowledge_import_rows', 'dispatch_attempt_count'));
         $this->assertFalse($this->hasIndex('knowledge_import_rows_dispatch_claim_index'));
 
-        $migration->down();
-
-        // Restore the columns so later assertions / teardown see the
-        // schema the rest of the suite expects.
-        $migration->up();
+        // Restore the schema so later assertions / teardown see the state
+        // the rest of the suite expects.
+        $hardenMigration->up();
 
         $this->assertTrue(Schema::hasColumns('knowledge_import_rows', [
             'dispatch_claim_token',
