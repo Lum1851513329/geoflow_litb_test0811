@@ -384,6 +384,18 @@ final class LegacyKnowledgeMigrationService
         return ['table' => $table, 'column' => $column, 'unique_other_columns' => $otherColumns];
     }
 
+    /**
+     * Merges this run's results into the batch's cumulative rollback ledger, keyed by legacy
+     * knowledge_base id, instead of overwriting it. A rerun that finds nothing left to migrate
+     * (mapped=[]/unmapped=[]) must never erase a prior run's real mapping — that mapping is the
+     * only durable record that a given legacy row was ever reassigned and deleted, per design
+     * doc §15 ("Preserve source and migration audit rows after rollback or deletion"). A row that
+     * is mapped in this or any prior run stays recorded as mapped even if a later run can no
+     * longer see it (because it's already been deleted).
+     *
+     * @param  list<array<string,mixed>>  $mappingReports
+     * @param  list<array<string,mixed>>  $unmapped
+     */
     private function persistRollbackMapping(int $batchId, array $mappingReports, array $unmapped): void
     {
         $batch = KnowledgeImportBatch::query()->whereKey($batchId)->lockForUpdate()->first();
@@ -392,11 +404,45 @@ final class LegacyKnowledgeMigrationService
         }
 
         $metadata = (array) $batch->rollback_metadata;
+        $existing = (array) ($metadata['legacy_reference_migration'] ?? []);
+
+        $mappedByLegacyId = $this->indexByLegacyId((array) ($existing['mapped'] ?? []));
+        foreach ($mappingReports as $entry) {
+            $mappedByLegacyId[$entry['legacy_knowledge_base_id']] = $entry;
+        }
+
+        $unmappedByLegacyId = $this->indexByLegacyId((array) ($existing['unmapped'] ?? []));
+        foreach ($unmapped as $entry) {
+            $unmappedByLegacyId[$entry['legacy_knowledge_base_id']] = $entry;
+        }
+        // A row that has been confidently mapped (this run or a prior one) is settled; an
+        // unmapped entry for the same id from an older run is stale and would only be
+        // misleading, so mapped status always takes precedence.
+        foreach ($mappedByLegacyId as $legacyId => $entry) {
+            unset($unmappedByLegacyId[$legacyId]);
+        }
+
         $metadata['legacy_reference_migration'] = [
             'migrated_at' => now()->toAtomString(),
-            'mapped' => $mappingReports,
-            'unmapped' => $unmapped,
+            'last_run_mapped' => $mappingReports,
+            'last_run_unmapped' => $unmapped,
+            'mapped' => array_values($mappedByLegacyId),
+            'unmapped' => array_values($unmappedByLegacyId),
         ];
         $batch->update(['rollback_metadata' => $metadata]);
+    }
+
+    /**
+     * @param  list<array<string,mixed>>  $entries
+     * @return array<int,array<string,mixed>>
+     */
+    private function indexByLegacyId(array $entries): array
+    {
+        $indexed = [];
+        foreach ($entries as $entry) {
+            $indexed[(int) $entry['legacy_knowledge_base_id']] = $entry;
+        }
+
+        return $indexed;
     }
 }

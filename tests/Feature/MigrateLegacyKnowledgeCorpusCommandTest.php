@@ -235,6 +235,18 @@ SQL);
 
         $this->assertDatabaseMissing('knowledge_bases', ['id' => $legacy->id]);
         $this->assertDatabaseCount('knowledge_bases', 1);
+
+        // The second run finds nothing left to migrate (the legacy row is already gone), but
+        // that empty result must never erase the first run's real mapping — it's the only
+        // durable record that row $legacy->id was ever reassigned and deleted.
+        $decoded = KnowledgeImportBatch::query()->whereKey($batch->id)->value('rollback_metadata');
+        $this->assertSame([], $decoded['legacy_reference_migration']['last_run_mapped']);
+        $this->assertCount(1, $decoded['legacy_reference_migration']['mapped']);
+        $this->assertSame(
+            (int) $legacy->id,
+            $decoded['legacy_reference_migration']['mapped'][0]['legacy_knowledge_base_id'],
+        );
+        $this->assertSame('deleted', $decoded['legacy_reference_migration']['mapped'][0]['action']);
     }
 
     /** @return array{KnowledgeImportBatch,KnowledgeBase,KnowledgeBase} */
