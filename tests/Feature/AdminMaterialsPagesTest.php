@@ -423,7 +423,7 @@ class AdminMaterialsPagesTest extends TestCase
 
         $this->assertDatabaseHas('knowledge_bases', [
             'name' => '已保存但切片失败',
-            'content' => "第一段内容。\n\n第二段内容。",
+            'content' => "第一段内容。\n\n第二段内容。\n",
         ]);
         $this->assertSame(0, KnowledgeBase::query()->where('name', '已保存但切片失败')->firstOrFail()->chunks()->count());
     }
@@ -504,8 +504,8 @@ class AdminMaterialsPagesTest extends TestCase
             'id' => (int) $knowledgeBase->id,
             'name' => '更新后的知识库',
             'description' => '更新说明',
-            'content' => '更新后的正文内容',
-            'normalized_content_hash' => hash('sha256', '更新后的正文内容'),
+            'content' => "更新后的正文内容\n",
+            'normalized_content_hash' => hash('sha256', "更新后的正文内容\n"),
         ]);
     }
 
@@ -546,7 +546,7 @@ class AdminMaterialsPagesTest extends TestCase
         $this->assertDatabaseHas('knowledge_bases', [
             'id' => (int) $knowledgeBase->id,
             'name' => '队列故障后已保存',
-            'content' => '新正文已经入库',
+            'content' => "新正文已经入库\n",
         ]);
     }
 

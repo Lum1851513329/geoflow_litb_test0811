@@ -13,7 +13,7 @@ use App\Models\KnowledgeDirectory;
 use App\Models\KnowledgeSite;
 use App\Models\Task;
 use App\Services\GeoFlow\KnowledgeChunkSyncCoordinator;
-use App\Services\GeoFlow\KnowledgeSourceParser;
+use App\Services\GeoFlow\KnowledgeGovernance\GovernedKnowledgeContentNormalizer;
 use App\Support\AdminWeb;
 use Illuminate\Database\Eloquent\Collection as EloquentCollection;
 use Illuminate\Database\UniqueConstraintViolationException;
@@ -42,7 +42,7 @@ class KnowledgeBaseController extends Controller
 
     public function __construct(
         private readonly KnowledgeChunkSyncCoordinator $chunkSyncCoordinator,
-        private readonly KnowledgeSourceParser $sourceParser,
+        private readonly GovernedKnowledgeContentNormalizer $contentNormalizer,
     ) {}
 
     /**
@@ -114,12 +114,6 @@ class KnowledgeBaseController extends Controller
      */
     public function updateFromDetail(Request $request, int $knowledgeBaseId): RedirectResponse
     {
-        $knowledgeBase = KnowledgeBase::query()
-            ->with(['brand:id', 'site:id,brand_id', 'primaryDirectory:id,brand_id'])
-            ->whereKey($knowledgeBaseId)
-            ->firstOrFail();
-        $this->assertGovernedOwnership($knowledgeBase);
-
         $payload = $request->validate([
             'name' => ['required', 'string', 'max:100'],
             'description' => ['nullable', 'string'],
@@ -133,33 +127,44 @@ class KnowledgeBaseController extends Controller
         $content = $this->normalizeKnowledgeText((string) $payload['content']);
         $this->assertKnowledgeContentSize($content);
         $normalizedContentHash = $this->normalizedContentHash($content);
-        $this->assertActiveContentHashAvailable(
-            (int) $knowledgeBase->brand_id,
-            (string) $knowledgeBase->language_code,
-            (string) $knowledgeBase->lifecycle_status,
-            $normalizedContentHash,
-            $knowledgeBaseId,
-        );
 
         try {
-            $knowledgeBase->update([
-                'name' => trim((string) $payload['name']),
-                'description' => trim((string) ($payload['description'] ?? '')),
-                'content' => $content,
-                'file_type' => (string) $payload['file_type'],
-                'character_count' => mb_strlen($content, 'UTF-8'),
-                'word_count' => mb_strlen(strip_tags($content), 'UTF-8'),
-                'normalized_content_hash' => $normalizedContentHash,
-                'asset_provenance' => $this->appendOperatorEditProvenance(
-                    $knowledgeBase,
-                    $request->user('admin'),
-                    'admin_detail_update',
-                ),
-            ]);
+            $knowledgeBase = DB::transaction(function () use ($request, $knowledgeBaseId, $payload, $content, $normalizedContentHash): KnowledgeBase {
+                $knowledgeBase = KnowledgeBase::query()
+                    ->with(['brand:id', 'site:id,brand_id', 'primaryDirectory:id,brand_id'])
+                    ->whereKey($knowledgeBaseId)
+                    ->lockForUpdate()
+                    ->firstOrFail();
+                $this->assertGovernedOwnership($knowledgeBase);
+                $this->assertActiveContentHashAvailable(
+                    (int) $knowledgeBase->brand_id,
+                    (string) $knowledgeBase->language_code,
+                    (string) $knowledgeBase->lifecycle_status,
+                    $normalizedContentHash,
+                    $knowledgeBaseId,
+                );
+                $knowledgeBase->update([
+                    'name' => trim((string) $payload['name']),
+                    'description' => trim((string) ($payload['description'] ?? '')),
+                    'content' => $content,
+                    'file_type' => (string) $payload['file_type'],
+                    'character_count' => mb_strlen($content, 'UTF-8'),
+                    'word_count' => mb_strlen(strip_tags($content), 'UTF-8'),
+                    'normalized_content_hash' => $normalizedContentHash,
+                    'asset_provenance' => $this->appendOperatorEditProvenance(
+                        $knowledgeBase,
+                        $request->user('admin'),
+                        'admin_detail_update',
+                    ),
+                ]);
+
+                return $knowledgeBase;
+            });
         } catch (UniqueConstraintViolationException $exception) {
+            $knowledgeScope = KnowledgeBase::query()->whereKey($knowledgeBaseId)->first(['brand_id', 'language_code']);
             if ($this->activeContentHashExists(
-                (int) $knowledgeBase->brand_id,
-                (string) $knowledgeBase->language_code,
+                (int) ($knowledgeScope?->brand_id ?? 0),
+                (string) ($knowledgeScope?->language_code ?? ''),
                 $normalizedContentHash,
                 $knowledgeBaseId,
             )) {
@@ -244,35 +249,41 @@ class KnowledgeBaseController extends Controller
      */
     public function update(StoreGovernedKnowledgeRequest $request, int $knowledgeBaseId): RedirectResponse
     {
-        $knowledgeBase = KnowledgeBase::query()->whereKey($knowledgeBaseId)->firstOrFail();
-
         $payload = $request->validated();
         $content = $this->normalizeKnowledgeText((string) $payload['content']);
         $this->assertKnowledgeContentSize($content);
         $normalizedContentHash = $this->normalizedContentHash($content);
-        $this->assertActiveContentHashAvailable(
-            (int) $payload['brand_id'],
-            (string) $payload['language_code'],
-            (string) $payload['lifecycle_status'],
-            $normalizedContentHash,
-            $knowledgeBaseId,
-        );
 
         try {
-            $knowledgeBase->update([
-                'name' => trim((string) $payload['name']),
-                'description' => trim((string) ($payload['description'] ?? '')),
-                'content' => $content,
-                'file_type' => (string) $payload['file_type'],
-                'character_count' => mb_strlen($content, 'UTF-8'),
-                'word_count' => mb_strlen(strip_tags($content), 'UTF-8'),
-                'normalized_content_hash' => $normalizedContentHash,
-            ] + $this->knowledgeMetadataPayload(
-                $payload,
-                $knowledgeBase,
-                operator: $request->user('admin'),
-                operatorOperation: 'admin_form_update',
-            ));
+            $knowledgeBase = DB::transaction(function () use ($request, $knowledgeBaseId, $payload, $content, $normalizedContentHash): KnowledgeBase {
+                $knowledgeBase = KnowledgeBase::query()
+                    ->whereKey($knowledgeBaseId)
+                    ->lockForUpdate()
+                    ->firstOrFail();
+                $this->assertActiveContentHashAvailable(
+                    (int) $payload['brand_id'],
+                    (string) $payload['language_code'],
+                    (string) $payload['lifecycle_status'],
+                    $normalizedContentHash,
+                    $knowledgeBaseId,
+                );
+                $knowledgeBase->update([
+                    'name' => trim((string) $payload['name']),
+                    'description' => trim((string) ($payload['description'] ?? '')),
+                    'content' => $content,
+                    'file_type' => (string) $payload['file_type'],
+                    'character_count' => mb_strlen($content, 'UTF-8'),
+                    'word_count' => mb_strlen(strip_tags($content), 'UTF-8'),
+                    'normalized_content_hash' => $normalizedContentHash,
+                ] + $this->knowledgeMetadataPayload(
+                    $payload,
+                    $knowledgeBase,
+                    operator: $request->user('admin'),
+                    operatorOperation: 'admin_form_update',
+                ));
+
+                return $knowledgeBase;
+            });
         } catch (UniqueConstraintViolationException $exception) {
             if ($this->activeContentHashExists(
                 (int) $payload['brand_id'],
@@ -1358,12 +1369,12 @@ SQL)->first();
      */
     private function normalizeKnowledgeText(string $text): string
     {
-        return $this->sourceParser->normalizeKnowledgeText($text);
+        return $this->contentNormalizer->normalize($text);
     }
 
     private function normalizedContentHash(string $content): string
     {
-        return hash('sha256', $this->sourceParser->normalizeKnowledgeText($content));
+        return $this->contentNormalizer->hash($content);
     }
 
     private function assertActiveContentHashAvailable(

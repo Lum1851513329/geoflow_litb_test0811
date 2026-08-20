@@ -50,7 +50,7 @@ final class StoreGovernedKnowledgeRequest extends FormRequest
                 ),
             ],
             'canonical_document_key' => ['nullable', 'string', 'max:190'],
-            'language_code' => ['required', 'string', 'max:35', 'regex:/^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{1,8})*$/'],
+            'language_code' => ['required', 'string'],
             'authority_level' => [
                 'required',
                 Rule::in(['first_party', 'regulatory_filing', 'mixed_research', 'third_party']),
