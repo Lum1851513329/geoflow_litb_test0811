@@ -10,6 +10,7 @@ use App\Models\KnowledgeSite;
 use App\Models\Task;
 use App\Services\GeoFlow\KnowledgeChunkSyncCoordinator;
 use App\Services\GeoFlow\KnowledgeGovernance\GovernedKnowledgeImporter;
+use App\Services\GeoFlow\KnowledgeGovernance\KnowledgeImportValidator;
 use Illuminate\Database\QueryException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
@@ -439,6 +440,49 @@ final class ImportGovernedKnowledgeCommandTest extends TestCase
         $this->assertSame($before['directories'], DB::table('knowledge_directories')->count());
         $this->assertSame($before['documents'], DB::table('knowledge_bases')->count());
         $this->assertDatabaseCount('knowledge_import_batches', 0);
+    }
+
+    public function test_commit_rechecks_stale_prevalidation_under_the_owner_locks(): void
+    {
+        $validator = $this->app->make(KnowledgeImportValidator::class);
+        $importer = $this->app->make(GovernedKnowledgeImporter::class);
+        $canonicalKey = 'url:https://www.lightinthebox.com/stale-prevalidation';
+        $firstRecord = $this->documentRecord(
+            $canonicalKey,
+            "# First package\n\nFirst governed content.\n",
+        );
+        $firstPackage = $validator->validate($this->writePackage([$firstRecord], []), 42);
+        $secondRecord = $this->documentRecord(
+            $canonicalKey,
+            "# Second package\n\nConflicting governed content.\n",
+        );
+        $secondPackage = $validator->validate($this->writePackage([$secondRecord], []), 42);
+        $commit = new \ReflectionMethod(GovernedKnowledgeImporter::class, 'commitPackage');
+
+        DB::transaction(fn (): int => $commit->invoke($importer, $firstPackage, 42));
+
+        $rejection = null;
+        try {
+            DB::transaction(fn (): int => $commit->invoke($importer, $secondPackage, 42));
+        } catch (RuntimeException $exception) {
+            $rejection = $exception;
+        }
+        $this->assertInstanceOf(RuntimeException::class, $rejection);
+        $this->assertSame('governed_import.preflight_active_document_conflict', $rejection->getMessage());
+
+        $this->assertDatabaseCount('knowledge_brands', 1);
+        $this->assertDatabaseCount('knowledge_sites', 1);
+        $this->assertDatabaseCount('knowledge_directories', 9);
+        $this->assertDatabaseCount('knowledge_bases', 1);
+        $this->assertDatabaseCount('knowledge_import_batches', 1);
+        $this->assertDatabaseCount('knowledge_import_rows', 1);
+        $this->assertDatabaseCount('knowledge_duplicates', 0);
+        $this->assertSame($firstRecord['_body'], KnowledgeBase::query()->sole()->content);
+        $this->assertSame(
+            $firstPackage['configuration_hash'],
+            DB::table('knowledge_import_batches')->sole()->configuration_hash,
+        );
+        Queue::assertNothingPushed();
     }
 
     public function test_preflight_models_package_final_state_when_superseding_v1_with_active_v2(): void

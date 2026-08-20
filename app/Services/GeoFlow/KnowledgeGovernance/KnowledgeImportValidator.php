@@ -684,7 +684,7 @@ final class KnowledgeImportValidator
     }
 
     /** @param list<array<string,mixed>> $manifest */
-    private function preflightDatabase(array $manifest): void
+    public function preflightDatabase(array $manifest): void
     {
         $assets = array_column($manifest, 'asset_key');
         $existingAssets = KnowledgeBase::query()

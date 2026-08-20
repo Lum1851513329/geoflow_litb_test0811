@@ -144,6 +144,8 @@ final class GovernedKnowledgeImporter
             return (int) $existing->id;
         }
 
+        $this->validator->preflightDatabase($package['manifest']);
+
         $directories = [];
         foreach (KnowledgeImportValidator::ROOT_DIRECTORIES as $key => $name) {
             $directory = KnowledgeDirectory::query()
