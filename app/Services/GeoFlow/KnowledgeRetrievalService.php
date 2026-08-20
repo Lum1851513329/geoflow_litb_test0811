@@ -356,31 +356,12 @@ class KnowledgeRetrievalService
      */
     private function mergeMetadata(array $base, array $chunk): array
     {
-        $merged = array_replace($base, array_filter($chunk, static fn ($value): bool => $value !== null && $value !== ''));
+        $chunkSpecific = array_intersect_key(
+            array_filter($chunk, static fn ($value): bool => $value !== null && $value !== ''),
+            array_flip(['block_indexes', 'source_block_indexes']),
+        );
 
-        foreach ([
-            'knowledge_base_id',
-            'knowledge_base_name',
-            'brand_id',
-            'site_id',
-            'primary_directory_id',
-            'directory_key',
-            'directory_path',
-            'canonical_document_key',
-            'language_code',
-            'authority_level',
-            'lifecycle_status',
-            'generation_eligible',
-            'citation_required',
-            'source_file_path',
-            'source_file_hash',
-        ] as $governedKey) {
-            if (array_key_exists($governedKey, $base)) {
-                $merged[$governedKey] = $base[$governedKey];
-            }
-        }
-
-        return $merged;
+        return array_replace($chunkSpecific, $base);
     }
 
     /**
@@ -593,7 +574,7 @@ class KnowledgeRetrievalService
 
             $winner = $group[0];
             foreach (array_slice($group, 1) as $candidate) {
-                if ($this->compareEvidenceAuthority($candidate, $winner) > 0) {
+                if ($this->compareRankedEvidence($candidate, $winner) < 0) {
                     $winner = $candidate;
                 }
             }
@@ -606,22 +587,19 @@ class KnowledgeRetrievalService
     }
 
     /**
-     * 同标题/章节不一定冲突，可能只是同一章节被切成多段。
-     * 只有出现资料时间差异时，才把它当作同主题新旧版本来归并。
+     * 只有不同文档记录共享规范文档身份时，才把它们当作版本归并。
      *
      * @param  list<array<string,mixed>>  $group
      */
     private function hasVersionConflictSignal(array $group): bool
     {
-        $dates = [];
-        foreach ($group as $candidate) {
+        $knowledgeBaseIds = array_map(static function (array $candidate): int {
             $metadata = is_array($candidate['metadata'] ?? null) ? $candidate['metadata'] : [];
-            $dates[] = trim((string) ($metadata['effective_date'] ?? ''));
-        }
 
-        $dates = array_values(array_unique($dates));
+            return (int) ($metadata['knowledge_base_id'] ?? 0);
+        }, $group);
 
-        return count($dates) > 1 && count(array_filter($dates, static fn (string $date): bool => $date !== '')) > 0;
+        return count(array_unique(array_filter($knowledgeBaseIds))) > 1;
     }
 
     /**
@@ -629,14 +607,24 @@ class KnowledgeRetrievalService
      */
     private function conflictTopicKey(array $candidate): string
     {
-        $title = $this->normalizeTopicKey((string) ($candidate['chunk_title'] ?? ''));
-        $sectionPath = $this->normalizeTopicKey((string) ($candidate['section_path'] ?? ''));
-
-        if ($title !== '' || $sectionPath !== '') {
-            return 'topic:'.sha1($sectionPath.'|'.$title);
+        $metadata = is_array($candidate['metadata'] ?? null) ? $candidate['metadata'] : [];
+        $canonicalDocumentKey = trim((string) ($metadata['canonical_document_key'] ?? ''));
+        if ($canonicalDocumentKey === '') {
+            return 'evidence:'.(int) ($metadata['knowledge_base_id'] ?? 0).':'.(int) ($candidate['chunk_index'] ?? 0);
         }
 
-        return 'chunk:'.(string) ($candidate['chunk_index'] ?? spl_object_id((object) $candidate));
+        $title = $this->normalizeTopicKey((string) ($candidate['chunk_title'] ?? ''));
+        $sectionPath = $this->normalizeTopicKey((string) ($candidate['section_path'] ?? ''));
+        $identity = implode('|', [
+            (int) ($metadata['brand_id'] ?? 0),
+            (int) ($metadata['site_id'] ?? 0),
+            (string) ($metadata['language_code'] ?? ''),
+            $canonicalDocumentKey,
+            $sectionPath,
+            $title,
+        ]);
+
+        return 'version:'.sha1($identity);
     }
 
     private function normalizeTopicKey(string $value): string
@@ -645,49 +633,6 @@ class KnowledgeRetrievalService
         $value = preg_replace('/[\s\p{P}\p{S}]+/u', '', $value);
 
         return is_string($value) ? $value : '';
-    }
-
-    /**
-     * @param  array<string,mixed>  $left
-     * @param  array<string,mixed>  $right
-     */
-    private function compareEvidenceAuthority(array $left, array $right): int
-    {
-        $leftValues = $this->evidenceAuthorityValues($left);
-        $rightValues = $this->evidenceAuthorityValues($right);
-
-        foreach ($leftValues as $index => $leftValue) {
-            $diff = $leftValue <=> $rightValues[$index];
-            if ($diff !== 0) {
-                return $diff;
-            }
-        }
-
-        return 0;
-    }
-
-    /**
-     * @param  array<string,mixed>  $candidate
-     * @return array{int,int,int,float,int}
-     */
-    private function evidenceAuthorityValues(array $candidate): array
-    {
-        $metadata = is_array($candidate['metadata'] ?? null) ? $candidate['metadata'] : [];
-
-        return [
-            $this->reviewStatusRank((string) ($metadata['review_status'] ?? '')),
-            $this->effectiveDateTimestamp((string) ($metadata['effective_date'] ?? '')),
-            $this->riskLevelRank((string) ($metadata['risk_level'] ?? '')),
-            (float) ($candidate['score'] ?? 0.0),
-            -1 * (int) ($candidate['chunk_index'] ?? 0),
-        ];
-    }
-
-    private function reviewStatusRank(string $reviewStatus): int
-    {
-        $reviewStatus = strtolower(trim($reviewStatus));
-
-        return in_array($reviewStatus, ['reviewed', 'approved', 'verified'], true) ? 2 : 1;
     }
 
     private function riskLevelRank(string $riskLevel): int

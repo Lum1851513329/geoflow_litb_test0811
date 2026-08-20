@@ -49,3 +49,41 @@
 - `tests/Feature/WorkerPromptRecipeExecutionTest.php` referenced by an older plan no longer exists in this branch; all available worker/task/content generation suites relevant to the modified callers were run instead.
 - The host has no `php` executable, so all PHP/Pint verification used the running project `app` container as documented in `HANDOFF.md`.
 - Unrelated pre-existing changes in preset seeding, Docker Compose and `HANDOFF.md` were preserved and excluded from the Task 8 commit.
+
+## Review fix round 1
+
+### Changed files
+
+- `app/Services/GeoFlow/KnowledgeGovernance/KnowledgeScope.php`
+- `app/Services/GeoFlow/KnowledgeRetrievalService.php`
+- `tests/Feature/KnowledgeRetrievalIsolationTest.php`
+- `tests/Feature/KnowledgeRetrievalServiceTest.php`
+- `.superpowers/sdd/2026-08-19-brand-scoped-knowledge-governance/task-8-report.md`
+
+### Before / RED evidence
+
+- The new retrieval and scope regressions initially produced 11 failures with 15 passing tests and 54 assertions.
+- Forged chunk metadata could replace document source, freshness, risk and review fields; it could both disguise an unreviewed high-risk document and control returned citation provenance.
+- Documents with the same normalized title/section but different canonical identities were collapsed, while newer research could win a true canonical-version conflict over first-party policy.
+- `KnowledgeScope` retained untrimmed/non-canonical language input and accepted malformed tags other than an empty string.
+
+### Implementation
+
+- Retrieval now accepts only the parser-owned block-index fields from chunk metadata. Every document-level ownership, lifecycle, eligibility, risk, review, authority, freshness, source and citation identity is sourced from the scoped SQL-selected document.
+- Conflict collapse now requires matching brand/site/language canonical identity and topic plus distinct document records. Unrelated same-title documents survive independently.
+- Canonical-version selection now uses the same governance-first comparator as final ranking, so reviewed first-party policy outranks fresher research; equally governed versions still resolve by freshness.
+- `KnowledgeScope` now follows the existing content-brief language pattern: trim, normalize underscore separators and canonicalize language/script/region casing, then validate the project BCP 47-compatible tag shape.
+- The former per-chunk effective-date conflict test now models versions as separate documents sharing a canonical identity, keeping document governance authoritative.
+
+### Verification
+
+- Focused retrieval suite: 26 tests and 92 assertions passed after the fix and strengthened provenance coverage.
+- Retrieval, article assistant, worker, task and content-generation regression suites: 169 tests and 758 assertions passed.
+- Pint passed for the four review-owned PHP files.
+- PHP syntax checks passed for the four review-owned PHP files.
+- `git diff --check` passed.
+
+### Caveats
+
+- The existing SQLite/pgvector caveat remains unchanged; no formal database import, corpus mutation or external write was performed.
+- Unrelated pre-existing preset seeding, Docker Compose and `HANDOFF.md` changes remain outside this review-fix scope.

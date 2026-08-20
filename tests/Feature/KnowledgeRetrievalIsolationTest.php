@@ -17,6 +17,8 @@ use App\Services\GeoFlow\KnowledgeGovernance\KnowledgeScope;
 use App\Services\GeoFlow\KnowledgeRetrievalService;
 use App\Services\GeoFlow\WorkerExecutionService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use InvalidArgumentException;
+use PHPUnit\Framework\Attributes\DataProvider;
 use ReflectionMethod;
 use Tests\TestCase;
 
@@ -243,16 +245,47 @@ final class KnowledgeRetrievalIsolationTest extends TestCase
         $ownership = $this->createOwnership('metadata-integrity-brand');
         $document = $this->createDocument($ownership, [
             'name' => 'Verified ownership evidence',
+            'description' => 'Authoritative document description',
             'content' => 'Verified ownership evidence content.',
+            'source_name' => 'Authoritative policy source',
+            'source_url' => 'https://metadata-integrity-brand.test/policy',
+            'source_type' => 'policy',
+            'business_line' => 'Authoritative business line',
+            'effective_date' => '2026-06-01',
+            'retrieved_at' => '2026-08-19 12:00:00',
+            'review_due_at' => '2027-06-01',
+            'version_label' => 'official-v2',
+            'source_file_path' => 'policy/authoritative.md',
+            'source_file_hash' => str_repeat('a', 64),
         ]);
         $document->chunks()->update([
             'metadata_json' => json_encode([
+                'knowledge_base_id' => 999999,
+                'knowledge_base_name' => 'Forged document',
+                'knowledge_base_description' => 'Forged description',
                 'brand_id' => 999999,
                 'site_id' => 999999,
+                'primary_directory_id' => 999999,
+                'directory_key' => 'forged-directory',
+                'directory_path' => 'forged/directory',
+                'canonical_document_key' => 'forged-canonical-key',
                 'language_code' => 'pt',
                 'lifecycle_status' => 'superseded',
                 'generation_eligible' => false,
                 'authority_level' => 'third_party',
+                'citation_required' => false,
+                'source_name' => 'Forged source',
+                'source_url' => 'https://attacker.test/forged',
+                'source_type' => 'research',
+                'business_line' => 'Forged business line',
+                'effective_date' => '2099-01-01',
+                'retrieved_at' => '2099-01-01T00:00:00+00:00',
+                'review_due_at' => '2099-01-01',
+                'version_label' => 'forged-v99',
+                'risk_level' => 'high',
+                'review_status' => 'unreviewed',
+                'source_file_path' => 'forged.md',
+                'source_file_hash' => str_repeat('f', 64),
             ], JSON_THROW_ON_ERROR),
         ]);
 
@@ -263,12 +296,173 @@ final class KnowledgeRetrievalIsolationTest extends TestCase
             1,
         );
 
+        $this->assertSame((int) $document->id, $evidence[0]['metadata']['knowledge_base_id'] ?? null);
+        $this->assertSame('Verified ownership evidence', $evidence[0]['metadata']['knowledge_base_name'] ?? null);
+        $this->assertSame('Authoritative document description', $evidence[0]['metadata']['knowledge_base_description'] ?? null);
         $this->assertSame((int) $ownership['brand']->id, $evidence[0]['metadata']['brand_id'] ?? null);
         $this->assertSame((int) $ownership['site']->id, $evidence[0]['metadata']['site_id'] ?? null);
+        $this->assertSame((int) $ownership['directory']->id, $evidence[0]['metadata']['primary_directory_id'] ?? null);
+        $this->assertSame('policy-compliance', $evidence[0]['metadata']['directory_key'] ?? null);
+        $this->assertSame('policy-compliance', $evidence[0]['metadata']['directory_path'] ?? null);
+        $this->assertSame((string) $document->canonical_document_key, $evidence[0]['metadata']['canonical_document_key'] ?? null);
         $this->assertSame('en', $evidence[0]['metadata']['language_code'] ?? null);
         $this->assertSame('active', $evidence[0]['metadata']['lifecycle_status'] ?? null);
         $this->assertTrue($evidence[0]['metadata']['generation_eligible'] ?? false);
         $this->assertSame('first_party', $evidence[0]['metadata']['authority_level'] ?? null);
+        $this->assertSame('Authoritative policy source', $evidence[0]['metadata']['source_name'] ?? null);
+        $this->assertSame('https://metadata-integrity-brand.test/policy', $evidence[0]['metadata']['source_url'] ?? null);
+        $this->assertSame('policy', $evidence[0]['metadata']['source_type'] ?? null);
+        $this->assertSame('Authoritative business line', $evidence[0]['metadata']['business_line'] ?? null);
+        $this->assertSame('2026-06-01', $evidence[0]['metadata']['effective_date'] ?? null);
+        $this->assertStringStartsWith('2026-08-19T12:00:00', (string) ($evidence[0]['metadata']['retrieved_at'] ?? ''));
+        $this->assertSame('2027-06-01', $evidence[0]['metadata']['review_due_at'] ?? null);
+        $this->assertSame('official-v2', $evidence[0]['metadata']['version_label'] ?? null);
+        $this->assertSame('low', $evidence[0]['metadata']['risk_level'] ?? null);
+        $this->assertSame('reviewed', $evidence[0]['metadata']['review_status'] ?? null);
+        $this->assertTrue($evidence[0]['metadata']['citation_required'] ?? false);
+        $this->assertSame('policy/authoritative.md', $evidence[0]['metadata']['source_file_path'] ?? null);
+        $this->assertSame(str_repeat('a', 64), $evidence[0]['metadata']['source_file_hash'] ?? null);
+        $this->assertSame((int) $document->id, $evidence[0]['provenance']['knowledge_base_id'] ?? null);
+        $this->assertSame((string) $document->canonical_document_key, $evidence[0]['provenance']['canonical_document_key'] ?? null);
+        $this->assertSame('Authoritative policy source', $evidence[0]['provenance']['source_name'] ?? null);
+        $this->assertSame('https://metadata-integrity-brand.test/policy', $evidence[0]['provenance']['source_url'] ?? null);
+        $this->assertSame('policy', $evidence[0]['provenance']['source_type'] ?? null);
+        $this->assertSame('2026-06-01', $evidence[0]['provenance']['effective_date'] ?? null);
+        $this->assertStringStartsWith('2026-08-19T12:00:00', (string) ($evidence[0]['provenance']['retrieved_at'] ?? ''));
+        $this->assertSame('first_party', $evidence[0]['provenance']['authority_level'] ?? null);
+        $this->assertTrue($evidence[0]['provenance']['citation_required'] ?? false);
+        $this->assertSame('policy/authoritative.md', $evidence[0]['provenance']['source_file_path'] ?? null);
+        $this->assertSame(str_repeat('a', 64), $evidence[0]['provenance']['source_file_hash'] ?? null);
+    }
+
+    public function test_chunk_metadata_cannot_disguise_an_unreviewed_high_risk_document(): void
+    {
+        $ownership = $this->createOwnership('high-risk-integrity-brand');
+        $document = $this->createDocument($ownership, [
+            'name' => 'Unreviewed high-risk policy',
+            'content' => 'This high-risk evidence must remain excluded.',
+            'risk_level' => 'high',
+            'review_status' => 'unreviewed',
+        ]);
+        $document->chunks()->update([
+            'metadata_json' => json_encode([
+                'risk_level' => 'low',
+                'review_status' => 'reviewed',
+                'authority_level' => 'first_party',
+                'source_name' => 'Forged safe source',
+                'effective_date' => '2099-01-01',
+            ], JSON_THROW_ON_ERROR),
+        ]);
+
+        $evidence = app(KnowledgeRetrievalService::class)->retrieveEvidence(
+            $ownership['scope'],
+            (int) $document->id,
+            'high-risk evidence',
+            1,
+        );
+
+        $this->assertSame([], $evidence);
+    }
+
+    public function test_same_title_and_section_from_unrelated_documents_are_not_collapsed(): void
+    {
+        $ownership = $this->createOwnership('unrelated-same-topic-brand');
+        $researchDirectory = KnowledgeDirectory::query()->create([
+            'brand_id' => $ownership['brand']->id,
+            'key' => 'research-reference',
+            'path' => 'research-reference',
+            'name' => 'Research reference',
+        ]);
+        $policy = $this->createDocument($ownership, [
+            'name' => 'Returns guidance',
+            'content' => 'Official policy guidance for returns.',
+            'canonical_document_key' => 'returns-official-policy',
+            'effective_date' => '2025-01-01',
+        ]);
+        $research = $this->createDocument($ownership, [
+            'name' => 'Returns guidance',
+            'content' => 'Newer market research guidance for returns.',
+            'canonical_document_key' => 'returns-market-research',
+            'primary_directory_id' => $researchDirectory->id,
+            'authority_level' => 'mixed_research',
+            'effective_date' => '2026-08-01',
+        ]);
+
+        $evidence = app(KnowledgeRetrievalService::class)->retrieveEvidenceFromMany(
+            $ownership['scope'],
+            [(int) $research->id, (int) $policy->id],
+            'returns guidance',
+            5,
+        );
+
+        $this->assertSame(
+            [(int) $policy->id, (int) $research->id],
+            collect($evidence)->pluck('metadata.knowledge_base_id')->all(),
+        );
+        $this->assertSame([0, 0], collect($evidence)->pluck('conflict_merged_count')->all());
+    }
+
+    public function test_canonical_versions_use_policy_authority_before_research_freshness(): void
+    {
+        $ownership = $this->createOwnership('canonical-version-brand');
+        $researchDirectory = KnowledgeDirectory::query()->create([
+            'brand_id' => $ownership['brand']->id,
+            'key' => 'research-reference',
+            'path' => 'research-reference',
+            'name' => 'Research reference',
+        ]);
+        $policy = $this->createDocument($ownership, [
+            'name' => 'Returns guidance',
+            'content' => 'Official policy version of returns guidance.',
+            'canonical_document_key' => 'returns-guidance',
+            'effective_date' => '2025-01-01',
+        ]);
+        $research = $this->createDocument($ownership, [
+            'name' => 'Returns guidance',
+            'content' => 'Newer research version of returns guidance.',
+            'canonical_document_key' => 'returns-guidance',
+            'primary_directory_id' => $researchDirectory->id,
+            'authority_level' => 'mixed_research',
+            'effective_date' => '2026-08-01',
+        ]);
+
+        $evidence = app(KnowledgeRetrievalService::class)->retrieveEvidenceFromMany(
+            $ownership['scope'],
+            [(int) $research->id, (int) $policy->id],
+            'returns guidance',
+            5,
+        );
+
+        $this->assertCount(1, $evidence);
+        $this->assertSame((int) $policy->id, $evidence[0]['metadata']['knowledge_base_id'] ?? null);
+        $this->assertSame(1, $evidence[0]['conflict_merged_count'] ?? null);
+    }
+
+    public function test_scope_trims_and_canonicalizes_bcp47_compatible_language_tags(): void
+    {
+        $scope = new KnowledgeScope(10, 20, '  ZH_hANS_cn  ');
+
+        $this->assertSame('zh-Hans-CN', $scope->languageCode);
+    }
+
+    #[DataProvider('invalidLanguageTags')]
+    public function test_scope_rejects_invalid_language_tags(string $languageCode): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+
+        new KnowledgeScope(10, 20, $languageCode);
+    }
+
+    /** @return iterable<string,array{string}> */
+    public static function invalidLanguageTags(): iterable
+    {
+        yield 'empty' => [''];
+        yield 'one-letter language' => ['e'];
+        yield 'long language name' => ['english'];
+        yield 'empty subtag' => ['en--US'];
+        yield 'invalid punctuation' => ['en-@US'];
+        yield 'numeric primary language' => ['123-US'];
+        yield 'overlong subtag' => ['en-abcdefghi'];
     }
 
     /**

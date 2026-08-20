@@ -238,51 +238,52 @@ class KnowledgeRetrievalServiceTest extends TestCase
 
     public function test_conflicting_same_topic_evidence_prefers_newer_reviewed_content(): void
     {
-        $knowledgeBase = $this->createKnowledgeBase([
-            'name' => '产品知识库',
+        $oldKnowledgeBase = $this->createKnowledgeBase([
+            'name' => '产品价格政策',
             'risk_level' => 'low',
             'review_status' => 'reviewed',
+            'canonical_document_key' => 'standard-plan-price',
+            'effective_date' => '2024-01-01',
+        ]);
+        $newKnowledgeBase = $this->createKnowledgeBase([
+            'name' => '产品价格政策',
+            'risk_level' => 'low',
+            'review_status' => 'reviewed',
+            'canonical_document_key' => 'standard-plan-price',
+            'effective_date' => '2026-05-01',
         ]);
 
         KnowledgeChunk::query()->create([
-            'knowledge_base_id' => (int) $knowledgeBase->id,
+            'knowledge_base_id' => (int) $oldKnowledgeBase->id,
             'chunk_index' => 0,
             'content' => '标准版套餐价格是每年 100 元，适合旧版测试场景。',
             'content_hash' => hash('sha256', 'old-price'),
             'chunk_title' => '标准版套餐价格',
             'section_path' => '产品资料 > 价格政策',
             'chunk_strategy' => 'structured_rule',
-            'metadata_json' => json_encode([
-                'effective_date' => '2024-01-01',
-                'review_status' => 'reviewed',
-                'risk_level' => 'low',
-            ], JSON_UNESCAPED_UNICODE),
+            'metadata_json' => '{}',
             'source_hash' => hash('sha256', 'source-old-price'),
             'token_count' => 22,
             'embedding_json' => '[]',
         ]);
 
         KnowledgeChunk::query()->create([
-            'knowledge_base_id' => (int) $knowledgeBase->id,
-            'chunk_index' => 1,
+            'knowledge_base_id' => (int) $newKnowledgeBase->id,
+            'chunk_index' => 0,
             'content' => '标准版套餐价格是每年 200 元，适合当前正式报价。',
             'content_hash' => hash('sha256', 'new-price'),
             'chunk_title' => '标准版套餐价格',
             'section_path' => '产品资料 > 价格政策',
             'chunk_strategy' => 'structured_rule',
-            'metadata_json' => json_encode([
-                'effective_date' => '2026-05-01',
-                'review_status' => 'reviewed',
-                'risk_level' => 'low',
-            ], JSON_UNESCAPED_UNICODE),
+            'metadata_json' => '{}',
             'source_hash' => hash('sha256', 'source-new-price'),
             'token_count' => 22,
             'embedding_json' => '[]',
         ]);
 
-        $context = app(KnowledgeRetrievalService::class)->retrieveContext(
+        $context = app(KnowledgeRetrievalService::class)->retrieveContextFromMany(
             $this->scope(),
-            (int) $knowledgeBase->id,
+            [(int) $oldKnowledgeBase->id, (int) $newKnowledgeBase->id],
             '标准版 套餐 价格',
             2,
             1600
