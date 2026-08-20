@@ -1,6 +1,7 @@
 *.log
 .DS_Store
 /bak
+/backups
 /docker-data
 /logs
 /uploads
