@@ -7,7 +7,12 @@ Design: `docs/superpowers/specs/2026-08-19-brand-scoped-knowledge-governance-des
 SDD ledger: `.superpowers/sdd/2026-08-19-brand-scoped-knowledge-governance/progress.md`
 
 This document records the exact commands, evidence and results of Task 11 — the first task
-allowed to mutate the formal (dev) database — plus two defects discovered and fixed along the way.
+allowed to mutate the formal (dev) database — plus two defects discovered and fixed along the way,
+and Task 12's final whole-branch review, which found and fixed a **Critical** corpus-classification
+defect that had excluded the actual flagship policy documents from the corpus Task 11 originally
+imported. **§12 onward supersedes the document counts/state described in §1-§11** (which are kept
+for audit-trail purposes, describing the real sequence of events) — read §12 for the corrected,
+final state of the formal corpus and database.
 
 ## 1. Baseline (before any mutation)
 
@@ -179,7 +184,7 @@ No legacy rows were touched — this is expected, correct, safe behavior, not a 
 | Ready eligible chunks | All 5 documents (ids 157–161): `chunk_sync_status=ready`, chunk counts 3/5/2/7/6 = 23 total |
 | No cross-brand retrieval | Structurally guaranteed — only one brand exists in the database; full retrieval-scope enforcement already covered by Task 8's 183 tests. Practical confirmation deferred to the user's browser smoke test (§9). |
 
-## 9. Known non-blocking issues
+## 9. Known non-blocking issues (as of Task 11 — see §12 for Task 12's additional findings)
 
 - **No keyword-42 associations yet for the 5 new documents.** No task in the 1–10 sequence built
   an automated content-to-keyword-library-42 matcher — Task 3 built the association *storage and
@@ -226,3 +231,159 @@ docker exec geoflow-postgres rm -f /tmp/restore.dump
 Restores to the exact pre-migration state (156 knowledge bases, 1,254 chunks, no governance schema
 data beyond what existed before this task — note the ownership/governance *schema* itself was
 already migrated before this backup was taken, per §1, so a restore reverts *data*, not schema).
+This restore point predates BOTH batch 1 (§7) and batch 2 (§12) — it is still the correct backup to
+use for a full rollback of all governed-knowledge data added by this branch.
+
+## 12. Task 12 final review — Critical defect and corrected re-import
+
+Task 12 dispatched a full whole-branch review (base `bb68370`, head at the time `06d2e3c`, on the
+most capable available model) covering all 42 commits, cross-task integration, the design's §17
+acceptance criteria, and production readiness. Full findings are in the SDD ledger's Task 12
+section. The most consequential finding:
+
+### Critical — the imported corpus was missing its own flagship content
+
+`tools/knowledge_corpus/classify.py`'s language detector used a bare absolute Han-character count
+(`>= 2`) to flag "zh" as a language candidate, tied with equal weight against English/Portuguese
+marker scores that run into the hundreds. The real Privacy Policy, Terms of Use and IP Policy
+documents are genuinely English but use a Chinese-language inline-link-annotation convention
+throughout (`（链接：url）`, "link:") — this tripped the bug and silently excluded them (and other
+genuine English documents) as `"und"` (ambiguous), landing them in `exclusion_audit.jsonl` instead
+of the manifest. The corpus batch 1 imported (§7) contained only 5 low-value documents — none of
+the actual first-party policy content this governance system exists to import.
+
+Resolved across three fix rounds, each independently reviewed, with two of the three rounds
+catching real defects the round before had introduced or missed:
+
+1. **Round 1** (`acf07b9`): stripped the link-annotation residue before language detection; added a
+   proportional zh-candidacy rule. Real impact: 5→15 documents, `policy-compliance` 0→4, all 3
+   named policy documents correctly admitted as `en`, all 5 previously-active documents unchanged.
+2. **Round-1 review**: independently rebuilt the corpus, confirmed the impact reproduces exactly —
+   but proved the proportional rule was inert (0/154 real documents affected by it) and
+   dimensionally unsound (tolerance scaled with document length; demonstrated ~115-150 stray Han
+   characters could be appended to the real Terms of Use/Privacy Policy and still pass as `en`).
+   Also found a real near-duplicate pair newly admitted with zero review signal.
+3. **Round 2** (`76c42f4`): replaced the proportional rule with a fixed absolute ceiling
+   (`_MAX_RESIDUAL_HAN = 10`) so tolerance never scales with length; added a body-only
+   near-duplicate signal routing matches to `near_duplicate_review.jsonl` for human review, never
+   auto-merged.
+4. **Round-2 review**: exhaustive truth-table verification of the new boolean logic; independently
+   measured near-dup threshold sensitivity across all 35 real candidate pairs (target pair 1.000,
+   next-closest 0.577 — wide margin). Found a new integration bug: the emitted near-dup review
+   record used a `reason` string and `similarity` value that the PHP importer's validator
+   (`KnowledgeImportValidator::validateNearReviews()`) would reject outright — making the corrected
+   corpus **un-importable**. Neither test suite caught this because neither exercises the real
+   cross-language contract.
+5. **Round 3** (`33c7b03`): reused the existing allowlisted `reason`; reported the body-overlap
+   score (not token-Jaccard) as `similarity`; raised the trigger threshold to exactly match the PHP
+   floor (0.92) so any emitted record satisfies the contract by construction. Verified end-to-end,
+   not just in isolation: ran the actual PHP importer's `--dry-run` against the real corrected
+   corpus — clean. A negative control (same dry-run against the pre-fix output) reproduced the
+   original rejection error, proving the fix load-bearing.
+6. **Round-3 review**: independently re-ran the same end-to-end dry-run from scratch, reproduced
+   the identical clean result. Approved, no open findings.
+
+### Corrected corpus state
+
+- Source-set hash: `aaa571308fb22d3a549d6d3afb5d779386160a6a2769cfffee19bf60934703f7` (unchanged —
+  source files were never touched by any of this)
+- Counts: 154 source files hashed, **15** active/manifest documents (was 5), 71 duplicate records,
+  63 excluded sources, **1** near-review record (was 0 — the disclosed near-duplicate pair, routed
+  to review, not merged)
+- Directory distribution: `product-category`=8, `policy-compliance`=4, `brand-company`=2,
+  `customer-transaction`=1
+- All builder validation flags `true`, including `source_hashes_unchanged`; two consecutive builds
+  byte-identical at every fix round
+
+### Real re-import
+
+```
+docker exec geoflow-app rm -rf /tmp/knowledge_cleanup_work_output
+docker cp /Users/litb/Documents/litb_geo/litb_zhishiku/knowledge_cleanup_work/output geoflow-app:/tmp/knowledge_cleanup_work_output
+docker compose exec -T app php artisan geoflow:knowledge:import-governed /tmp/knowledge_cleanup_work_output/manifest.jsonl --keyword-library=42
+```
+
+Result: `{"status":"completed","batch_id":2,"imported_count":15,"duplicate_count":71,...}`. The
+original 5 documents (ids 157-161) were updated in place via `asset_key` matching (no duplication);
+10 new documents inserted (ids 163-172). All 15 `chunk_sync_status=ready`, 148 chunks total, 0
+errors. Legacy migration re-run for batch 2 (dry-run then `--backup-verified` commit): 0 mapped/0
+unmapped again, same reason as batch 1 (§7) — legacy rows still lack `source_file_hash`.
+
+SQL invariants re-confirmed against the new state: 1 brand/site, 9 roots, 0 active exact
+duplicates, 0 broken references, all 15 documents ready with chunks, 0 keyword-42 links (unchanged
+known gap, see §9).
+
+### Additional Important finding — legacy tasks silently lose knowledge context
+
+Independently confirmed directly against the real database (not merely a code-reading finding):
+`WorkerExecutionService::knowledgeScope()` returns `null` for any brand_id-null (legacy) document,
+and `resolveKnowledgeContext()` returns `''` immediately on that — before ever reaching the
+`fallbackKnowledgeContext()` path that previously supplied raw content. This is Task 8's own
+deliberate, already-tested fail-closed design (never leak context across brand boundaries), not a
+new defect — but its concrete consequence was never traced through and disclosed until now: exactly
+7 real, currently-in-use tasks in the live database (task ids 7, 8, 9, 10, 11, 12, 13 — every task
+in the system that references any knowledge base at all references a legacy one) will silently
+receive zero knowledge context on their next generation run, with no error or log surfaced anywhere.
+Each references a legacy row with 4-13 real chunks that previously fed generation. Task 10's legacy
+migration cannot rescue these — matching requires `source_file_hash`, which postdates all 156
+legacy rows (confirmed by both batch 1 and batch 2's migration runs each returning 0 mapped).
+
+**This is a live-data remediation decision, not something resolved unilaterally in this task.** The
+straightforward fix — assigning brand/site/directory ownership to these 7 specific legacy rows via
+the already-built Task 9 admin edit form — is possible but out of this plan's stated scope and
+affects real, currently-in-use application data. Flagged to the user; resolution (or an explicit
+decision to leave it) should be recorded here once made.
+
+### Additional disclosed gap — near-duplicate review has no admin-UI visibility
+
+The near-duplicate pair (documents 163/165, `3.1 All You Need To Know` / `3.1.0 All You Need To
+Know` — genuine first-party English link-index pages at distinct site URLs, not exact duplicates,
+correctly routed to human review rather than auto-merged) is safely imported as two separate active
+documents, and the underlying `near_duplicate_review.jsonl` record is validated by the importer —
+but neither document is flagged anywhere in the admin UI. Grepped `KnowledgeBaseController` and
+every knowledge-bases view for any near-duplicate surfacing; found none. The only record that these
+two need a human look currently lives in the generated corpus file on disk, not the database or any
+admin screen. Not fixed this round (scope discipline) — a future task should either surface
+`near_duplicate_review.jsonl` in the admin UI or persist it to a queryable table.
+
+### Deferred, non-blocking — chunk sizing
+
+The Python chunker (`tools/knowledge_corpus/chunk.py`, built in Task 5) implements design §10's
+sizing/merge rules but is never called by `build.py` — real chunking uses the pre-existing PHP
+`KnowledgeChunkSyncService`, which has governance metadata but not §10's sizing logic. Some live
+chunks are as small as 16 characters (a bare heading). §17.7's acceptance criterion (chunk
+governance metadata) is fully satisfied; §10's retrieval-quality sizing intent is not. Recorded as
+a known gap for a future task.
+
+### Real regression caught and fixed at Task 12: pt_BR admin locale coverage
+
+Full baseline suite rerun (required by Task 12) surfaced a real regression:
+`tests/Unit/AdminPtBrLocaleCoverageTest.php` (2 of its 3 methods) failed because
+`lang/pt_BR/admin.php` never picked up keys added across Tasks 9, 13, 15 and 16. Runtime was never
+broken (the file's `array_replace_recursive($base=English, [...])` structure means untranslated
+keys safely fall back to English display), but the enforced coverage test genuinely regressed.
+Fixed in commit `06d2e3c`, independently reviewed clean — preserved all pre-existing genuine
+Portuguese translations for `knowledge_bases`/`knowledge_detail` (initially assumed absent; the
+implementer correctly discovered real existing translations and adapted rather than following the
+controller's incomplete initial instruction), added 13 new genuine translations for
+`keyword_intelligence.overview.classification.*`, extended the existing intentional-fallback
+pattern for `content_center`. Full suite after: **6** failed (not 7) — the pt_BR fix resolved 2 of
+the 8 that had surfaced; the remaining 6 are `OpenSourceReleaseScriptsTest`,
+`AdminSiteThemeReplicationTest`, `AdminSystemUpdatesPageTest`, `ContentPipelineCompatibilityTest`,
+`ImageLibrarySecurityTest`, `PromptCompositionSeederTest` — all pre-existing, unrelated to this
+branch. (§9's "7 pre-existing" note below is superseded by this — 6 is the correct current count.)
+
+## 13. Final counts (supersedes §10)
+
+- `knowledge_bases`: 171 (156 pre-existing legacy + 15 governed, batch 2)
+- `knowledge_chunks`: 1,402 (1,254 pre-existing + 148 governed)
+- `knowledge_import_batches`: 2 (batch 1 superseded in place by batch 2's re-import; both
+  `completed`)
+- `knowledge_duplicates` for batch 2: 71
+- `near_duplicate_review.jsonl`: 1 record (disclosed above, not merged)
+- Legacy migration: 0 mapped, 0 unmapped, 0 deleted, 0 archived for both batches (expected)
+- Backup: unchanged, `backups/geo_flow_before_governed_knowledge_20260820_094019.dump` (§6) — still
+  the correct restore point for a full rollback of all governed-knowledge data
+- Full PHP suite: 6 pre-existing failures (not 7 — see above), full Python suite 61/61
+- Commits this task: `06d2e3c` (pt_BR fix), `acf07b9`/`76c42f4`/`33c7b03` (language-detection +
+  near-dup fixes, 3 rounds), this file (runbook update)
