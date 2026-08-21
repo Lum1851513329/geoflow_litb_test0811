@@ -806,6 +806,49 @@ final class AdminKnowledgeGovernanceTest extends TestCase
             ->assertSee(__('admin.knowledge_bases.badge_review_overdue'));
     }
 
+    public function test_retrieval_preview_runs_real_query_renders_empty_state_without_scope_and_skips_search_for_empty_query(): void
+    {
+        $scope = $this->createOwnership('lightinthebox', 'LightInTheBox');
+        $document = $this->createDocument($scope, [
+            'name' => 'Warranty Coverage Policy',
+            'content' => 'Warranty coverage extends to unopened electronics within thirty days.',
+        ]);
+        KnowledgeChunk::query()->create([
+            'knowledge_base_id' => $document->id,
+            'chunk_index' => 0,
+            'content' => 'Warranty coverage extends to unopened electronics within thirty days.',
+            'content_hash' => hash('sha256', 'warranty-coverage-chunk'),
+            'chunk_title' => 'Warranty Coverage Policy',
+            'section_path' => 'Warranty Coverage Policy',
+            'metadata_json' => '{}',
+            'embedding_json' => '[]',
+        ]);
+
+        // A real query against the real retrieval service must surface the fixture document.
+        $this->get(route('admin.knowledge-bases.retrieval-preview', [
+            'brand_id' => $scope['brand']->id,
+            'site_id' => $scope['site']->id,
+            'language_code' => 'en',
+            'q' => 'warranty',
+        ]))
+            ->assertOk()
+            ->assertSee('Warranty Coverage Policy')
+            ->assertSee('unopened electronics', false);
+
+        // Missing brand/site scope must render an empty/browse state, never a 500.
+        $this->get(route('admin.knowledge-bases.retrieval-preview', ['q' => 'warranty']))
+            ->assertOk()
+            ->assertDontSee('Warranty Coverage Policy');
+
+        // An empty query must render the form without running a search.
+        $this->get(route('admin.knowledge-bases.retrieval-preview', [
+            'brand_id' => $scope['brand']->id,
+            'site_id' => $scope['site']->id,
+        ]))
+            ->assertOk()
+            ->assertDontSee('Warranty Coverage Policy');
+    }
+
     /** @return array{brand: KnowledgeBrand, site: KnowledgeSite, directory: KnowledgeDirectory} */
     private function createOwnership(string $key, string $name): array
     {

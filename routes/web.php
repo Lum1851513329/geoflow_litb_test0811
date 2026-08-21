@@ -383,6 +383,7 @@ Route::prefix($adminPrefix)->name('admin.')->middleware(['admin.locale'])->group
             Route::get('/', [KnowledgeBaseController::class, 'index'])->name('index');
             Route::get('create', [KnowledgeBaseController::class, 'create'])->name('create');
             Route::post('create', [KnowledgeBaseController::class, 'store'])->name('store');
+            Route::get('retrieval-preview', [KnowledgeBaseController::class, 'retrievalPreview'])->name('retrieval-preview');
             Route::get('{knowledgeBaseId}/edit', [KnowledgeBaseController::class, 'edit'])->name('edit');
             Route::get('{knowledgeBaseId}/detail', [KnowledgeBaseController::class, 'detail'])->name('detail');
             Route::post('upload', [KnowledgeBaseController::class, 'uploadFile'])->name('upload');

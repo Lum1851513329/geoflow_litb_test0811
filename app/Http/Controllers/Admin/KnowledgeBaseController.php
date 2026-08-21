@@ -14,6 +14,8 @@ use App\Models\KnowledgeSite;
 use App\Models\Task;
 use App\Services\GeoFlow\KnowledgeChunkSyncCoordinator;
 use App\Services\GeoFlow\KnowledgeGovernance\GovernedKnowledgeContentNormalizer;
+use App\Services\GeoFlow\KnowledgeGovernance\KnowledgeScope;
+use App\Services\GeoFlow\KnowledgeRetrievalService;
 use App\Support\AdminWeb;
 use Illuminate\Database\Eloquent\Collection as EloquentCollection;
 use Illuminate\Database\UniqueConstraintViolationException;
@@ -28,6 +30,7 @@ use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 use Illuminate\View\View;
+use InvalidArgumentException;
 
 /**
  * 知识库管理控制器。
@@ -79,6 +82,65 @@ class KnowledgeBaseController extends Controller
             'knowledgeBaseId' => 0,
             'knowledgeForm' => $this->emptyForm($brandId),
         ] + $this->governanceFormOptions());
+    }
+
+    /**
+     * 检索预览：让管理员用真实的检索服务试跑一次查询，查看会命中哪些真实文档/切片。
+     *
+     * 这是一个可加书签的 GET 页面，不需要提交表单校验；brand/site/关键词缺失时展示空态而不是报错。
+     */
+    public function retrievalPreview(Request $request): View
+    {
+        $filters = [
+            'brand_id' => $request->integer('brand_id') ?: null,
+            'site_id' => $request->integer('site_id') ?: null,
+            'language_code' => trim((string) $request->query('language_code')) ?: 'en',
+        ];
+        $queryText = trim((string) $request->query('q', ''));
+
+        $results = [];
+        $scopeError = null;
+        $searched = $filters['brand_id'] !== null && $filters['site_id'] !== null && $queryText !== '';
+
+        if ($searched) {
+            try {
+                $scope = new KnowledgeScope(
+                    (int) $filters['brand_id'],
+                    (int) $filters['site_id'],
+                    (string) $filters['language_code'],
+                );
+
+                // MVP limit, disclosed intentionally: KnowledgeRetrievalService::retrieveEvidenceFromMany()
+                // silently caps the candidate document set at 5 (see KnowledgeRetrievalService.php ->take(5)).
+                // Searching an entire brand beyond 5 eligible documents would need a new service method;
+                // that is out of scope for this preview screen, which only proves the wiring works.
+                $documentIds = KnowledgeBase::query()
+                    ->where('brand_id', $scope->brandId)
+                    ->where('site_id', $scope->siteId)
+                    ->where('language_code', $scope->languageCode)
+                    ->where('lifecycle_status', 'active')
+                    ->where('generation_eligible', true)
+                    ->orderBy('id')
+                    ->limit(5)
+                    ->pluck('id')
+                    ->map(static fn (mixed $id): int => (int) $id)
+                    ->all();
+
+                $results = app(KnowledgeRetrievalService::class)->retrieveEvidenceFromMany($scope, $documentIds, $queryText);
+            } catch (InvalidArgumentException $exception) {
+                $scopeError = __('admin.knowledge_bases.retrieval_preview_scope_error', ['message' => $exception->getMessage()]);
+            }
+        }
+
+        return view('admin.knowledge-bases.retrieval-preview', [
+            'pageTitle' => __('admin.knowledge_bases.retrieval_preview_title'),
+            'activeMenu' => 'materials',
+            'adminSiteName' => AdminWeb::siteName(),
+            'filters' => $filters + ['q' => $queryText],
+            'results' => $results,
+            'searched' => $searched,
+            'scopeError' => $scopeError,
+        ] + $this->governanceNavigation($filters));
     }
 
     /**

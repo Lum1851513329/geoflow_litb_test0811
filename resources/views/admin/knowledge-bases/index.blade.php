@@ -13,6 +13,10 @@
                 </div>
             </div>
             <div class="flex items-center gap-3">
+                <a href="{{ route('admin.knowledge-bases.retrieval-preview') }}" class="inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50">
+                    <i data-lucide="search" class="w-4 h-4 mr-2"></i>
+                    {{ __('admin.knowledge_bases.retrieval_preview_link') }}
+                </a>
                 <a href="{{ route('admin.knowledge-bases.create') }}" class="inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50">
                     <i data-lucide="plus" class="w-4 h-4 mr-2"></i>
                     {{ __('admin.knowledge_bases.create_first') }}
