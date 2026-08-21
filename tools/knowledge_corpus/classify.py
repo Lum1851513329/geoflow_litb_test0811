@@ -30,12 +30,26 @@ _PROVENANCE_HEADING = re.compile(r"^\s{0,3}#{1,6}\s+provenance\s*$", re.IGNORECA
 # The PT knowledge base annotates inline links as "（链接：<destination>）" — a
 # Chinese "link:" label wrapping a URL, mail address or anchor.  The characters
 # are markup furniture, not prose, so they must not count as Chinese evidence.
-_LINK_ANNOTATION = re.compile(r"[（(]\s*链\s*接\s*[：:][^（()）]*[）)]")
+#
+# The negated class excludes "\n" so an unclosed opener can never make the
+# match run past the end of its own line and delete the prose that follows.
+_LINK_ANNOTATION = re.compile(r"[（(]\s*链\s*接\s*[：:][^（()）\n]*[）)]")
 # Han characters are counted per character while the Latin markers are counted
-# per word, so genuine Chinese prose always outweighs a Latin marker score by a
-# wide margin.  Requiring the Han count to reach a quarter of the dominant Latin
-# score keeps real Chinese documents comfortably above the bar while stopping a
-# handful of residual CJK characters from overturning hundreds of Latin hits.
+# per word, so the two scores are not dimensionally comparable: a purely
+# proportional guard would let the amount of Chinese text an English page can
+# absorb grow with the page's own length.  The residual-CJK allowance is
+# therefore capped by an absolute ceiling, and the ratio only decides cases
+# that already sit below that ceiling.
+#
+# _MAX_RESIDUAL_HAN is the largest run of Han characters that may still be
+# dismissed as markup residue.  Stripping the annotation above already leaves
+# zero residual Han in every Latin-dominant document of the 154-document
+# corpus, so this ceiling is defence in depth against a future artifact of a
+# shape the stripper does not anticipate, not a rule the current corpus needs.
+# Ten characters covers five unanticipated two-character labels such as "链接"
+# while staying far below real Chinese prose: the smallest genuinely Chinese
+# document in the corpus carries 1872 Han characters, some 187x the ceiling.
+_MAX_RESIDUAL_HAN = 10
 _HAN_MIN_SHARE_DENOMINATOR = 4
 _ROOTS = frozenset({"01_company_info", "02_customer_service", "03_company_policies", "04_product_categories"})
 
@@ -209,10 +223,16 @@ def _detect_language(markdown: str) -> str:
     han_count = len(_HAN.findall(prose))
     latin_score = max(portuguese_score, english_score)
     candidates = set()
-    # "zh" needs both a floor and a share of the competing signal: a document
-    # dominated by Latin markers is not Chinese just because a few Han
-    # characters survived somewhere in it.
-    if han_count >= 2 and han_count * _HAN_MIN_SHARE_DENOMINATOR >= latin_score:
+    # "zh" needs a floor, and below an absolute ceiling it also needs a share
+    # of the competing signal: a document dominated by Latin markers is not
+    # Chinese just because a few Han characters survived somewhere in it.
+    # Past the ceiling the Han evidence stands on its own, so a substantial
+    # block of Chinese prose always makes a Latin-dominant document ambiguous
+    # no matter how long that document is.
+    if han_count >= 2 and (
+        han_count > _MAX_RESIDUAL_HAN
+        or han_count * _HAN_MIN_SHARE_DENOMINATOR >= latin_score
+    ):
         candidates.add("zh")
     if portuguese_score >= 2:
         candidates.add("pt")

@@ -113,6 +113,77 @@ class ClassifyDocumentTest(unittest.TestCase):
                 self.assertEqual("zh", classification.language_code)
                 self.assertNotIn("ambiguous_language", classification.warnings)
 
+    def test_residual_han_tolerance_does_not_grow_with_english_document_length(self):
+        # Reviewer reproduction.  The original guard was proportional
+        # (han_count * 4 >= latin_score), so the amount of Chinese text an
+        # English page could absorb scaled with the page's own length: a
+        # 115-character Chinese jurisdiction notice appended to the real
+        # 3.6_Terms of Use.md (english_score 473) still resolved to "en"
+        # because 115 * 4 == 460 < 473.  The fixture below reproduces those
+        # proportions (english_score 475, han_count 112, 112 * 4 == 448 < 475)
+        # so the proportional clause alone would still answer "en".
+        english_clause = (
+            "The company and our customer support team publish the return policy, "
+            "the returns policy and the shipping policy about delivery for our "
+            "customers in the annual report about our products.\n"
+        )
+        english_body = "# Terms of Use\n\n" + english_clause * 19
+        chinese_notice = (
+            "本条款的解释与适用均以中华人民共和国法律为准据法，任何因本条款引起的或者与"
+            "本条款有关的争议，双方应当首先通过友好协商的方式解决，协商不成的，任何一方"
+            "均有权将争议提交至公司住所地有管辖权的人民法院通过诉讼方式解决。"
+            "本声明自公布之日起生效。"
+        )
+
+        english_only = classify_document("misc/terms.md", self.document(english_body))
+        with_chinese_block = classify_document(
+            "misc/terms.md",
+            self.document(f"{english_body}\n{chinese_notice}\n"),
+        )
+
+        self.assertEqual("en", english_only.language_code)
+        self.assertEqual("und", with_chinese_block.language_code)
+        self.assertIn("ambiguous_language", with_chinese_block.warnings)
+
+    def test_small_residual_han_never_overturns_a_dominant_latin_signal(self):
+        # The other side of the same boundary: a handful of stray Han
+        # characters is markup residue, not evidence of a Chinese document,
+        # no matter how short or long the surrounding English prose is.
+        english_clause = (
+            "The company and our customer support team publish the return policy, "
+            "the returns policy and the shipping policy about delivery for our "
+            "customers in the annual report about our products.\n"
+        )
+        for repetitions in (1, 19):
+            with self.subTest(repetitions=repetitions):
+                markdown = (
+                    "# Terms of Use\n\n"
+                    + english_clause * repetitions
+                    + "\n参见条款说明\n"
+                )
+
+                classification = classify_document("misc/terms.md", self.document(markdown))
+
+                self.assertEqual("en", classification.language_code)
+                self.assertNotIn("ambiguous_language", classification.warnings)
+
+    def test_link_annotation_strip_never_swallows_prose_across_lines(self):
+        # The annotation matcher must stay on one line: an unclosed opener
+        # followed by unrelated prose and a later closing parenthesis must
+        # not delete the English sentences in between.
+        markdown = (
+            "# All You Need To Know\n\n"
+            "（链接：https://www.lightinthebox.com/nh/Cookie-Notice.html\n"
+            "Read the shipping policy and our returns policy before you order.\n"
+            "The company publishes delivery timelines for every customer.\n"
+            "）\n"
+        )
+
+        classification = classify_document("misc/notes.md", self.document(markdown))
+
+        self.assertEqual("en", classification.language_code)
+        self.assertNotIn("ambiguous_language", classification.warnings)
+
     def test_genuinely_bilingual_prose_stays_ambiguous(self):
         markdown = (
             "# 退货政策 / Return Policy\n\n"

@@ -167,6 +167,82 @@ class DeduplicateTest(unittest.TestCase):
         self.assertNotIn("duplicate_of", records[0])
         self.assertEqual("strict_subset_canonical_lacks_content", records[0]["reason"])
 
+    def test_identical_bodies_with_different_front_matter_are_flagged_for_review(self):
+        # Regression: 3.1_All You Need To Know.md and
+        # 3.1_All_You_Need_To_Know/3.1.0_All You Need To Know.md share every
+        # body paragraph and differ only in their heading number and their
+        # "Original URL" provenance line.  Token Jaccard scores 0.868 (below
+        # the 0.92 threshold) and neither fingerprint set is a strict subset
+        # of the other, so both were previously admitted with no review
+        # signal at all.
+        body = (
+            "- All You Need To Know About Covid-19\n\n"
+            "------\n\n"
+            "- **All You Need To Know About Wedding & Events**\n\n"
+            "------\n\n"
+            "- **All You Need To Know About Phone & Electronics**\n\n"
+            "------\n\n"
+            "- **All You Need To Know About Group Buy**\n\n"
+            "------\n\n"
+            "- **All You Need To Know About Men's Custom Suits**\n"
+        )
+        first = self.document(
+            "03_Company_Policies/3.1_All You Need To Know.md",
+            "# 3.1 All You Need To Know\n\n"
+            "**Original URL:** https://example.test/pt/help/shopping-guide\n\n" + body,
+            source_url="https://example.test/pt/help/shopping-guide",
+        )
+        second = self.document(
+            "03_Company_Policies/3.1_All_You_Need_To_Know/3.1.0_All You Need To Know.md",
+            "# 3.1.0 All You Need To Know\n\n"
+            "**Original URL:** https://example.test/pt/nh/All-You-Need-To-Know.html\n\n" + body,
+            source_url="https://example.test/pt/nh/All-You-Need-To-Know.html",
+        )
+
+        records = find_near_duplicates([first, second])
+
+        self.assertEqual(1, len(records))
+        self.assertEqual("near", records[0]["kind"])
+        self.assertEqual("review", records[0]["action"])
+        self.assertNotIn("duplicate_of", records[0])
+        self.assertEqual("identical_body_requires_review", records[0]["reason"])
+        self.assertEqual(
+            {
+                "03_Company_Policies/3.1_All You Need To Know.md",
+                "03_Company_Policies/3.1_All_You_Need_To_Know/3.1.0_All You Need To Know.md",
+            },
+            set(records[0]["relative_paths"]),
+        )
+        self.assertLess(records[0]["similarity"], 0.92)
+
+    def test_body_overlap_does_not_flag_documents_that_merely_share_a_boilerplate_paragraph(self):
+        shared = "This policy applies to every order placed on the website.\n"
+        first = self.document(
+            "a.md",
+            "# Returns\n\n" + shared + "\n" + "\n\n".join(f"Returns detail {n}." for n in range(8)),
+        )
+        second = self.document(
+            "b.md",
+            "# Shipping\n\n" + shared + "\n" + "\n\n".join(f"Shipping detail {n}." for n in range(8)),
+        )
+
+        self.assertEqual([], find_near_duplicates([first, second]))
+
+    def test_body_overlap_ignores_documents_too_short_to_judge(self):
+        # A one-paragraph stub that happens to repeat a paragraph of a longer
+        # document is not evidence of duplication.
+        paragraph = "Orders ship within three business days of payment.\n"
+        stub = self.document("stub.md", "# Shipping\n\n" + paragraph)
+        longer = self.document(
+            "long.md",
+            "# Shipping guide\n\n"
+            + paragraph
+            + "\n"
+            + "\n\n".join(f"Shipping guide detail {n}." for n in range(12)),
+        )
+
+        self.assertEqual([], find_near_duplicates([stub, longer]))
+
     def test_near_duplicates_do_not_cross_brand_language_or_directory_family(self):
         shared = " ".join(f"policyword{number}" for number in range(30))
         first = self.document("a.md", f"# Returns\n\n{shared}\n")

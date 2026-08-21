@@ -20,6 +20,30 @@ from .normalize import NormalizedDocument
 
 _TOKEN = re.compile(r"[\w]+(?:['’-][\w]+)?", re.UNICODE)
 _MARKDOWN_SUFFIXES = frozenset({".md", ".markdown", ".mdown", ".mkdn"})
+_HEADING_LINE = re.compile(r"^\s{0,3}#{1,6}\s+")
+# Provenance front matter identifies where a document came from, not what it
+# says.  Two mirrors of the same page carry different provenance lines, so the
+# body-only signal below has to ignore them the same way it ignores headings.
+_PROVENANCE_LINE = re.compile(
+    r"^\s{0,3}[*_]{0,2}\s*"
+    r"(?:original\s+url|source(?:\s+url)?|url|canonical\s+url|"
+    r"retrieved(?:\s+at|\s+on)?|captured(?:\s+at|\s+on)?|"
+    r"effective\s+date|last\s+updated)"
+    r"\s*[*_]{0,2}\s*[:：]",
+    re.IGNORECASE,
+)
+# Token-set Jaccard is diluted by front-matter differences: the real
+# 3.1_All You Need To Know.md pair shares every body paragraph yet scores only
+# 0.868 because its heading number and Original URL differ.  Containment over
+# body-only paragraph fingerprints measures the same pair at 1.000, while the
+# closest genuinely distinct pair in the real corpus (3.3_Intellectual Property
+# Policy.md vs 3.6_Terms of Use.md, which share boilerplate clauses) measures
+# 0.577.  A 0.9 threshold sits in the middle of that gap.
+_BODY_OVERLAP_THRESHOLD = 0.9
+# Containment is meaningless for a stub: a single paragraph repeated inside a
+# long document would otherwise score 1.000.  Require enough body paragraphs
+# on the smaller side for the overlap to carry information.
+_MIN_BODY_PARAGRAPHS = 3
 
 
 def resolve_exact(documents: Sequence[object]) -> tuple[list[object], list[dict[str, object]]]:
@@ -60,11 +84,20 @@ def find_near_duplicates(documents: Sequence[object], threshold: float = 0.92) -
     family.  Only strict paragraph subsets with a non-lexical provenance
     winner are marked ``merge``.  All other high-similarity pairs remain
     separate and are emitted as ``review`` records.
+
+    A pair whose token similarity stays under ``threshold`` is still reviewed
+    when the two documents share the bulk of their body paragraphs, since
+    front matter alone -- a heading number, a provenance URL -- can hold the
+    token score down while the prose is duplicated verbatim.  Such a pair is
+    never a ``merge`` candidate: only a human decides which export to keep.
     """
     if not 0 <= threshold <= 1:
         raise ValueError("threshold must be between 0 and 1")
 
-    scoped: dict[tuple[str, str, str], list[tuple[object, tuple[frozenset[str], frozenset[str]]]]] = {}
+    scoped: dict[
+        tuple[str, str, str],
+        list[tuple[object, tuple[frozenset[str], frozenset[str], frozenset[str]]]],
+    ] = {}
     for document in documents:
         scoped.setdefault(_near_scope(document), []).append((document, _document_analysis(document)))
 
@@ -76,6 +109,15 @@ def find_near_duplicates(documents: Sequence[object], threshold: float = 0.92) -
                 continue
             similarity = _token_set_similarity(first_analysis[0], second_analysis[0])
             if similarity < threshold:
+                if _body_overlap(first_analysis[2], second_analysis[2]) < _BODY_OVERLAP_THRESHOLD:
+                    continue
+                records.append({
+                    "kind": "near",
+                    "action": "review",
+                    "relative_paths": (_relative_path(first), _relative_path(second)),
+                    "reason": "identical_body_requires_review",
+                    "similarity": similarity,
+                })
                 continue
             subset, superset = _strict_subset_pair(first, second, first_analysis[1], second_analysis[1])
             if subset is not None and _has_unambiguous_provenance_precedence(first, second):
@@ -216,14 +258,31 @@ def _precedence_reason(canonical: object, discarded: object) -> str:
     return "lexical_path_tiebreaker"
 
 
-def _document_analysis(document: object) -> tuple[frozenset[str], frozenset[str]]:
+def _document_analysis(document: object) -> tuple[frozenset[str], frozenset[str], frozenset[str]]:
     markdown = _normalized(document).markdown
-    return frozenset(_tokens(markdown)), _paragraph_fingerprints(markdown)
+    return (
+        frozenset(_tokens(markdown)),
+        _paragraph_fingerprints(markdown),
+        _body_fingerprints(markdown),
+    )
 
 
 def _token_set_similarity(first_tokens: frozenset[str], second_tokens: frozenset[str]) -> float:
     union = first_tokens | second_tokens
     return len(first_tokens & second_tokens) / len(union) if union else 1.0
+
+
+def _body_overlap(first_bodies: frozenset[str], second_bodies: frozenset[str]) -> float:
+    """Share of the smaller document's body paragraphs the two documents share.
+
+    Containment rather than Jaccard, so a mirror that adds a few paragraphs is
+    still recognisable, and the smaller side is the denominator so a long
+    document cannot dilute the signal.
+    """
+    smaller = min(len(first_bodies), len(second_bodies))
+    if smaller < _MIN_BODY_PARAGRAPHS:
+        return 0.0
+    return len(first_bodies & second_bodies) / smaller
 
 
 def _tokens(markdown: str) -> tuple[str, ...]:
@@ -235,6 +294,25 @@ def _paragraph_fingerprints(markdown: str) -> frozenset[str]:
     fingerprints = []
     for paragraph in paragraphs:
         tokens = _tokens(re.sub(r"^\s{0,3}#{1,6}\s+", "", paragraph))
+        if tokens:
+            fingerprints.append(hashlib.sha256(" ".join(tokens).encode("utf-8")).hexdigest())
+    return frozenset(fingerprints)
+
+
+def _body_fingerprints(markdown: str) -> frozenset[str]:
+    """Fingerprint the prose only, with headings and provenance lines removed.
+
+    Two exports of one page differ in their heading number and their source
+    URL while saying exactly the same thing.  Dropping those lines lets the
+    bodies be compared directly instead of through front matter noise.
+    """
+    fingerprints = []
+    for paragraph in re.split(r"\n\s*\n", markdown.strip()):
+        body_lines = [
+            line for line in paragraph.splitlines()
+            if not _HEADING_LINE.match(line) and not _PROVENANCE_LINE.match(line)
+        ]
+        tokens = _tokens("\n".join(body_lines))
         if tokens:
             fingerprints.append(hashlib.sha256(" ".join(tokens).encode("utf-8")).hexdigest())
     return frozenset(fingerprints)
