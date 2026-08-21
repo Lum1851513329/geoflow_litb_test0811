@@ -27,6 +27,16 @@ _WORD = re.compile(r"[\wÀ-ÖØ-öø-ÿ]+", re.UNICODE)
 _HAN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 _URL = re.compile(r"https?://[^\s<>\"']+")
 _PROVENANCE_HEADING = re.compile(r"^\s{0,3}#{1,6}\s+provenance\s*$", re.IGNORECASE)
+# The PT knowledge base annotates inline links as "（链接：<destination>）" — a
+# Chinese "link:" label wrapping a URL, mail address or anchor.  The characters
+# are markup furniture, not prose, so they must not count as Chinese evidence.
+_LINK_ANNOTATION = re.compile(r"[（(]\s*链\s*接\s*[：:][^（()）]*[）)]")
+# Han characters are counted per character while the Latin markers are counted
+# per word, so genuine Chinese prose always outweighs a Latin marker score by a
+# wide margin.  Requiring the Han count to reach a quarter of the dominant Latin
+# score keeps real Chinese documents comfortably above the bar while stopping a
+# handful of residual CJK characters from overturning hundreds of Latin hits.
+_HAN_MIN_SHARE_DENOMINATOR = 4
 _ROOTS = frozenset({"01_company_info", "02_customer_service", "03_company_policies", "04_product_categories"})
 
 
@@ -196,8 +206,13 @@ def _detect_language(markdown: str) -> str:
     if "novo em" in prose.casefold():
         portuguese_score += 2
     english_score = sum(word in _ENGLISH_MARKERS for word in words)
+    han_count = len(_HAN.findall(prose))
+    latin_score = max(portuguese_score, english_score)
     candidates = set()
-    if len(_HAN.findall(prose)) >= 2:
+    # "zh" needs both a floor and a share of the competing signal: a document
+    # dominated by Latin markers is not Chinese just because a few Han
+    # characters survived somewhere in it.
+    if han_count >= 2 and han_count * _HAN_MIN_SHARE_DENOMINATOR >= latin_score:
         candidates.add("zh")
     if portuguese_score >= 2:
         candidates.add("pt")
@@ -215,7 +230,9 @@ def _prose_for_language(markdown: str) -> str:
             continue
         if not in_provenance:
             prose_lines.append(line)
-    return _URL.sub(" ", "\n".join(prose_lines))
+    # Drop the Chinese link annotations before the URLs they wrap, so the whole
+    # annotation disappears instead of leaving a bare "（链接：）" behind.
+    return _URL.sub(" ", _LINK_ANNOTATION.sub(" ", "\n".join(prose_lines)))
 
 
 def _governance_for(

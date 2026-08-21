@@ -77,6 +77,57 @@ class ClassifyDocumentTest(unittest.TestCase):
                 if language_code == "und":
                     self.assertIn("ambiguous_language", classification.warnings)
 
+    def test_chinese_link_annotations_do_not_overturn_english_prose(self):
+        # The PT knowledge base annotates inline links with a Chinese "（链接：url）"
+        # label.  Those residual Han characters must not make an English document
+        # look bilingual, even when the English signal itself is modest.
+        markdown = (
+            "# All You Need To Know\n\n"
+            "Read the shipping policy and our returns policy before you order.\n\n"
+            "<u>Cookie Notice</u>（链接：https://www.lightinthebox.com/nh/Cookie-Notice.html）\n"
+            "<u>Terms of Use</u>（链接：https://www.lightinthebox.com/nh/Term-Of-Use.html）\n"
+            "**Email: **ipip@lightinthebox.com（链接：ipip@lightinthebox.com）\n"
+        )
+
+        classification = classify_document("misc/notes.md", self.document(markdown))
+
+        self.assertEqual("en", classification.language_code)
+        self.assertNotIn("ambiguous_language", classification.warnings)
+
+    def test_still_detects_chinese_prose_including_annotated_links(self):
+        chinese_prose = (
+            "# 公司概况\n\n"
+            "兰亭集势是一家总部位于中国的跨境电子商务公司，主要通过自有网站向全球"
+            "消费者销售服装、家居用品与消费电子产品。公司成立于二零零七年，并于二"
+            "零一三年在纽约证券交易所挂牌上市。\n"
+        )
+        cases = (
+            chinese_prose,
+            chinese_prose + "\n参见隐私政策（链接：https://www.lightinthebox.com/nh/Privacy-Note.html）\n",
+        )
+
+        for markdown in cases:
+            with self.subTest(markdown=markdown):
+                classification = classify_document("misc/notes.md", self.document(markdown))
+
+                self.assertEqual("zh", classification.language_code)
+                self.assertNotIn("ambiguous_language", classification.warnings)
+
+    def test_genuinely_bilingual_prose_stays_ambiguous(self):
+        markdown = (
+            "# 退货政策 / Return Policy\n\n"
+            "本公司的退货政策适用于所有通过官方网站购买的商品，消费者可以在收到"
+            "包裹之后申请退货或者换货，具体的运费与时效请参阅下方说明。\n\n"
+            "Our company applies the same return policy to the products we ship. "
+            "The returns policy and the delivery timelines are described for every "
+            "customer in our annual report about shipping and delivery.\n"
+        )
+
+        classification = classify_document("misc/notes.md", self.document(markdown))
+
+        self.assertEqual("und", classification.language_code)
+        self.assertIn("ambiguous_language", classification.warnings)
+
     def test_detects_portuguese_from_body_not_legacy_english_path_label(self):
         document = self.document(
             "# Política de devoluções\n\n"
