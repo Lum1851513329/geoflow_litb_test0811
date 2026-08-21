@@ -54,6 +54,12 @@ class KeywordIntelligenceController extends Controller
             'keywords' => $query->paginate(20)->withQueryString(),
             'batches' => KeywordImportBatch::query()->latest()->limit(10)->get(),
             'clusterCount' => KeywordCluster::query()->count(),
+            'totalKeywordCount' => Keyword::query()->count(),
+            'totalNodeCount' => KeywordNode::query()->count(),
+            'categoryBreakdown' => $this->categoryBreakdown(),
+            'typeBreakdown' => Keyword::query()->select('keyword_type')->selectRaw('count(*) as total')->groupBy('keyword_type')->orderByDesc('total')->get(),
+            'intentBreakdown' => Keyword::query()->select('search_intent')->selectRaw('count(*) as total')->groupBy('search_intent')->orderByDesc('total')->get(),
+            'languageBreakdown' => Keyword::query()->select('language_code')->selectRaw('count(*) as total')->groupBy('language_code')->orderByDesc('total')->limit(10)->get(),
         ]);
     }
 
@@ -247,5 +253,22 @@ class KeywordIntelligenceController extends Controller
     private function importViewData(?array $preview = null): array
     {
         return ['pageTitle' => __('admin.keyword_intelligence.import.title'), 'activeMenu' => 'materials', 'libraries' => KeywordLibrary::query()->orderBy('name')->get(), 'preview' => $preview];
+    }
+
+    /**
+     * One query, correlated per depth-0 row: direct keyword count plus full-subtree node
+     * and keyword counts via a path-prefix match against keyword_nodes.path.
+     */
+    private function categoryBreakdown()
+    {
+        return KeywordNode::query()
+            ->where('depth', 0)
+            ->select('keyword_nodes.*')
+            ->withCount('keywords')
+            ->selectRaw("(select count(*) from keyword_nodes c where c.taxonomy_id = keyword_nodes.taxonomy_id and (c.path = keyword_nodes.path or c.path like keyword_nodes.path || '/%')) as subtree_node_count")
+            ->selectRaw("(select count(*) from keyword_node_keyword knk inner join keyword_nodes c on c.id = knk.node_id where c.taxonomy_id = keyword_nodes.taxonomy_id and (c.path = keyword_nodes.path or c.path like keyword_nodes.path || '/%')) as subtree_keyword_count")
+            ->get()
+            ->sortByDesc('subtree_keyword_count')
+            ->values();
     }
 }

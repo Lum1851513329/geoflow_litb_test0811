@@ -482,6 +482,48 @@ class AdminKeywordIntelligenceTest extends TestCase
         }
     }
 
+    public function test_overview_shows_keyword_taxonomy_classification_aggregates(): void
+    {
+        $library = $this->library();
+        $taxonomy = KeywordTaxonomy::query()->create(['name' => 'Products', 'slug' => 'products', 'status' => 'active']);
+        $root = KeywordNode::query()->create(['taxonomy_id' => $taxonomy->id, 'name' => 'Fashion', 'slug' => 'fashion', 'path' => 'fashion', 'depth' => 0, 'sort_order' => 0]);
+        $child = KeywordNode::query()->create(['taxonomy_id' => $taxonomy->id, 'parent_id' => $root->id, 'name' => 'Dresses', 'slug' => 'dresses', 'path' => 'fashion/dresses', 'depth' => 1, 'sort_order' => 0]);
+        $grandchild = KeywordNode::query()->create(['taxonomy_id' => $taxonomy->id, 'parent_id' => $child->id, 'name' => 'Party Dresses', 'slug' => 'party-dresses', 'path' => 'fashion/dresses/party-dresses', 'depth' => 2, 'sort_order' => 0]);
+        $otherRoot = KeywordNode::query()->create(['taxonomy_id' => $taxonomy->id, 'name' => 'Electronics', 'slug' => 'electronics', 'path' => 'electronics', 'depth' => 0, 'sort_order' => 1]);
+
+        $fashionKeywords = collect(range(1, 5))->map(fn (int $index) => Keyword::query()->create(['library_id' => $library->id, 'keyword' => "fashion keyword {$index}", 'normalized_keyword' => "fashion keyword {$index}", 'language_code' => 'en', 'market_scope' => 'GLOBAL', 'keyword_type' => 'category', 'search_intent' => 'commercial', 'brand_relation' => 'non_brand', 'status' => 'active']));
+        $otherKeyword = Keyword::query()->create(['library_id' => $library->id, 'keyword' => 'phone case', 'normalized_keyword' => 'phone case', 'language_code' => 'fr', 'market_scope' => 'GLOBAL', 'keyword_type' => 'product', 'search_intent' => 'transactional', 'brand_relation' => 'non_brand', 'status' => 'active']);
+
+        $root->keywords()->attach([$fashionKeywords[0]->id, $fashionKeywords[1]->id], ['is_primary' => true]);
+        $child->keywords()->attach([$fashionKeywords[2]->id, $fashionKeywords[3]->id], ['is_primary' => true]);
+        $grandchild->keywords()->attach([$fashionKeywords[4]->id], ['is_primary' => true]);
+        $otherRoot->keywords()->attach([$otherKeyword->id], ['is_primary' => true]);
+
+        $response = $this->actingAs($this->admin(), 'admin')->get(route('admin.keyword-intelligence.index'))->assertOk();
+
+        $this->assertSame(6, $response->viewData('totalKeywordCount'));
+        $this->assertSame(4, $response->viewData('totalNodeCount'));
+
+        $categoryBreakdown = $response->viewData('categoryBreakdown');
+        $fashion = $categoryBreakdown->firstWhere('id', $root->id);
+        $this->assertNotNull($fashion);
+        $this->assertSame(2, (int) $fashion->keywords_count);
+        $this->assertSame(3, (int) $fashion->subtree_node_count);
+        $this->assertSame(5, (int) $fashion->subtree_keyword_count);
+        $electronics = $categoryBreakdown->firstWhere('id', $otherRoot->id);
+        $this->assertSame(1, (int) $electronics->keywords_count);
+        $this->assertSame(1, (int) $electronics->subtree_node_count);
+        $this->assertSame(1, (int) $electronics->subtree_keyword_count);
+        $this->assertSame([$fashion->id, $electronics->id], $categoryBreakdown->pluck('id')->all());
+
+        $typeBreakdown = $response->viewData('typeBreakdown')->keyBy('keyword_type');
+        $this->assertSame(5, (int) $typeBreakdown['category']->total);
+        $this->assertSame(1, (int) $typeBreakdown['product']->total);
+
+        $response->assertSee(__('admin.keyword_intelligence.overview.classification.title'))
+            ->assertSee('Fashion')->assertSee('Electronics');
+    }
+
     private function admin(): Admin
     {
         return Admin::query()->firstOrCreate(['username' => 'keyword_admin'], ['password' => 'secret', 'email' => 'keyword@example.com', 'display_name' => 'Keyword Admin', 'role' => 'admin', 'status' => 'active']);
