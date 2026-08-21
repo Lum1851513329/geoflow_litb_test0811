@@ -520,12 +520,37 @@ class AdminKeywordIntelligenceTest extends TestCase
         $this->assertSame(5, (int) $typeBreakdown['category']->total);
         $this->assertSame(1, (int) $typeBreakdown['product']->total);
 
+        // Donut chart segment math: cumulative stops are derived from the running integer
+        // count (5 of 6, then 6 of 6), not from previously-rounded percentages, so the
+        // second segment's end lands on exactly 100 with no drift/gap in the conic-gradient.
+        $this->assertSame(0.0, $typeBreakdown['category']->segment_start);
+        $this->assertSame(83.3333, $typeBreakdown['category']->segment_end);
+        $this->assertSame(83.3, $typeBreakdown['category']->percentage);
+        $this->assertSame(83.3333, $typeBreakdown['product']->segment_start);
+        $this->assertSame(100.0, $typeBreakdown['product']->segment_end);
+        $this->assertSame(16.7, $typeBreakdown['product']->percentage);
+
+        // The category bar chart scales against the largest subtree in the set (Fashion,
+        // 5 keywords), not the grand total, so the biggest bar always renders full width.
+        $this->assertSame(100.0, $fashion->bar_percentage);
+        $this->assertSame(20.0, $electronics->bar_percentage);
+
         // Asserts the literal rendered copy in the app's default test locale (config('app.locale')
         // is zh_CN — see .env APP_LOCALE=zh_CN), not __() applied to the same key path the
         // controller/view use, so a missing/mismatched translation key fails this test instead
         // of coincidentally passing.
         $response->assertSee('分类总览')
             ->assertSee('顶级分类')->assertSee('Fashion')->assertSee('Electronics');
+
+        // The rendered HTML actually carries the computed percentages (conic-gradient stops
+        // and the legend/bar labels), not just the view-data collections above.
+        $response->assertSee('conic-gradient', false)
+            ->assertSee('0% 83.3333%', false)
+            ->assertSee('83.3333% 100%', false)
+            ->assertSee('83.3%')
+            ->assertSee('16.7%')
+            ->assertSee('width: 100%;', false)
+            ->assertSee('width: 20%;', false);
     }
 
     public function test_overview_subtree_counts_escape_like_metacharacters_in_legacy_paths(): void

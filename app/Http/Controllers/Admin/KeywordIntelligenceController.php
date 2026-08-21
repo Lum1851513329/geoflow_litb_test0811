@@ -29,6 +29,7 @@ use DomainException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Log;
 use Illuminate\View\View;
 use InvalidArgumentException;
@@ -57,9 +58,9 @@ class KeywordIntelligenceController extends Controller
             'totalKeywordCount' => Keyword::query()->count(),
             'totalNodeCount' => KeywordNode::query()->count(),
             'categoryBreakdown' => $this->categoryBreakdown(),
-            'typeBreakdown' => Keyword::query()->select('keyword_type')->selectRaw('count(*) as total')->groupBy('keyword_type')->orderByDesc('total')->get(),
-            'intentBreakdown' => Keyword::query()->select('search_intent')->selectRaw('count(*) as total')->groupBy('search_intent')->orderByDesc('total')->get(),
-            'languageBreakdown' => Keyword::query()->select('language_code')->selectRaw('count(*) as total')->groupBy('language_code')->orderByDesc('total')->limit(10)->get(),
+            'typeBreakdown' => $this->withChartPercentages(Keyword::query()->select('keyword_type')->selectRaw('count(*) as total')->groupBy('keyword_type')->orderByDesc('total')->get()),
+            'intentBreakdown' => $this->withChartPercentages(Keyword::query()->select('search_intent')->selectRaw('count(*) as total')->groupBy('search_intent')->orderByDesc('total')->get()),
+            'languageBreakdown' => $this->withChartPercentages(Keyword::query()->select('language_code')->selectRaw('count(*) as total')->groupBy('language_code')->orderByDesc('total')->limit(10)->get()),
         ]);
     }
 
@@ -271,7 +272,7 @@ class KeywordIntelligenceController extends Controller
         SQL;
         $subtreeCondition = '(c.path = keyword_nodes.path or c.path like '.$escapedPath." || '/%' ESCAPE '\\')";
 
-        return KeywordNode::query()
+        $nodes = KeywordNode::query()
             ->where('depth', 0)
             ->select('keyword_nodes.*')
             ->withCount('keywords')
@@ -279,5 +280,36 @@ class KeywordIntelligenceController extends Controller
             ->selectRaw("(select count(*) from keyword_node_keyword knk inner join keyword_nodes c on c.id = knk.node_id where c.taxonomy_id = keyword_nodes.taxonomy_id and {$subtreeCondition}) as subtree_keyword_count")
             ->orderByDesc('subtree_keyword_count')
             ->get();
+
+        // Bar width is relative to the largest subtree in this set (not the grand total),
+        // so the biggest category always renders a full-width bar and the rest scale under it.
+        $max = (int) $nodes->max('subtree_keyword_count');
+
+        return $nodes->each(function (KeywordNode $node) use ($max): void {
+            $node->bar_percentage = $max > 0 ? round(((int) $node->subtree_keyword_count) / $max * 100, 2) : 0.0;
+        });
+    }
+
+    /**
+     * Adds donut-chart segment data to a grouped "label + total" breakdown collection:
+     * `percentage` (share of this collection's total, rounded for the legend) plus
+     * `segment_start`/`segment_end` (cumulative share, for conic-gradient stops).
+     *
+     * Cumulative stops are derived from the running integer count (not from previously
+     * rounded percentages), so rounding never drifts and the final stop always lands on
+     * exactly 100 — no gaps or overlaps in the rendered donut.
+     */
+    private function withChartPercentages(Collection $rows): Collection
+    {
+        $sum = (int) $rows->sum('total');
+        $cumulative = 0;
+
+        return $rows->values()->each(function ($row) use (&$cumulative, $sum): void {
+            $count = (int) $row->total;
+            $row->segment_start = $sum > 0 ? round($cumulative / $sum * 100, 4) : 0.0;
+            $cumulative += $count;
+            $row->segment_end = $sum > 0 ? round($cumulative / $sum * 100, 4) : 0.0;
+            $row->percentage = $sum > 0 ? round($count / $sum * 100, 1) : 0.0;
+        });
     }
 }
