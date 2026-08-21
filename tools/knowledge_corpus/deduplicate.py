@@ -38,8 +38,11 @@ _PROVENANCE_LINE = re.compile(
 # body-only paragraph fingerprints measures the same pair at 1.000, while the
 # closest genuinely distinct pair in the real corpus (3.3_Intellectual Property
 # Policy.md vs 3.6_Terms of Use.md, which share boilerplate clauses) measures
-# 0.577.  A 0.9 threshold sits in the middle of that gap.
-_BODY_OVERLAP_THRESHOLD = 0.9
+# 0.577.  The threshold sits well inside that gap, and is pinned to 0.92 to
+# match the floor KnowledgeImportValidator enforces on every near review row:
+# the body overlap is what such a row reports as its similarity, so an equal
+# threshold makes every emitted row importable by construction.
+_BODY_OVERLAP_THRESHOLD = 0.92
 # Containment is meaningless for a stub: a single paragraph repeated inside a
 # long document would otherwise score 1.000.  Require enough body paragraphs
 # on the smaller side for the overlap to carry information.
@@ -89,7 +92,9 @@ def find_near_duplicates(documents: Sequence[object], threshold: float = 0.92) -
     when the two documents share the bulk of their body paragraphs, since
     front matter alone -- a heading number, a provenance URL -- can hold the
     token score down while the prose is duplicated verbatim.  Such a pair is
-    never a ``merge`` candidate: only a human decides which export to keep.
+    never a ``merge`` candidate: only a human decides which export to keep, and
+    the ``similarity`` it reports is the body overlap that detected it rather
+    than the token score that missed it.
     """
     if not 0 <= threshold <= 1:
         raise ValueError("threshold must be between 0 and 1")
@@ -109,14 +114,15 @@ def find_near_duplicates(documents: Sequence[object], threshold: float = 0.92) -
                 continue
             similarity = _token_set_similarity(first_analysis[0], second_analysis[0])
             if similarity < threshold:
-                if _body_overlap(first_analysis[2], second_analysis[2]) < _BODY_OVERLAP_THRESHOLD:
+                body_overlap = _body_overlap(first_analysis[2], second_analysis[2])
+                if body_overlap < _BODY_OVERLAP_THRESHOLD:
                     continue
                 records.append({
                     "kind": "near",
                     "action": "review",
                     "relative_paths": (_relative_path(first), _relative_path(second)),
-                    "reason": "identical_body_requires_review",
-                    "similarity": similarity,
+                    "reason": "near_duplicate_requires_review",
+                    "similarity": body_overlap,
                 })
                 continue
             subset, superset = _strict_subset_pair(first, second, first_analysis[1], second_analysis[1])

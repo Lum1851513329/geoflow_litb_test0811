@@ -205,7 +205,7 @@ class DeduplicateTest(unittest.TestCase):
         self.assertEqual("near", records[0]["kind"])
         self.assertEqual("review", records[0]["action"])
         self.assertNotIn("duplicate_of", records[0])
-        self.assertEqual("identical_body_requires_review", records[0]["reason"])
+        self.assertEqual("near_duplicate_requires_review", records[0]["reason"])
         self.assertEqual(
             {
                 "03_Company_Policies/3.1_All You Need To Know.md",
@@ -213,7 +213,12 @@ class DeduplicateTest(unittest.TestCase):
             },
             set(records[0]["relative_paths"]),
         )
-        self.assertLess(records[0]["similarity"], 0.92)
+        # The reported score is the body overlap that actually drove the
+        # detection, not the diluted token Jaccard.  KnowledgeImportValidator
+        # rejects any near review row scoring under 0.92, and the body overlap
+        # threshold is pinned to the same floor so no emitted row can fail it.
+        self.assertGreaterEqual(records[0]["similarity"], 0.92)
+        self.assertEqual(1.0, records[0]["similarity"])
 
     def test_body_overlap_does_not_flag_documents_that_merely_share_a_boilerplate_paragraph(self):
         shared = "This policy applies to every order placed on the website.\n"
