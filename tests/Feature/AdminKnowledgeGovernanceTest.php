@@ -824,7 +824,10 @@ final class AdminKnowledgeGovernanceTest extends TestCase
             'embedding_json' => '[]',
         ]);
 
-        // A real query against the real retrieval service must surface the fixture document.
+        // A real query against the real retrieval service must surface the fixture document,
+        // including its citation-relevant source_url — even though this scope has exactly one
+        // eligible document, which routes through retrieveEvidenceFromMany()'s single-document
+        // short-circuit (metadata only, no provenance array).
         $this->get(route('admin.knowledge-bases.retrieval-preview', [
             'brand_id' => $scope['brand']->id,
             'site_id' => $scope['site']->id,
@@ -833,7 +836,8 @@ final class AdminKnowledgeGovernanceTest extends TestCase
         ]))
             ->assertOk()
             ->assertSee('Warranty Coverage Policy')
-            ->assertSee('unopened electronics', false);
+            ->assertSee('unopened electronics', false)
+            ->assertSee('https://www.lightinthebox.test/source', false);
 
         // Missing brand/site scope must render an empty/browse state, never a 500.
         $this->get(route('admin.knowledge-bases.retrieval-preview', ['q' => 'warranty']))
@@ -846,6 +850,19 @@ final class AdminKnowledgeGovernanceTest extends TestCase
             'site_id' => $scope['site']->id,
         ]))
             ->assertOk()
+            ->assertDontSee('Warranty Coverage Policy');
+
+        // A malformed language_code must render a translated inline error, not a 500.
+        $this->get(route('admin.knowledge-bases.retrieval-preview', [
+            'brand_id' => $scope['brand']->id,
+            'site_id' => $scope['site']->id,
+            'language_code' => '!!',
+            'q' => 'warranty',
+        ]))
+            ->assertOk()
+            ->assertSee(__('admin.knowledge_bases.retrieval_preview_scope_error', [
+                'message' => 'Knowledge scope requires a valid BCP 47-compatible language code.',
+            ]))
             ->assertDontSee('Warranty Coverage Policy');
     }
 

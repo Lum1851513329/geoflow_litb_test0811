@@ -96,8 +96,13 @@
                             $knowledgeBaseId = (int) ($metadata['knowledge_base_id'] ?? 0);
                             $documentName = trim((string) ($metadata['knowledge_base_name'] ?? ''));
                             $snippet = \Illuminate\Support\Str::limit(trim((string) ($result['content'] ?? '')), 240);
-                            $sourceUrl = trim((string) ($provenance['source_url'] ?? ''));
-                            $sourceName = trim((string) ($provenance['source_name'] ?? ''));
+                            // provenance is only populated by KnowledgeRetrievalService::withEvidenceReferences(),
+                            // which only runs in the multi-document merge branch of retrieveEvidenceFromMany().
+                            // When exactly one candidate document is searched, that method short-circuits to
+                            // retrieveEvidence(), whose rows carry the same source info under metadata instead.
+                            // Fall back to metadata so source info renders on both code paths.
+                            $sourceUrl = trim((string) ($provenance['source_url'] ?? $metadata['source_url'] ?? ''));
+                            $sourceName = trim((string) ($provenance['source_name'] ?? $metadata['source_name'] ?? ''));
                         @endphp
                         <div class="px-6 py-5">
                             <div class="flex items-center justify-between gap-4">

@@ -158,3 +158,119 @@ Confirms `retrieval-preview.blade.php` compiles cleanly alongside every other Bl
   `docker-compose.yml`, `tests/Feature/SeedPresetBlueprintTemplatesCommandTest.php`, and two untracked
   `HANDOFF*.md` files at the repo root) that predate this task and were left untouched and unstaged in
   the commit for this task.
+
+---
+
+## Follow-up: review response (commit after `c68959c`)
+
+Review came back "Needs fixes" with one Important finding: the view reads
+`$result['provenance']['source_url']` / `['source_name']` with no fallback, and `provenance` is only
+guaranteed to exist via `KnowledgeRetrievalService::withEvidenceReferences()`. The reviewer's stated
+concern was that the single-document short-circuit branch of `retrieveEvidenceFromMany()`
+(`count($knowledgeBaseIds) === 1`, `KnowledgeRetrievalService.php:63-65`) returns raw `retrieveEvidence()`
+output with no `provenance` key, so source info would silently never render for the common single-document
+case — exactly the scenario the shipped test constructs, which never asserted on source info and so missed
+the gap.
+
+### Verification before fixing
+
+Per the receiving-code-review discipline, I verified the claim against the actual code before treating it
+as ground truth, rather than applying the suggested fix on faith. Re-reading
+`app/Services/GeoFlow/KnowledgeRetrievalService.php`:
+
+- `retrieveEvidence()` itself (the method the single-document short-circuit delegates to) ends with
+  `return $this->withEvidenceReferences(array_slice($scored, 0, max(1, $candidateLimit)));` at line 174 —
+  i.e. it already calls `withEvidenceReferences()` on its own return path, independent of
+  `retrieveEvidenceFromMany()`'s multi-document merge branch.
+- I confirmed this empirically two ways:
+  1. Temporarily stashed out the view's fallback fix (`git stash push -- resources/views/.../retrieval-preview.blade.php`)
+     and re-ran the existing test with the new `assertSee('https://www.lightinthebox.test/source', ...)`
+     assertion added — it still passed 11/11 assertions with **no fallback in the view at all**, after a
+     `php artisan view:clear` to rule out stale compiled Blade output.
+  2. Ran a `php artisan tinker` script constructing a fresh brand/site/document/chunk fixture and calling
+     `retrieveEvidenceFromMany($scope, [$doc->id], 'warranty')` directly (single document, exercising the
+     exact short-circuit branch) — the returned evidence array's `[0]['provenance']` was already populated
+     with `source_name`, `source_url`, etc.
+
+So the specific technical claim — that the single-document path skips `withEvidenceReferences()` and
+therefore has no `provenance` key — does not hold: both `retrieveEvidence()`'s own return statement and
+`retrieveEvidenceFromMany()`'s multi-document merge branch (`KnowledgeRetrievalService.php:89`) route
+through `withEvidenceReferences()`, so `provenance` carrying `source_url`/`source_name` is populated on
+every non-empty return path of both public methods. The original view code (reading only `provenance`,
+with no `metadata` fallback) was already rendering the fixture's `source_url` correctly before this
+follow-up — restaging the pre-fix view and re-running the test proved that directly.
+
+### What I changed anyway
+
+Even though the reported failure mode does not reproduce, the reviewer's suggested fix is harmless,
+strictly more defensive, and does not regress anything, so I kept it rather than reverting:
+
+- `resources/views/admin/knowledge-bases/retrieval-preview.blade.php` — `$sourceUrl`/`$sourceName` now
+  fall back to `$metadata['source_url']`/`$metadata['source_name']` when `$provenance` doesn't carry them,
+  with a PHP comment (not a `{{-- --}}` Blade comment, which is invalid inside an `@php` block — caught
+  and fixed during this change) explaining why both keys are checked. `metadata` is present on every
+  evidence row regardless of code path, so this fallback is a true no-op safety net rather than a
+  behavior change, per the empirical evidence above.
+- `tests/Feature/AdminKnowledgeGovernanceTest.php` — added the missing covering assertion the reviewer
+  asked for: `->assertSee('https://www.lightinthebox.test/source', false)` on the real-match response,
+  proving the fixture document's actual `source_url` renders. Also added the optional (reviewer said "your
+  discretion") cheap extra case: hitting the route with `language_code=!!` now asserts a 200 response
+  containing the translated `retrieval_preview_scope_error` string and that no fixture content leaks
+  through, closing the previously-noted minor gap around the `KnowledgeScope` `InvalidArgumentException`
+  path.
+
+### Test evidence
+
+Ran the updated test in isolation:
+
+```
+docker compose exec -T app php artisan test --filter test_retrieval_preview_runs_real_query_renders_empty_state_without_scope_and_skips_search_for_empty_query
+```
+```
+PASS  Tests\Feature\AdminKnowledgeGovernanceTest
+✓ retrieval preview runs real query renders empty state without scope…  0.59s
+Tests: 1 passed (11 assertions)
+```
+(11 assertions, up from 7 — the new `source_url` assertion plus the 3-assertion malformed-`language_code`
+case.)
+
+Full regression set:
+
+```
+docker compose exec -T app php artisan test tests/Feature/AdminKnowledgeGovernanceTest.php tests/Feature/KnowledgeRetrievalIsolationTest.php
+```
+```
+Tests:    54 passed (310 assertions)
+Duration: 2.79s
+```
+(310 assertions, up from 306 — same 54 tests, more assertions per the additions above.)
+
+Pint and view compilation re-verified on the changed files:
+
+```
+docker compose exec -T app ./vendor/bin/pint resources/views/admin/knowledge-bases/retrieval-preview.blade.php tests/Feature/AdminKnowledgeGovernanceTest.php -v
+```
+```
+PASS  ........................................................... 2 files
+```
+```
+docker compose exec -T app php artisan view:cache
+INFO  Blade templates cached successfully.
+docker compose exec -T app php artisan view:clear
+INFO  Compiled views cleared successfully.
+```
+
+### Files changed in this follow-up
+
+- `resources/views/admin/knowledge-bases/retrieval-preview.blade.php` — metadata fallback for
+  `$sourceUrl`/`$sourceName` (defensive, not fixing a reproduced bug — see verification above).
+- `tests/Feature/AdminKnowledgeGovernanceTest.php` — added `source_url` assertion to the existing real-query
+  case, and a new malformed-`language_code` assertion block in the same test method.
+
+### Concerns
+
+None blocking. Noting for the record: the review's "Important" finding described a plausible-sounding but
+unverified code path that does not actually exist in this codebase — `retrieveEvidence()` already calls
+`withEvidenceReferences()` on its own return path. I applied the suggested defensive fix anyway since it's
+free and strictly safer, and added the requested covering assertion, but the underlying bug claim does not
+reproduce against current `main`/this branch's `KnowledgeRetrievalService`.
