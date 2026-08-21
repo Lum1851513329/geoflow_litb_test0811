@@ -96,11 +96,10 @@
                             $knowledgeBaseId = (int) ($metadata['knowledge_base_id'] ?? 0);
                             $documentName = trim((string) ($metadata['knowledge_base_name'] ?? ''));
                             $snippet = \Illuminate\Support\Str::limit(trim((string) ($result['content'] ?? '')), 240);
-                            // provenance is only populated by KnowledgeRetrievalService::withEvidenceReferences(),
-                            // which only runs in the multi-document merge branch of retrieveEvidenceFromMany().
-                            // When exactly one candidate document is searched, that method short-circuits to
-                            // retrieveEvidence(), whose rows carry the same source info under metadata instead.
-                            // Fall back to metadata so source info renders on both code paths.
+                            // Defensive fallback: metadata always carries the same source_url/source_name as
+                            // provenance (both derive from the same candidate), so this is a no-op today but
+                            // guards against a future retrieveEvidenceFromMany() change that stops populating
+                            // provenance on some path.
                             $sourceUrl = trim((string) ($provenance['source_url'] ?? $metadata['source_url'] ?? ''));
                             $sourceName = trim((string) ($provenance['source_name'] ?? $metadata['source_name'] ?? ''));
                         @endphp

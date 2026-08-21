@@ -825,9 +825,8 @@ final class AdminKnowledgeGovernanceTest extends TestCase
         ]);
 
         // A real query against the real retrieval service must surface the fixture document,
-        // including its citation-relevant source_url — even though this scope has exactly one
-        // eligible document, which routes through retrieveEvidenceFromMany()'s single-document
-        // short-circuit (metadata only, no provenance array).
+        // including its citation-relevant source_url, when this scope has exactly one eligible
+        // document and routes through retrieveEvidenceFromMany()'s single-document short-circuit.
         $this->get(route('admin.knowledge-bases.retrieval-preview', [
             'brand_id' => $scope['brand']->id,
             'site_id' => $scope['site']->id,
