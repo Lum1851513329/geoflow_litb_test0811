@@ -258,17 +258,26 @@ class KeywordIntelligenceController extends Controller
     /**
      * One query, correlated per depth-0 row: direct keyword count plus full-subtree node
      * and keyword counts via a path-prefix match against keyword_nodes.path.
+     *
+     * Legacy paths can contain literal LIKE metacharacters (`%`, `_`, `\`), so the outer
+     * row's path is escaped before being used as a LIKE pattern, mirroring
+     * KeywordTaxonomyService::descendantPathPattern()/subtreeQuery().
      */
     private function categoryBreakdown()
     {
+        // Escape backslash first, then % and _, matching descendantPathPattern()'s order.
+        $escapedPath = <<<'SQL'
+        REPLACE(REPLACE(REPLACE(keyword_nodes.path, '\', '\\'), '%', '\%'), '_', '\_')
+        SQL;
+        $subtreeCondition = '(c.path = keyword_nodes.path or c.path like '.$escapedPath." || '/%' ESCAPE '\\')";
+
         return KeywordNode::query()
             ->where('depth', 0)
             ->select('keyword_nodes.*')
             ->withCount('keywords')
-            ->selectRaw("(select count(*) from keyword_nodes c where c.taxonomy_id = keyword_nodes.taxonomy_id and (c.path = keyword_nodes.path or c.path like keyword_nodes.path || '/%')) as subtree_node_count")
-            ->selectRaw("(select count(*) from keyword_node_keyword knk inner join keyword_nodes c on c.id = knk.node_id where c.taxonomy_id = keyword_nodes.taxonomy_id and (c.path = keyword_nodes.path or c.path like keyword_nodes.path || '/%')) as subtree_keyword_count")
-            ->get()
-            ->sortByDesc('subtree_keyword_count')
-            ->values();
+            ->selectRaw("(select count(*) from keyword_nodes c where c.taxonomy_id = keyword_nodes.taxonomy_id and {$subtreeCondition}) as subtree_node_count")
+            ->selectRaw("(select count(*) from keyword_node_keyword knk inner join keyword_nodes c on c.id = knk.node_id where c.taxonomy_id = keyword_nodes.taxonomy_id and {$subtreeCondition}) as subtree_keyword_count")
+            ->orderByDesc('subtree_keyword_count')
+            ->get();
     }
 }

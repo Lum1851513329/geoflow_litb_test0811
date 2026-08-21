@@ -520,8 +520,37 @@ class AdminKeywordIntelligenceTest extends TestCase
         $this->assertSame(5, (int) $typeBreakdown['category']->total);
         $this->assertSame(1, (int) $typeBreakdown['product']->total);
 
-        $response->assertSee(__('admin.keyword_intelligence.overview.classification.title'))
-            ->assertSee('Fashion')->assertSee('Electronics');
+        // Asserts the literal rendered copy in the app's default test locale (config('app.locale')
+        // is zh_CN — see .env APP_LOCALE=zh_CN), not __() applied to the same key path the
+        // controller/view use, so a missing/mismatched translation key fails this test instead
+        // of coincidentally passing.
+        $response->assertSee('分类总览')
+            ->assertSee('顶级分类')->assertSee('Fashion')->assertSee('Electronics');
+    }
+
+    public function test_overview_subtree_counts_escape_like_metacharacters_in_legacy_paths(): void
+    {
+        $library = $this->library();
+        $taxonomy = KeywordTaxonomy::query()->create(['name' => 'Legacy', 'slug' => 'legacy', 'status' => 'active']);
+        $branch = KeywordNode::query()->create(['taxonomy_id' => $taxonomy->id, 'name' => 'Legacy branch', 'slug' => 'legacy-branch', 'path' => 'legacy%_\\root', 'depth' => 0, 'sort_order' => 0]);
+        $child = KeywordNode::query()->create(['taxonomy_id' => $taxonomy->id, 'parent_id' => $branch->id, 'name' => 'Child', 'slug' => 'child', 'path' => 'legacy%_\\root/child', 'depth' => 1, 'sort_order' => 0]);
+        $unrelated = KeywordNode::query()->create(['taxonomy_id' => $taxonomy->id, 'name' => 'Unrelated legacy record', 'slug' => 'unrelated-legacy-record', 'path' => 'legacyZA\\root/unrelated', 'depth' => 1, 'sort_order' => 0]);
+
+        $childKeyword = Keyword::query()->create(['library_id' => $library->id, 'keyword' => 'legacy child keyword', 'normalized_keyword' => 'legacy child keyword', 'language_code' => 'en', 'market_scope' => 'GLOBAL', 'status' => 'active']);
+        $unrelatedKeyword = Keyword::query()->create(['library_id' => $library->id, 'keyword' => 'unrelated legacy keyword', 'normalized_keyword' => 'unrelated legacy keyword', 'language_code' => 'en', 'market_scope' => 'GLOBAL', 'status' => 'active']);
+        $child->keywords()->attach($childKeyword->id, ['is_primary' => true]);
+        $unrelated->keywords()->attach($unrelatedKeyword->id, ['is_primary' => true]);
+
+        // Without escaping, the unescaped pattern "legacy%_\root/%" (LIKE metacharacters taken
+        // literally as wildcards) would spuriously match "legacyZA\root/unrelated" — the same
+        // false-positive proven against KeywordTaxonomyService::subtreeQuery() in
+        // KeywordTaxonomyServiceTest::test_move_escapes_like_metacharacters_when_selecting_a_legacy_subtree().
+        $response = $this->actingAs($this->admin(), 'admin')->get(route('admin.keyword-intelligence.index'))->assertOk();
+
+        $branchRow = $response->viewData('categoryBreakdown')->firstWhere('id', $branch->id);
+        $this->assertNotNull($branchRow);
+        $this->assertSame(2, (int) $branchRow->subtree_node_count);
+        $this->assertSame(1, (int) $branchRow->subtree_keyword_count);
     }
 
     private function admin(): Admin
