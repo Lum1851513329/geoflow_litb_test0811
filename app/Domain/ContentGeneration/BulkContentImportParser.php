@@ -127,14 +127,14 @@ final class BulkContentImportParser
             }
             $site = null;
             if ($get('knowledge_site') !== '') {
-                $site = $this->resolveUnique(KnowledgeSite::where('brand_id', $brand->id), $get('knowledge_site'), ['key', 'canonical_host']);
+                $site = $this->resolveUnique(KnowledgeSite::where('brand_id', $brand->id), $get('knowledge_site'), ['key', 'canonical_host'], $brand->key);
                 if ($site === null) {
                     return ['error' => 'Could not resolve knowledge_site uniquely within the selected brand.'];
                 }
             }
             $directory = null;
             if ($get('directory') !== '') {
-                $directory = $this->resolveUnique(KnowledgeDirectory::where('brand_id', $brand->id), $get('directory'), ['path', 'key', 'name']);
+                $directory = $this->resolveUnique(KnowledgeDirectory::where('brand_id', $brand->id), $get('directory'), ['path', 'key', 'name'], $brand->key);
                 if ($directory === null) {
                     return ['error' => 'Could not resolve directory uniquely within the selected brand; use its full path.'];
                 }
@@ -181,7 +181,7 @@ final class BulkContentImportParser
         )];
     }
 
-    private function resolveUnique(Builder $query, string $cell, array $columns): mixed
+    private function resolveUnique(Builder $query, string $cell, array $columns, ?string $brandKey = null): mixed
     {
         // Try exact names/keys first, including names containing parentheses.
         $matches = (clone $query)->where(function (Builder $q) use ($columns, $cell): void {
@@ -200,6 +200,12 @@ final class BulkContentImportParser
                 if ($cell[$index] === ')') {
                     $depth++;
                 } elseif ($cell[$index] === '(' && --$depth === 0) {
+                    $labelParts = explode(' / ', trim(substr($cell, 0, $index)), 2);
+                    if ($brandKey !== null && count($labelParts) === 2 && $labelParts[0] !== $brandKey) {
+                        // Global dropdown labels are brand-qualified. Never retarget
+                        // another brand's label to this brand's shared key/path.
+                        return null;
+                    }
                     $key = trim(substr($cell, $index + 1, -1));
                     // A literal display name must never override a reference
                     // label pointing at a different scope (or vice versa).

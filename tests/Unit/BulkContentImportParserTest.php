@@ -205,6 +205,38 @@ final class BulkContentImportParserTest extends TestCase
         }
     }
 
+    public function test_cross_brand_directory_reference_label_cannot_retarget_a_shared_path(): void
+    {
+        [$brand] = $this->brandFixtures();
+        $other = KnowledgeBrand::create(['key' => 'other', 'name' => 'Other']);
+        KnowledgeSite::create(['role' => 'primary', 'brand_id' => $other->id, 'key' => 'source', 'canonical_host' => 'other.example']);
+        KnowledgeDirectory::create(['brand_id' => $brand->id, 'key' => 'root', 'name' => 'Root', 'path' => '/root']);
+        $directory = KnowledgeDirectory::create(['brand_id' => $other->id, 'key' => 'root', 'name' => 'Root', 'path' => '/root']);
+
+        $result = $this->parseBrandRows([['other', 'brand / Root (/root)']]);
+        $this->assertSame([], $result['rows']);
+        $this->assertSame(3, $result['errors'][0]['row']);
+
+        $result = $this->parseBrandRows([['other', '/root'], ['other', 'root'], ['other', 'other / Root (/root)']]);
+        $this->assertSame([], $result['errors']);
+        $this->assertSame([$directory->id, $directory->id, $directory->id], array_map(fn ($row) => $row->knowledgeDirectoryId, $result['rows']));
+    }
+
+    public function test_cross_brand_source_reference_label_cannot_retarget_a_shared_key(): void
+    {
+        $this->brandFixtures();
+        $other = KnowledgeBrand::create(['key' => 'other', 'name' => 'Other']);
+        $site = KnowledgeSite::create(['role' => 'primary', 'brand_id' => $other->id, 'key' => 'source', 'canonical_host' => 'other.example']);
+
+        $result = $this->parseBrandRows([['other', '', 'brand / source.example (source)']]);
+        $this->assertSame([], $result['rows']);
+        $this->assertSame(3, $result['errors'][0]['row']);
+
+        $result = $this->parseBrandRows([['other', '', 'source'], ['other', '', 'other / other.example (source)']]);
+        $this->assertSame([], $result['errors']);
+        $this->assertSame([$site->id, $site->id], array_map(fn ($row) => $row->knowledgeSiteId, $result['rows']));
+    }
+
     private function parseBrandRows(array $rows): array
     {
         $path = $this->buildFixture(array_merge([
