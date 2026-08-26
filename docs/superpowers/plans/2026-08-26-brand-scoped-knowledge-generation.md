@@ -47,22 +47,22 @@ public function validateSelection(KnowledgeScope $scope, array $ids): void;
 // throws ValidationException for ineligible/missing/duplicate IDs or budget excess.
 ```
 
-- [ ] Write failing tests catching brand/site leakage, unrelated results, library-six truncation, descendant and eligibility filtering, unique-site resolution, malformed IDs, duplicates, oversized chunks and exclusions. Use existing governance fixture conventions and real database queries.
+- [x] Write failing tests catching brand/site leakage, unrelated results, library-six truncation, descendant and eligibility filtering, unique-site resolution, malformed IDs, duplicates, oversized chunks and exclusions. Use existing governance fixture conventions and real database queries.
 ```php
 $selection = app(BrandKnowledgeEvidenceSelector::class)->select($scope, 'linen dress');
 $this->assertSame([$allowedChunk->id], $selection['chunk_ids']);
 $this->assertNotContains($otherBrandChunk->id, $selection['chunk_ids']);
 ```
-- [ ] Run `docker exec geoflow-app php artisan test --compact --filter=BrandKnowledgeEvidenceSelectorTest`; record expected missing-feature failure.
-- [ ] Implement migration with default legacy_manual; nullable scope IDs and integer model casts; `knowledge_retrieval_snapshot` JSON on generation runs. Normalize IDs strictly, query brand/site relationship, traverse only same-brand descendants with cycle protection. Add selector with deterministic stable ranking, normalize/hash content, exclude metadata-only candidates, full-scope candidate query (no per-library first-five truncation), bounded DB candidate load and final budgets. Use existing lexical scoring where suitable; never enable uncalibrated vector-only matches; record this conservative fallback in warnings when applicable.
+- [x] Run `docker exec geoflow-app php artisan test --compact --filter=BrandKnowledgeEvidenceSelectorTest`; record expected missing-feature failure.
+- [x] Implement migration with default legacy_manual; nullable scope IDs and integer model casts; `knowledge_retrieval_snapshot` JSON on generation runs. Normalize IDs strictly, query brand/site relationship, traverse only same-brand descendants with cycle protection. Add selector with deterministic stable ranking, normalize/hash content, exclude metadata-only candidates, full-scope candidate query (no per-library first-five truncation), bounded DB candidate load and final budgets. Use existing lexical scoring where suitable; never enable uncalibrated vector-only matches; record this conservative fallback in warnings when applicable.
 ```php
 return KnowledgeBase::query()->where('brand_id', $scope->brandId)
     ->where('site_id', $scope->siteId)->where('language_code', $scope->languageCode)
     ->where('review_status', 'reviewed')->where('lifecycle_status', 'active')
     ->where('generation_eligible', true);
 ```
-- [ ] Run new test and `KnowledgeRetrievalIsolationTest|KnowledgeOwnershipSchemaTest`; record green, format only touched files with vendor/bin/pint.
-- [ ] Commit only owned files; self-review and report TDD evidence and exact contracts.
+- [x] Run new test and `KnowledgeRetrievalIsolationTest|KnowledgeOwnershipSchemaTest`; record green, format only touched files with vendor/bin/pint.
+- [x] Commit only owned files; self-review and report TDD evidence and exact contracts.
 
 ### Task 2: Generation, task lifecycle and immutable snapshots
 
@@ -70,14 +70,14 @@ Files: modify `app/Domain/ContentGeneration/{ContentGenerationRequestService,Gen
 
 Consumes resolver/selector contracts from Task 1. Produces persisted task scope, scope copied to generated brief, run knowledge_retrieval_snapshot, and scope-checked evidence snapshots.
 
-- [ ] Write red tests: direct reserve retrieves relevant allowed chunks; no evidence rolls back run/dispatch; explicit free-text or foreign IDs rejected; preview becoming stale rejected; replay retains prior snapshot despite KB update; task scope survives lifecycle persistence and quick-create; legacy IDs remain compatible and mixed-brand legacy selection is rejected.
+- [x] Write red tests: direct reserve retrieves relevant allowed chunks; no evidence rolls back run/dispatch; explicit free-text or foreign IDs rejected; preview becoming stale rejected; replay retains prior snapshot despite KB update; task scope survives lifecycle persistence and quick-create; legacy IDs remain compatible and mixed-brand legacy selection is rejected.
 ```php
 $result = $service->reserve($brief, $request, $admin);
 $this->assertSame([$chunk->id], $result['run']->evidence()->pluck('knowledge_chunk_id')->all());
 // A replay after source edit must still contain the previous snapshot text.
 ```
-- [ ] Run `docker exec geoflow-app php artisan test --compact --filter=BrandScopedGenerationTest` and record red.
-- [ ] In reserve, do replay detection before retrieval; then resolve locked brief scope, compose query from topic/core_question/primary keyword/cluster keywords, select evidence using request `knowledge_chunk_ids` additions and `excluded_knowledge_chunk_ids`; forbid `evidence` in brand_auto; persist result audit, require nonempty, revalidate at snapshot. Include additions/exclusions in fingerprint without fingerprinting mutable retrieval results.
+- [x] Run `docker exec geoflow-app php artisan test --compact --filter=BrandScopedGenerationTest` and record red.
+- [x] In reserve, do replay detection before retrieval; then resolve locked brief scope, compose query from topic/core_question/primary keyword/cluster keywords, select evidence using request `knowledge_chunk_ids` additions and `excluded_knowledge_chunk_ids`; forbid `evidence` in brand_auto; persist result audit, require nonempty, revalidate at snapshot. Include additions/exclusions in fingerprint without fingerprinting mutable retrieval results.
 ```php
 if ($lockedBrief->knowledge_mode === 'brand_auto') {
     $scope = $resolver->resolve($lockedBrief->getAttributes(), $lockedBrief->language_code);
@@ -87,9 +87,9 @@ if ($lockedBrief->knowledge_mode === 'brand_auto') {
     }
 }
 ```
-- [ ] Snapshotter rechecks scoped parent records under lock before copying content; include source URL, scope IDs, directory, language, version, dates/hash and selection provenance. Reject scope bypass on direct snapshot calls. Preserve old snapshots/idempotent replays.
-- [ ] TaskLifecycle normalizes/persists mode/scope; brand_auto clears explicit library pivot. QuickCreate stores scope with language. Worker quality branch bypasses legacy first-six and external URL evidence in brand_auto; copies scope and invokes reserve. Legacy-generation branch uses same selector and persists immutable evidence audit with worker execution prior to model call; missing evidence is clear failure. Validate legacy explicit IDs share a scope before mixing.
-- [ ] Run new tests plus task-driven generation, content generation and worker suites selected by test file names; record results, commit owned files, report.
+- [x] Snapshotter rechecks scoped parent records under lock before copying content; include source URL, scope IDs, directory, language, version, dates/hash and selection provenance. Reject scope bypass on direct snapshot calls. Preserve old snapshots/idempotent replays.
+- [x] TaskLifecycle normalizes/persists mode/scope; brand_auto clears explicit library pivot. QuickCreate stores scope with language. Worker quality branch bypasses legacy first-six and external URL evidence in brand_auto; copies scope and invokes reserve. Legacy-generation branch uses same selector and persists immutable evidence audit with worker execution prior to model call; missing evidence is clear failure. Validate legacy explicit IDs share a scope before mixing.
+- [x] Run new tests plus task-driven generation, content generation and worker suites selected by test file names; record results, commit owned files, report.
 
 ### Task 3: Brand-aware task and brief admin forms
 
@@ -97,15 +97,15 @@ Files: `app/Http/Controllers/Admin/{TaskController,ContentBriefController}.php`,
 
 Consumes resolver normalize/resolve and selector select; generation request additions/exclusions from Task 2. Produces all UI fields and scoped preview without model invocation.
 
-- [ ] Write red HTTP tests: new forms offer brand_auto; old edit preserves mode; mismatched IDs fail; posted scope persists; preview excludes other brand/unreviewed chunks; selection reset on scope changes; new brief can generate without prior preview; legacy forms still work.
+- [x] Write red HTTP tests: new forms offer brand_auto; old edit preserves mode; mismatched IDs fail; posted scope persists; preview excludes other brand/unreviewed chunks; selection reset on scope changes; new brief can generate without prior preview; legacy forms still work.
 ```php
 $response = $this->actingAs($admin, 'admin')->post($createUrl, $validForm);
 $response->assertSessionHasNoErrors();
 $this->assertDatabaseHas('content_briefs', ['knowledge_mode'=>'brand_auto', 'knowledge_brand_id'=>$brand->id]);
 ```
-- [ ] Run `docker exec geoflow-app php artisan test --compact --filter=BrandScopedKnowledgeAdminTest` for red.
-- [ ] Add server-side scope validation using resolver, preserve old programmatic payload compatibility but render explicit brand_auto in new forms. Site defaults only when unique; directory dropdown includes brand filter. Use escaped labels/source links. Brand mode hides legacy max-five copy. Scope changes clear preview selections. Brief evidence display uses selector result with warnings/provenance, same-range manual additions and exclusions, no global latest-100 evidence. Preview is read-only; user action re-runs current retrieval. Bind UI to backend fields and preserve errors/old input.
-- [ ] Run new HTTP tests plus existing task/brief controller tests. Compile Blade with `docker exec geoflow-app php artisan view:cache`; remove compiled cache afterward via artisan view:clear. Commit owned files, report.
+- [x] Run `docker exec geoflow-app php artisan test --compact --filter=BrandScopedKnowledgeAdminTest` for red.
+- [x] Add server-side scope validation using resolver, preserve old programmatic payload compatibility but render explicit brand_auto in new forms. Site defaults only when unique; directory dropdown includes brand filter. Use escaped labels/source links. Brand mode hides legacy max-five copy. Scope changes clear preview selections. Brief evidence display uses selector result with warnings/provenance, same-range manual additions and exclusions, no global latest-100 evidence. Preview is read-only; user action re-runs current retrieval. Bind UI to backend fields and preserve errors/old input.
+- [x] Run new HTTP tests plus existing task/brief controller tests. Compile Blade with `docker exec geoflow-app php artisan view:cache`; remove compiled cache afterward via artisan view:clear. Commit owned files, report.
 
 ### Task 4: Brand-based bulk spreadsheet import and end-to-end verification
 
@@ -113,18 +113,20 @@ Files: `app/Domain/ContentGeneration/{BulkContentImportTemplateBuilder,BulkConte
 
 Consumes scope contracts and task persistence from Tasks 1–2. Row knowledgeBaseId becomes nullable with backward-compatible constructor trailing scope fields; groupKey includes mode and full resolved knowledge scope.
 
-- [ ] Write red tests for new template required brand column/reference keys, brand unique-site resolution, optional descendant directory, ambiguity rejection, mixed brand/knowledge_base row rejection, legacy template acceptance, all-or-nothing failures, distinct brand grouping even same destination/preset/category.
+- [x] Write red tests for new template required brand column/reference keys, brand unique-site resolution, optional descendant directory, ambiguity rejection, mixed brand/knowledge_base row rejection, legacy template acceptance, all-or-nothing failures, distinct brand grouping even same destination/preset/category.
 ```php
 $this->assertNotSame($rowForBrandA->groupKey(), $rowForBrandB->groupKey());
 $this->assertDatabaseHas('tasks', ['knowledge_mode'=>'brand_auto', 'knowledge_brand_id'=>$brand->id]);
 ```
-- [ ] Run `docker exec geoflow-app php artisan test --compact --filter=BulkContentImport` and record red.
-- [ ] Build new headers `site,preset,category,topic,brand,directory,knowledge_site,core_question,primary_keyword,reference_urls`; retain parser support for old `knowledge_base`. Resolve key or exact unambiguous name (never first duplicate). Reject conflicting row mode. Carry normalized scope to lifecycle without explicit libraries for brand mode. Group by resolved mode/brand/site/directory or legacy library ID; transactional validation before creation. Update help text to distinguish knowledge source from publishing destination, and state product media is not imported.
-- [ ] Re-run bulk tests and cross-entry regression tests. Run full suite once and compare any failures to recorded baseline before classifying regressions; no live generation. Commit owned files and report exact test outcomes.
+- [x] Run `docker exec geoflow-app php artisan test --compact --filter=BulkContentImport` and record red.
+- [x] Build new headers `site,preset,category,topic,brand,directory,knowledge_site,core_question,primary_keyword,reference_urls`; retain parser support for old `knowledge_base`. Resolve key or exact unambiguous name (never first duplicate). Reject conflicting row mode. Carry normalized scope to lifecycle without explicit libraries for brand mode. Group by resolved mode/brand/site/directory or legacy library ID; transactional validation before creation. Update help text to distinguish knowledge source from publishing destination, and state product media is not imported.
+- [x] Re-run bulk tests and cross-entry regression tests. Run full suite once and compare any failures to recorded baseline before classifying regressions; no live generation. Commit owned files and report exact test outcomes.
 
 ## Completion
 
-- [ ] Review complete feature diff independently; fix significant findings and re-run affected tests.
-- [ ] Check migration status and apply only the new migration to local dev after a scoped backup; do not run pending unrelated migrations/seeders.
-- [ ] Verify local task/create, brief and bulk pages via safe HTTP checks; no production actions or paid jobs. Document navigation and migration result, tests and any unresolved limitations.
-- [ ] Mark plan checkboxes from actual evidence and hand off without claiming unverified generation/publication.
+- [x] Review complete feature diff independently; fix significant findings and re-run affected tests.
+- [x] Check migration status and apply only the new migration to local dev after a scoped backup; do not run pending unrelated migrations/seeders.
+- [x] Verify local task/create, brief and bulk pages via safe HTTP checks; no production actions or paid jobs. Document navigation and migration result, tests and any unresolved limitations.
+- [x] Mark plan checkboxes from actual evidence and hand off without claiming unverified generation/publication.
+
+Outcome: feature and independent review complete through `e49090d`. Final suite:2111 passed,6 pre-existing failures,2 skipped; no new failures. Local migration and read-only runtime checks passed. No production generation/publication or remote push. Merge gate remains blocked by the existing non-green suite; branch/worktree and diagnostic scratch retained. See `docs/operations/brand-scoped-knowledge-verification-2026-08-26.md` for evidence and limitations.
