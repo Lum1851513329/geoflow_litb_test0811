@@ -331,7 +331,7 @@ class WorkerExecutionService
             Title::query()->whereKey($titleRow->id)->increment('usage_count');
 
             return [$brief, $reservation];
-        });
+        }, 3);
 
         return [
             'article_id' => null,

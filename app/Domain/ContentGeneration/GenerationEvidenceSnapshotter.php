@@ -30,7 +30,7 @@ final class GenerationEvidenceSnapshotter
         array $excludedIds = [],
         bool $retrieve = false,
     ): void {
-        DB::transaction(fn () => $this->persist($run, $knowledgeChunkIds, $explicitEvidence, $requiredFactIds, $actor, $excludedIds, $retrieve));
+        DB::transaction(fn () => $this->persist($run, $knowledgeChunkIds, $explicitEvidence, $requiredFactIds, $actor, $excludedIds, $retrieve), 3);
     }
 
     private function persist(ContentGenerationRun $run, array $knowledgeChunkIds, array $explicitEvidence, array $requiredFactIds, Admin $actor, array $excludedIds, bool $retrieve): void
@@ -75,14 +75,8 @@ final class GenerationEvidenceSnapshotter
         }
 
         $baseIds = KnowledgeChunk::whereIn('id', $knowledgeChunkIds)->pluck('knowledge_base_id');
-        $bases = KnowledgeBase::whereIn('id', $baseIds)->orderBy('id')->lockForUpdate()->get();
-        $knownScopes = $bases->filter(fn ($base) => $base->brand_id !== null || $base->site_id !== null)
-            ->map(fn ($base) => $base->brand_id.':'.$base->site_id)->unique();
-        if ($knownScopes->count() > 1 || ($knownScopes->isNotEmpty() && $bases->contains(fn ($base) => $base->brand_id === null || $base->site_id === null))) {
-            throw ValidationException::withMessages(['knowledge_chunk_ids' => 'Explicit knowledge must share one brand and source site.']);
-        }
+        KnowledgeBase::whereIn('id', $baseIds)->orderBy('id')->lockForUpdate()->get();
         $chunks = KnowledgeChunk::query()
-            ->with('knowledgeBase')
             ->whereIn('id', array_values(array_unique(array_map('intval', $knowledgeChunkIds))))
             ->orderBy('id')
             ->lockForUpdate()
@@ -93,7 +87,21 @@ final class GenerationEvidenceSnapshotter
             ]);
         }
 
+        // The preliminary parent IDs can change before chunk locks are acquired.
+        // Only the now-locked chunks define the authoritative parents to validate/copy.
+        $actualBaseIds = $chunks->pluck('knowledge_base_id')->unique();
+        $bases = KnowledgeBase::whereIn('id', $actualBaseIds)->orderBy('id')->lockForUpdate()->get()->keyBy('id');
+        if ($bases->count() !== $actualBaseIds->count()) {
+            throw ValidationException::withMessages(['knowledge_chunk_ids' => __('admin.content_strategy.validation.evidence_unavailable')]);
+        }
+        $knownScopes = $bases->filter(fn ($base) => $base->brand_id !== null || $base->site_id !== null)
+            ->map(fn ($base) => $base->brand_id.':'.$base->site_id)->unique();
+        if ($knownScopes->count() > 1 || ($knownScopes->isNotEmpty() && $bases->contains(fn ($base) => $base->brand_id === null || $base->site_id === null))) {
+            throw ValidationException::withMessages(['knowledge_chunk_ids' => 'Explicit knowledge must share one brand and source site.']);
+        }
+
         foreach ($chunks as $chunk) {
+            $chunk->setRelation('knowledgeBase', $bases->get($chunk->knowledge_base_id));
             if ((string) $chunk->knowledgeBase?->review_status !== 'reviewed') {
                 throw ValidationException::withMessages([
                     'knowledge_chunk_ids' => __('admin.content_strategy.validation.evidence_unreviewed'),

@@ -165,18 +165,23 @@ class TaskLifecycleService
     public function updateTask(int $taskId, array $data): array
     {
         $this->ensureTaskExists($taskId);
-        $normalized = $this->normalizeTaskInput($data, true, Task::findOrFail($taskId));
-        if (empty($normalized)) {
-            throw new ApiException('validation_failed', '没有可更新的字段', 422);
-        }
 
-        $status = $normalized['status'] ?? null;
-        unset($normalized['status']);
-        $knowledgeBaseIdsProvided = array_key_exists('knowledge_base_ids', $normalized);
-        $knowledgeBaseIds = $knowledgeBaseIdsProvided ? $normalized['knowledge_base_ids'] : [];
-        unset($normalized['knowledge_base_ids']);
+        DB::transaction(function () use ($data, $taskId): void {
+            $current = Task::whereKey($taskId)->lockForUpdate()->first();
+            if ($current === null) {
+                throw new ApiException('task_not_found', '任务不存在', 404);
+            }
+            $normalized = $this->normalizeTaskInput($data, true, $current);
+            if (empty($normalized)) {
+                throw new ApiException('validation_failed', '没有可更新的字段', 422);
+            }
 
-        DB::transaction(function () use ($normalized, $knowledgeBaseIdsProvided, $knowledgeBaseIds, $status, $taskId): void {
+            $status = $normalized['status'] ?? null;
+            unset($normalized['status']);
+            $knowledgeBaseIdsProvided = array_key_exists('knowledge_base_ids', $normalized);
+            $knowledgeBaseIds = $knowledgeBaseIdsProvided ? $normalized['knowledge_base_ids'] : [];
+            unset($normalized['knowledge_base_ids']);
+
             if (! empty($normalized)) {
                 Task::query()->whereKey($taskId)->update($normalized);
             }

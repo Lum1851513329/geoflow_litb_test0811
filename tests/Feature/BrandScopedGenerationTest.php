@@ -26,7 +26,12 @@ use App\Services\GeoFlow\BrandKnowledgeQueryBuilder;
 use App\Services\GeoFlow\JobQueueService;
 use App\Services\GeoFlow\TaskLifecycleService;
 use App\Services\GeoFlow\WorkerExecutionService;
+use Illuminate\Database\DeadlockException;
+use Illuminate\Database\Events\TransactionBeginning;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Foundation\Testing\RefreshDatabaseState;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Validation\ValidationException;
 use Tests\TestCase;
@@ -254,5 +259,105 @@ final class BrandScopedGenerationTest extends TestCase
         $this->assertSame('brand_auto', $task->knowledge_mode);
         $this->assertNull($task->knowledge_base_id);
         $this->assertSame(0, $task->knowledgeBases()->count());
+    }
+
+    public function test_legacy_snapshot_rechecks_actual_locked_chunk_parents_after_reparenting(): void
+    {
+        extract($this->fixture());
+        $brief->update(['knowledge_mode' => 'legacy_manual']);
+        $second = KnowledgeChunk::create(['knowledge_base_id' => $base->id, 'chunk_index' => 1, 'content' => 'Second reviewed fact']);
+        $foreignBrand = KnowledgeBrand::create(['key' => 'foreign', 'name' => 'Foreign']);
+        $foreignSite = KnowledgeSite::create(['brand_id' => $foreignBrand->id, 'key' => 'foreign', 'canonical_host' => 'foreign.test', 'role' => 'commerce-primary']);
+        $foreignDirectory = KnowledgeDirectory::create(['brand_id' => $foreignBrand->id, 'key' => 'foreign', 'path' => 'foreign', 'name' => 'Foreign']);
+        $foreignBase = KnowledgeBase::create(['name' => 'Foreign', 'review_status' => 'reviewed', 'brand_id' => $foreignBrand->id, 'site_id' => $foreignSite->id, 'primary_directory_id' => $foreignDirectory->id, 'language_code' => 'en', 'canonical_document_key' => 'foreign']);
+        $run = ContentGenerationRun::forceCreate(array_merge($request, ['content_brief_id' => $brief->id, 'status' => 'pending']));
+        $reparented = false;
+        DB::listen(function ($query) use (&$reparented, $second, $foreignBase) {
+            // A competing writer wins after the preliminary parent read, before chunk locks.
+            if (! $reparented && str_starts_with($query->sql, 'select * from "knowledge_bases"')) {
+                $reparented = true;
+                KnowledgeChunk::whereKey($second->id)->update(['knowledge_base_id' => $foreignBase->id]);
+            }
+        });
+        try {
+            app(GenerationEvidenceSnapshotter::class)->snapshot($run, [$chunk->id, $second->id], [], [], $actor);
+            $this->fail('Reparented mixed-scope evidence was copied');
+        } catch (ValidationException $exception) {
+            $this->assertArrayHasKey('knowledge_chunk_ids', $exception->errors());
+        }
+        $this->assertTrue($reparented);
+        $this->assertSame(0, $run->evidence()->count());
+    }
+
+    public function test_name_only_edit_preserves_scope_changed_before_transaction_lock(): void
+    {
+        extract($this->fixture());
+        $task = Task::create(array_merge(['name' => 'Task', 'status' => 'paused'], $scope));
+        $newDirectory = KnowledgeDirectory::create(['brand_id' => $scope['knowledge_brand_id'], 'key' => 'new', 'path' => 'new', 'name' => 'New']);
+        $changed = false;
+        Event::listen(TransactionBeginning::class, function () use (&$changed, $task, $newDirectory) {
+            // Simulate a committed scope edit immediately before this updater locks the row.
+            if (! $changed) {
+                $changed = true;
+                Task::whereKey($task->id)->update(['knowledge_directory_id' => $newDirectory->id]);
+            }
+        });
+        app(TaskLifecycleService::class)->updateTask($task->id, ['name' => 'Renamed']);
+        $this->assertTrue($changed);
+        $this->assertSame('Renamed', $task->fresh()->name);
+        $this->assertSame($newDirectory->id, $task->fresh()->knowledge_directory_id);
+    }
+
+    public function test_direct_snapshot_retries_a_deadlock_without_duplicate_evidence(): void
+    {
+        extract($this->fixture());
+        $brief->update(['knowledge_mode' => 'legacy_manual']);
+        $run = ContentGenerationRun::forceCreate(array_merge($request, ['content_brief_id' => $brief->id, 'status' => 'pending']));
+        // Exercise the direct public boundary without RefreshDatabase's outer transaction.
+        DB::commit();
+        $attempts = 0;
+        DB::listen(function ($query) use (&$attempts) {
+            if (str_starts_with($query->sql, 'select * from "content_generation_runs"')) {
+                $attempts++;
+                if ($attempts === 1) {
+                    throw new DeadlockException('deadlock detected');
+                }
+            }
+        });
+        try {
+            app(GenerationEvidenceSnapshotter::class)->snapshot($run, [$chunk->id], [], [], $actor);
+            $this->assertSame(2, $attempts);
+            $this->assertSame(1, $run->evidence()->count());
+            $this->assertSame('Linen dress care uses cold water.', $run->evidence()->sole()->evidence_snapshot['content']);
+        } finally {
+            RefreshDatabaseState::$migrated = false;
+        }
+    }
+
+    public function test_quality_worker_retries_outer_transaction_without_orphan_briefs_or_consuming_title_twice(): void
+    {
+        extract($this->fixture());
+        $library = TitleLibrary::create(['name' => 'Titles']);
+        $title = Title::create(['library_id' => $library->id, 'title' => 'Linen dress care']);
+        $task = Task::create(array_merge(['name' => 'Task', 'status' => 'active', 'schedule_enabled' => 1, 'title_library_id' => $library->id, 'ai_model_id' => $request['ai_model_id'], 'generation_engine' => 'quality_gated', 'prompt_preset_id' => $preset->id, 'article_limit' => 10, 'draft_limit' => 5], $scope));
+        DB::commit();
+        $interrupted = false;
+        DB::listen(function ($query) use (&$interrupted) {
+            if (! $interrupted && str_starts_with($query->sql, 'select * from "content_generation_runs"') && ! str_contains($query->sql, 'idempotency_key')) {
+                $interrupted = true;
+                throw new DeadlockException('deadlock detected');
+            }
+        });
+        try {
+            $result = app(WorkerExecutionService::class)->executeTask($task->id);
+            $this->assertTrue($interrupted);
+            $this->assertSame(1, ContentBrief::where('task_id', $task->id)->count());
+            $this->assertSame(1, ContentGenerationRun::count());
+            $this->assertSame(1, $title->fresh()->used_count);
+            $run = ContentGenerationRun::findOrFail($result['meta']['content_generation_run_id']);
+            $this->assertSame([$chunk->id], $run->evidence()->pluck('knowledge_chunk_id')->all());
+        } finally {
+            RefreshDatabaseState::$migrated = false;
+        }
     }
 }
