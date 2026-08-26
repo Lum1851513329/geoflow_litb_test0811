@@ -16,9 +16,11 @@ use App\Models\Task;
 use App\Models\TaskRun;
 use App\Models\TaskSchedule;
 use App\Models\TitleLibrary;
+use App\Services\GeoFlow\KnowledgeGovernance\GenerationKnowledgeScopeResolver;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Validation\ValidationException;
 
 /**
  * 任务生命周期服务。
@@ -102,6 +104,10 @@ class TaskLifecycleService
                 'fixed_category_id' => $normalized['fixed_category_id'],
                 'generation_engine' => $normalized['generation_engine'] ?? 'legacy',
                 'prompt_preset_id' => $normalized['prompt_preset_id'] ?? null,
+                'knowledge_mode' => $normalized['knowledge_mode'],
+                'knowledge_brand_id' => $normalized['knowledge_brand_id'],
+                'knowledge_site_id' => $normalized['knowledge_site_id'],
+                'knowledge_directory_id' => $normalized['knowledge_directory_id'],
             ]);
 
             $taskId = (int) $task->id;
@@ -159,7 +165,7 @@ class TaskLifecycleService
     public function updateTask(int $taskId, array $data): array
     {
         $this->ensureTaskExists($taskId);
-        $normalized = $this->normalizeTaskInput($data, true);
+        $normalized = $this->normalizeTaskInput($data, true, Task::findOrFail($taskId));
         if (empty($normalized)) {
             throw new ApiException('validation_failed', '没有可更新的字段', 422);
         }
@@ -418,7 +424,7 @@ class TaskLifecycleService
      *
      * @throws ApiException 字段校验失败时抛 422，并附带 field_errors
      */
-    private function normalizeTaskInput(array $data, bool $isUpdate): array
+    private function normalizeTaskInput(array $data, bool $isUpdate, ?Task $current = null): array
     {
         $output = [];
         $fieldErrors = [];
@@ -656,6 +662,21 @@ class TaskLifecycleService
             throw new ApiException('validation_failed', '参数校验失败', 422, [
                 'field_errors' => $fieldErrors,
             ]);
+        }
+
+        $scopeData = array_merge($current?->only(['knowledge_mode', 'knowledge_brand_id', 'knowledge_site_id', 'knowledge_directory_id']) ?? [], $data);
+        if (($scopeData['knowledge_mode'] ?? 'legacy_manual') === 'legacy_manual') {
+            $scopeData = ['knowledge_mode' => 'legacy_manual'];
+        }
+        try {
+            $scope = app(GenerationKnowledgeScopeResolver::class)->normalize($scopeData);
+        } catch (ValidationException $exception) {
+            throw new ApiException('validation_failed', '参数校验失败', 422, ['field_errors' => $exception->errors()]);
+        }
+        $output = array_merge($output, $scope);
+        if ($scope['knowledge_mode'] === 'brand_auto') {
+            $output['knowledge_base_id'] = null;
+            $output['knowledge_base_ids'] = [];
         }
 
         return $output;

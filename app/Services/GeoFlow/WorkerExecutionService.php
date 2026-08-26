@@ -20,7 +20,9 @@ use App\Models\KnowledgeChunk;
 use App\Models\Prompt;
 use App\Models\PromptPreset;
 use App\Models\Task;
+use App\Models\TaskRun;
 use App\Models\Title;
+use App\Services\GeoFlow\KnowledgeGovernance\GenerationKnowledgeScopeResolver;
 use App\Services\GeoFlow\KnowledgeGovernance\KnowledgeScope;
 use App\Support\GeoFlow\ArticleWorkflow;
 use App\Support\GeoFlow\ImageUrlNormalizer;
@@ -29,6 +31,7 @@ use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Validation\ValidationException;
 use Laravel\Ai\Responses\Data\FinishReason;
 use RuntimeException;
 use Throwable;
@@ -63,7 +66,7 @@ class WorkerExecutionService
     /**
      * @return array{article_id:int|null, title:string, message:string, meta:array<string,mixed>}
      */
-    public function executeTask(int $taskId): array
+    public function executeTask(int $taskId, ?int $taskRunId = null): array
     {
         /** @var Task|null $task */
         $task = Task::query()->find($taskId);
@@ -107,7 +110,10 @@ class WorkerExecutionService
         $prompt = $task->prompt_id ? Prompt::query()->find((int) $task->prompt_id) : null;
 
         $keyword = (string) ($titleRow->keyword ?? '');
-        $knowledgeContext = $this->resolveKnowledgeContext($task, (string) $titleRow->title, $keyword);
+        $knowledgeAudit = $task->knowledge_mode === 'brand_auto' ? $this->brandKnowledgeAudit($task, $titleRow, $taskRunId) : null;
+        $knowledgeContext = $knowledgeAudit === null
+            ? $this->resolveKnowledgeContext($task, (string) $titleRow->title, $keyword)
+            : "Use only claims supported by these scoped sources; missing coverage is not permission to invent facts.\n".implode("\n\n", array_map(static fn ($item) => '['.$item['citation_id'].'] '.$item['content'], $knowledgeAudit['evidence']));
         $contentPrompt = $this->buildContentPrompt((string) $titleRow->title, $keyword, $prompt?->content, $knowledgeContext);
         $generation = $this->generateContentWithModelSelection($task, $contentPrompt);
         $aiModel = $generation['model'];
@@ -214,6 +220,7 @@ class WorkerExecutionService
                 'author_id' => $author?->id,
                 'category_id' => $category?->id,
                 'knowledge_length' => mb_strlen($knowledgeContext, 'UTF-8'),
+                'knowledge_retrieval_snapshot' => $knowledgeAudit,
                 'image_count' => count($selectedImages),
                 'model_selection_mode' => (string) ($task->model_selection_mode ?? 'fixed'),
                 'used_model_id' => (int) $aiModel->id,
@@ -221,6 +228,38 @@ class WorkerExecutionService
                 'model_attempts' => $generation['attempts'],
             ],
         ];
+    }
+
+    private function brandKnowledgeAudit(Task $task, Title $title, ?int $taskRunId): array
+    {
+        if ($taskRunId === null) {
+            throw new RuntimeException('Brand automatic generation requires a TaskRun audit. Enqueue this task instead of calling executeTask directly.');
+        }
+
+        return DB::transaction(function () use ($task, $title, $taskRunId): array {
+            $run = TaskRun::whereKey($taskRunId)->where('task_id', $task->id)->where('status', 'running')->lockForUpdate()->first();
+            if ($run === null) {
+                throw new RuntimeException('The exact running TaskRun audit is required for brand generation.');
+            }
+            $meta = (array) $run->meta;
+            if (isset($meta['knowledge_retrieval_snapshot'])) {
+                if (($meta['knowledge_title_id'] ?? null) !== $title->id) {
+                    throw new RuntimeException('TaskRun evidence belongs to a different title; enqueue a new run.');
+                }
+
+                return $meta['knowledge_retrieval_snapshot'];
+            }
+            $scope = app(GenerationKnowledgeScopeResolver::class)->resolve($task->getAttributes());
+            $ids = KnowledgeBase::where('brand_id', $scope->brandId)->where('site_id', $scope->siteId)->orderBy('id')->lockForUpdate()->pluck('id');
+            KnowledgeChunk::whereIn('knowledge_base_id', $ids)->orderBy('id')->lockForUpdate()->get(['id']);
+            $selection = app(BrandKnowledgeEvidenceSelector::class)->select($scope, app(BrandKnowledgeQueryBuilder::class)->forTitle($title));
+            if ($selection['chunk_ids'] === []) {
+                throw new RuntimeException('该品牌内证据不足: no eligible evidence; generation was not called.');
+            }
+            $run->update(['meta' => array_merge($meta, ['knowledge_retrieval_snapshot' => $selection, 'knowledge_title_id' => $title->id])]);
+
+            return $selection;
+        });
     }
 
     /**
@@ -250,9 +289,10 @@ class WorkerExecutionService
             throw new RuntimeException('任务配置的内容模板没有可用版本');
         }
 
-        $referenceUrls = (array) ($titleRow->reference_urls ?? []);
+        $brandAuto = $task->knowledge_mode === 'brand_auto';
+        $referenceUrls = $brandAuto ? [] : (array) ($titleRow->reference_urls ?? []);
         $fetchedReferences = $referenceUrls !== [] ? $this->referenceEvidenceFetcher->fetch($referenceUrls) : [];
-        $knowledgeChunkIds = $this->resolveReviewedKnowledgeChunkIds($task);
+        $knowledgeChunkIds = $brandAuto ? [] : $this->resolveReviewedKnowledgeChunkIds($task);
 
         // Brief/Strategy/Blueprint 与 run 预约必须在同一个事务内提交：
         // `ContentBriefQuickCreateService::create()` 自带事务并会立刻提交三张表，
@@ -261,13 +301,14 @@ class WorkerExecutionService
         // reserve() 成功后才自增，于是下一个调度周期会挑中同一个标题、再造一批
         // 孤儿数据，在配置错误的任务上每分钟重复一次。
         [$brief, $reservation] = DB::transaction(function () use ($task, $titleRow, $category, $referenceUrls, $fetchedReferences, $knowledgeChunkIds, $preset, $presetVersion, $systemAdmin): array {
-            $brief = $this->briefQuickCreateService->create([
+            $brief = $this->briefQuickCreateService->create(array_merge($task->only(['knowledge_mode', 'knowledge_brand_id', 'knowledge_site_id', 'knowledge_directory_id']), [
                 'topic' => (string) $titleRow->title,
                 'core_question' => $titleRow->core_question,
+                'retrieval_keyword' => $titleRow->keyword,
                 'category_id' => $category?->id,
                 'reference_urls' => $referenceUrls,
                 'task_id' => (int) $task->id,
-            ], $preset, $systemAdmin);
+            ]), $preset, $systemAdmin);
 
             $strategyVersion = $brief->strategyVersions()->latest('version')->firstOrFail();
             $blueprintVersion = $brief->blueprintVersions()->latest('version')->firstOrFail();
@@ -891,6 +932,13 @@ class WorkerExecutionService
                 ->all();
 
             if ($ids !== []) {
+                $bases = KnowledgeBase::whereIn('id', $ids)->get(['id', 'brand_id', 'site_id']);
+                $scopes = $bases->filter(fn ($base) => $base->brand_id !== null || $base->site_id !== null)
+                    ->map(fn ($base) => $base->brand_id.':'.$base->site_id)->unique();
+                if ($scopes->count() > 1 || ($scopes->isNotEmpty() && $bases->contains(fn ($base) => $base->brand_id === null || $base->site_id === null))) {
+                    throw ValidationException::withMessages(['knowledge_base_ids' => 'Explicit knowledge libraries must share one brand and source site.']);
+                }
+
                 return $ids;
             }
         }

@@ -3,9 +3,15 @@
 namespace App\Domain\ContentGeneration;
 
 use App\Models\Admin;
+use App\Models\ContentBrief;
 use App\Models\ContentGenerationRun;
 use App\Models\ContentGenerationRunEvidence;
+use App\Models\KnowledgeBase;
 use App\Models\KnowledgeChunk;
+use App\Services\GeoFlow\BrandKnowledgeEvidenceSelector;
+use App\Services\GeoFlow\BrandKnowledgeQueryBuilder;
+use App\Services\GeoFlow\KnowledgeGovernance\GenerationKnowledgeScopeResolver;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 
 final class GenerationEvidenceSnapshotter
@@ -21,7 +27,40 @@ final class GenerationEvidenceSnapshotter
         array $explicitEvidence,
         array $requiredFactIds,
         Admin $actor,
+        array $excludedIds = [],
+        bool $retrieve = false,
     ): void {
+        DB::transaction(fn () => $this->persist($run, $knowledgeChunkIds, $explicitEvidence, $requiredFactIds, $actor, $excludedIds, $retrieve));
+    }
+
+    private function persist(ContentGenerationRun $run, array $knowledgeChunkIds, array $explicitEvidence, array $requiredFactIds, Admin $actor, array $excludedIds, bool $retrieve): void
+    {
+        $run = ContentGenerationRun::whereKey($run->id)->lockForUpdate()->firstOrFail();
+        if ($run->knowledge_retrieval_snapshot !== null || $run->evidence()->exists()
+            || ! in_array($run->status, ['pending', 'queued'], true)) {
+            throw ValidationException::withMessages(['evidence' => 'Evidence snapshots are write-once and must precede generation.']);
+        }
+        $brief = ContentBrief::whereKey($run->content_brief_id)->lockForUpdate()->firstOrFail();
+        $selection = null;
+        if ($brief->knowledge_mode === 'brand_auto') {
+            if ($explicitEvidence !== []) {
+                throw ValidationException::withMessages(['evidence' => 'Brand mode only accepts scoped knowledge chunks, not free-text evidence.']);
+            }
+            $resolver = app(GenerationKnowledgeScopeResolver::class);
+            $scope = $resolver->resolve($brief->getAttributes(), $brief->language_code);
+            // Hold parent and body locks across selection, validation and copying.
+            $baseIds = KnowledgeBase::where('brand_id', $scope->brandId)->where('site_id', $scope->siteId)->orderBy('id')->lockForUpdate()->pluck('id');
+            KnowledgeChunk::whereIn('knowledge_base_id', $baseIds)->orderBy('id')->lockForUpdate()->get(['id']);
+            $selector = app(BrandKnowledgeEvidenceSelector::class);
+            $selector->validateSelection($scope, $knowledgeChunkIds);
+            $selection = $selector->select($scope, $retrieve ? app(BrandKnowledgeQueryBuilder::class)->forBrief($brief) : '', $knowledgeChunkIds, $excludedIds);
+            $knowledgeChunkIds = $selection['chunk_ids'];
+            if ($knowledgeChunkIds === []) {
+                throw ValidationException::withMessages(['knowledge_chunk_ids' => '该品牌内证据不足']);
+            }
+            $selector->validateSelection($scope, $knowledgeChunkIds);
+            $run->forceFill(['knowledge_retrieval_snapshot' => $selection])->save();
+        }
         $keys = [];
         foreach ($knowledgeChunkIds as $id) {
             $keys[] = 'knowledge-chunk:'.(int) $id;
@@ -35,6 +74,13 @@ final class GenerationEvidenceSnapshotter
             ]);
         }
 
+        $baseIds = KnowledgeChunk::whereIn('id', $knowledgeChunkIds)->pluck('knowledge_base_id');
+        $bases = KnowledgeBase::whereIn('id', $baseIds)->orderBy('id')->lockForUpdate()->get();
+        $knownScopes = $bases->filter(fn ($base) => $base->brand_id !== null || $base->site_id !== null)
+            ->map(fn ($base) => $base->brand_id.':'.$base->site_id)->unique();
+        if ($knownScopes->count() > 1 || ($knownScopes->isNotEmpty() && $bases->contains(fn ($base) => $base->brand_id === null || $base->site_id === null))) {
+            throw ValidationException::withMessages(['knowledge_chunk_ids' => 'Explicit knowledge must share one brand and source site.']);
+        }
         $chunks = KnowledgeChunk::query()
             ->with('knowledgeBase')
             ->whereIn('id', array_values(array_unique(array_map('intval', $knowledgeChunkIds))))
@@ -54,17 +100,20 @@ final class GenerationEvidenceSnapshotter
                 ]);
             }
             $key = 'knowledge-chunk:'.(int) $chunk->id;
-            $this->create($run, $key, (int) $chunk->id, [
+            $selected = collect($selection['evidence'] ?? [])->firstWhere('chunk_id', $chunk->id) ?? [];
+            $content = $selected['content'] ?? (string) $chunk->content;
+            $this->create($run, $key, (int) $chunk->id, array_merge($selected, [
                 'fact_id' => $key,
                 'source_type' => 'knowledge_chunk',
                 'title' => (string) ($chunk->chunk_title ?: $chunk->knowledgeBase?->name),
-                'content' => (string) $chunk->content,
-                'content_sha256' => hash('sha256', (string) $chunk->content),
+                'content' => $content,
+                'content_sha256' => hash('sha256', $content),
+                'source_url' => $chunk->knowledgeBase?->source_url,
                 'knowledge_base_id' => (int) $chunk->knowledge_base_id,
                 'knowledge_base_review_status' => 'reviewed',
                 'reviewed_by_admin_id' => null,
                 'snapshotted_at' => now()->toISOString(),
-            ], in_array($key, $requiredFactIds, true));
+            ]), in_array($key, $requiredFactIds, true));
         }
 
         foreach ($explicitEvidence as $item) {

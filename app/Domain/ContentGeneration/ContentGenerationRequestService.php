@@ -107,10 +107,12 @@ final class ContentGenerationRequestService
                 ]);
                 $this->evidenceSnapshotter->snapshot(
                     $run,
-                    array_values(array_map('intval', (array) ($data['knowledge_chunk_ids'] ?? []))),
+                    array_values((array) ($data['knowledge_chunk_ids'] ?? [])),
                     array_values((array) ($data['evidence'] ?? [])),
                     $this->requiredFactIds($blueprint->blueprint),
                     $actor,
+                    array_values((array) ($data['excluded_knowledge_chunk_ids'] ?? [])),
+                    true,
                 );
                 $this->dispatcher->dispatch($run);
 
@@ -239,6 +241,11 @@ final class ContentGenerationRequestService
             sort($knowledgeIds, SORT_NUMERIC);
             $payload['knowledge_chunk_ids'] = $knowledgeIds;
             $payload['evidence'] = array_values((array) ($data['evidence'] ?? []));
+            if (! empty($data['excluded_knowledge_chunk_ids'])) {
+                $excluded = array_values(array_unique(array_map('intval', (array) $data['excluded_knowledge_chunk_ids'])));
+                sort($excluded, SORT_NUMERIC);
+                $payload['excluded_knowledge_chunk_ids'] = $excluded;
+            }
         }
 
         return hash('sha256', json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR));

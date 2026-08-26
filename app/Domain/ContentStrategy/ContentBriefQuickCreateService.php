@@ -7,6 +7,7 @@ use App\Models\ContentBlueprintVersion;
 use App\Models\ContentBrief;
 use App\Models\ContentStrategyVersion;
 use App\Models\PromptPreset;
+use App\Services\GeoFlow\KnowledgeGovernance\GenerationKnowledgeScopeResolver;
 use DomainException;
 use Illuminate\Support\Facades\DB;
 
@@ -34,10 +35,15 @@ final class ContentBriefQuickCreateService
         $defaults = (array) ($presetVersion->default_brief_fields ?? []);
 
         return DB::transaction(function () use ($data, $presetVersion, $actor, $topic, $coreQuestion, $defaults): ContentBrief {
-            $brief = ContentBrief::forceCreate([
+            $scopeData = $data;
+            if (($scopeData['knowledge_mode'] ?? 'legacy_manual') === 'legacy_manual') {
+                $scopeData = ['knowledge_mode' => 'legacy_manual'];
+            }
+            $scope = app(GenerationKnowledgeScopeResolver::class)->normalize($scopeData);
+            $brief = ContentBrief::forceCreate(array_merge($scope, [
                 'topic' => $topic,
                 'market_code' => (string) ($defaults['market_code'] ?? 'GLOBAL'),
-                'language_code' => (string) ($defaults['language_code'] ?? 'en'),
+                'language_code' => (string) ($data['language_code'] ?? $defaults['language_code'] ?? 'en'),
                 'audience' => (string) ($defaults['audience'] ?? ''),
                 'core_question' => $coreQuestion,
                 'business_goal' => (string) ($defaults['business_goal'] ?? ''),
@@ -50,7 +56,8 @@ final class ContentBriefQuickCreateService
                 'status' => ContentBrief::STATUS_STRATEGY_READY,
                 'created_by_admin_id' => $actor->id,
                 'task_id' => $data['task_id'] ?? null,
-            ]);
+                'asset_provenance' => isset($data['retrieval_keyword']) ? ['retrieval_keyword' => mb_substr(trim((string) $data['retrieval_keyword']), 0, 300)] : null,
+            ]));
 
             $strategy = [
                 'audience' => (string) ($defaults['audience'] ?? ''),
