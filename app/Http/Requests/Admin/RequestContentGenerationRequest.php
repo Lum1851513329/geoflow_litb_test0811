@@ -31,15 +31,15 @@ final class RequestContentGenerationRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'strategy_version_id' => ['required', 'integer', 'exists:content_strategy_versions,id'],
-            'blueprint_version_id' => ['required', 'integer', 'exists:content_blueprint_versions,id'],
-            'preset_version_id' => ['required', 'integer', 'exists:prompt_preset_versions,id'],
-            'ai_model_id' => ['required', 'integer', 'exists:ai_models,id'],
+            'strategy_version_id' => ['required', 'integer'],
+            'blueprint_version_id' => ['required', 'integer'],
+            'preset_version_id' => ['required', 'integer'],
+            'ai_model_id' => ['required', 'integer'],
             'idempotency_key' => ['nullable', 'string', 'max:150'],
             'knowledge_chunk_ids' => ['nullable', 'array', 'max:50'],
-            'knowledge_chunk_ids.*' => ['integer', 'distinct', 'exists:knowledge_chunks,id'],
+            'knowledge_chunk_ids.*' => ['integer', 'distinct'],
             'excluded_knowledge_chunk_ids' => ['nullable', 'array', 'max:50'],
-            'excluded_knowledge_chunk_ids.*' => ['integer', 'distinct', 'exists:knowledge_chunks,id'],
+            'excluded_knowledge_chunk_ids.*' => ['integer', 'distinct'],
             'evidence' => ['nullable', 'array', 'max:50'],
             'evidence.*.fact_id' => ['required', 'string', 'max:150', 'regex:/^[A-Za-z0-9][A-Za-z0-9:._-]*$/'],
             'evidence.*.title' => ['nullable', 'string', 'max:300'],
@@ -57,6 +57,21 @@ final class RequestContentGenerationRequest extends FormRequest
             $idempotencyKey = trim((string) $this->input('idempotency_key', ''));
             if ($idempotencyKey !== ''
                 && ContentGenerationRun::query()->where('idempotency_key', $idempotencyKey)->exists()) {
+                // Reservation still checks the authenticated actor and full fingerprint.
+                // Mutable evidence (especially exclusions) may no longer exist on replay.
+                return;
+            }
+            $existence = validator($this->all(), [
+                'strategy_version_id' => ['exists:content_strategy_versions,id'],
+                'blueprint_version_id' => ['exists:content_blueprint_versions,id'],
+                'preset_version_id' => ['exists:prompt_preset_versions,id'],
+                'ai_model_id' => ['exists:ai_models,id'],
+                'knowledge_chunk_ids.*' => ['exists:knowledge_chunks,id'],
+                'excluded_knowledge_chunk_ids.*' => ['exists:knowledge_chunks,id'],
+            ]);
+            if ($existence->fails()) {
+                $validator->errors()->merge($existence->errors());
+
                 return;
             }
             $brief = $this->route('brief');

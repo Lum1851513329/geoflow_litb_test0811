@@ -48,17 +48,12 @@ final class GenerationEvidenceSnapshotter
             }
             $resolver = app(GenerationKnowledgeScopeResolver::class);
             $scope = $resolver->resolve($brief->getAttributes(), $brief->language_code);
-            // Hold parent and body locks across selection, validation and copying.
-            $baseIds = KnowledgeBase::where('brand_id', $scope->brandId)->where('site_id', $scope->siteId)->orderBy('id')->lockForUpdate()->pluck('id');
-            KnowledgeChunk::whereIn('knowledge_base_id', $baseIds)->orderBy('id')->lockForUpdate()->get(['id']);
             $selector = app(BrandKnowledgeEvidenceSelector::class);
-            $selector->validateSelection($scope, $knowledgeChunkIds);
-            $selection = $selector->select($scope, $retrieve ? app(BrandKnowledgeQueryBuilder::class)->forBrief($brief) : '', $knowledgeChunkIds, $excludedIds);
+            $selection = $selector->selectForSnapshot($scope, $retrieve ? app(BrandKnowledgeQueryBuilder::class)->forBrief($brief) : '', $knowledgeChunkIds, $excludedIds);
             $knowledgeChunkIds = $selection['chunk_ids'];
             if ($knowledgeChunkIds === []) {
                 throw ValidationException::withMessages(['knowledge_chunk_ids' => '该品牌内证据不足']);
             }
-            $selector->validateSelection($scope, $knowledgeChunkIds);
             $run->forceFill(['knowledge_retrieval_snapshot' => $selection])->save();
         }
         $keys = [];

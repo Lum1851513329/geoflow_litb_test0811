@@ -2,6 +2,7 @@
 
 namespace App\Services\GeoFlow;
 
+use App\Models\KnowledgeBase;
 use App\Models\KnowledgeChunk;
 use App\Services\GeoFlow\KnowledgeGovernance\GenerationKnowledgeScopeResolver;
 use App\Services\GeoFlow\KnowledgeGovernance\KnowledgeScope;
@@ -22,6 +23,35 @@ final class BrandKnowledgeEvidenceSelector
 
     public function select(KnowledgeScope $scope, string $query, array $includeIds = [], array $excludeIds = []): array
     {
+        return $this->selectCandidates($scope, $query, $includeIds, $excludeIds);
+    }
+
+    /** The caller must persist the returned evidence in the same transaction. */
+    public function selectForSnapshot(KnowledgeScope $scope, string $query, array $includeIds = [], array $excludeIds = []): array
+    {
+        $selection = $this->select($scope, $query, $includeIds, $excludeIds);
+        $ids = array_values(array_unique(array_merge($selection['chunk_ids'], $this->ids($includeIds), $this->ids($excludeIds))));
+
+        // Candidate reads may see late commits under READ COMMITTED. Lock only the
+        // bounded selected/requested set, then discard all pre-lock row contents.
+        $baseIds = KnowledgeChunk::whereIn('id', $ids)->pluck('knowledge_base_id');
+        KnowledgeBase::whereIn('id', $baseIds)->orderBy('id')->lockForUpdate()->get(['id']);
+        $chunks = KnowledgeChunk::whereIn('id', $ids)->orderBy('id')->lockForUpdate()->get(['id', 'knowledge_base_id']);
+        if ($chunks->count() !== count($ids)) {
+            $this->invalid('Selected evidence changed or disappeared; retrieve again.');
+        }
+        // A chunk can be reparented before its own lock. Its now-locked parent ID,
+        // not the preliminary read or an eager-loaded relation, is authoritative.
+        KnowledgeBase::whereIn('id', $chunks->pluck('knowledge_base_id'))->orderBy('id')->lockForUpdate()->get(['id']);
+        $this->validateSelection($scope, $selection['chunk_ids']);
+        $rebuilt = $this->selectCandidates($scope, $query, $includeIds, $excludeIds, $selection['chunk_ids']);
+        $rebuilt['warnings'] = array_values(array_unique(array_merge($selection['warnings'], $rebuilt['warnings'])));
+
+        return $rebuilt;
+    }
+
+    private function selectCandidates(KnowledgeScope $scope, string $query, array $includeIds, array $excludeIds, ?array $candidateIds = null): array
+    {
         $includeIds = $this->ids($includeIds);
         $excludeIds = $this->ids($excludeIds);
         if (count($includeIds) + count($excludeIds) > self::MAX_REQUEST_IDS) {
@@ -33,6 +63,9 @@ final class BrandKnowledgeEvidenceSelector
         $terms = array_slice($terms, 0, 32);
         $warnings = ['Conservative lexical retrieval: vector-only matches are disabled until model-specific calibration.'];
         $automatic = $this->chunks($scope)->whereNotIn('id', array_merge($includeIds, $excludeIds));
+        if ($candidateIds !== null) {
+            $automatic->whereIn('id', $candidateIds);
+        }
         if ($terms === []) {
             $automatic->whereRaw('1 = 0');
         } else {

@@ -78,6 +78,8 @@ class WorkerExecutionService
             throw new RuntimeException('任务未激活');
         }
 
+        $this->assertAuditedTaskRunConfiguration($task, $taskRunId);
+
         $publishResult = $this->publishDueDraftArticle($task);
         if ($publishResult !== null) {
             $this->distributionOrchestrator->enqueueForArticle((int) $publishResult['article_id']);
@@ -230,6 +232,20 @@ class WorkerExecutionService
         ];
     }
 
+    private function assertAuditedTaskRunConfiguration(Task $task, ?int $taskRunId): void
+    {
+        if ($taskRunId === null) {
+            return;
+        }
+        $run = TaskRun::whereKey($taskRunId)->where('task_id', $task->id)->first();
+        if (isset($run?->meta['knowledge_retrieval_snapshot'])
+            && ($task->knowledge_mode !== 'brand_auto' || ($task->generation_engine ?? 'legacy') !== 'legacy')) {
+            // These audits are written by the legacy brand engine. Check before
+            // branching on current task settings so a retry cannot bypass the audit.
+            throw new RuntimeException('TaskRun evidence requires the original brand knowledge mode and legacy generation engine; enqueue a new run.');
+        }
+    }
+
     private function brandKnowledgeAudit(Task $task, Title $title, ?int $taskRunId): array
     {
         if ($taskRunId === null) {
@@ -250,16 +266,14 @@ class WorkerExecutionService
                 return $meta['knowledge_retrieval_snapshot'];
             }
             $scope = app(GenerationKnowledgeScopeResolver::class)->resolve($task->getAttributes());
-            $ids = KnowledgeBase::where('brand_id', $scope->brandId)->where('site_id', $scope->siteId)->orderBy('id')->lockForUpdate()->pluck('id');
-            KnowledgeChunk::whereIn('knowledge_base_id', $ids)->orderBy('id')->lockForUpdate()->get(['id']);
-            $selection = app(BrandKnowledgeEvidenceSelector::class)->select($scope, app(BrandKnowledgeQueryBuilder::class)->forTitle($title));
+            $selection = app(BrandKnowledgeEvidenceSelector::class)->selectForSnapshot($scope, app(BrandKnowledgeQueryBuilder::class)->forTitle($title));
             if ($selection['chunk_ids'] === []) {
                 throw new RuntimeException('该品牌内证据不足: no eligible evidence; generation was not called.');
             }
             $run->update(['meta' => array_merge($meta, ['knowledge_retrieval_snapshot' => $selection, 'knowledge_title_id' => $title->id])]);
 
             return $selection;
-        });
+        }, 3);
     }
 
     /**

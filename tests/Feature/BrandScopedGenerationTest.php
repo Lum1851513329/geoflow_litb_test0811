@@ -28,12 +28,15 @@ use App\Services\GeoFlow\TaskLifecycleService;
 use App\Services\GeoFlow\WorkerExecutionService;
 use Illuminate\Database\DeadlockException;
 use Illuminate\Database\Events\TransactionBeginning;
+use Illuminate\Database\Query\Builder;
+use Illuminate\Database\Query\Grammars\SQLiteGrammar;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Foundation\Testing\RefreshDatabaseState;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Validation\ValidationException;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
 final class BrandScopedGenerationTest extends TestCase
@@ -359,5 +362,203 @@ final class BrandScopedGenerationTest extends TestCase
         } finally {
             RefreshDatabaseState::$migrated = false;
         }
+    }
+
+    public static function lateEvidenceChanges(): array
+    {
+        $cases = [];
+        foreach (['quality_gated', 'legacy'] as $engine) {
+            foreach (['body', 'brand', 'directory', 'eligibility'] as $change) {
+                $cases[$engine.' '.$change] = [$engine, $change];
+            }
+        }
+
+        return $cases;
+    }
+
+    #[DataProvider('lateEvidenceChanges')]
+    public function test_late_evidence_is_revalidated_and_rebuilt_under_selected_row_locks(string $engine, string $change): void
+    {
+        extract($this->fixture());
+        $chunk->update(['content' => 'Unrelated inventory']);
+        $library = TitleLibrary::create(['name' => 'Titles']);
+        Title::create(['library_id' => $library->id, 'title' => 'Linen dress care']);
+        $task = Task::create(array_merge(['name' => 'Task', 'status' => 'active', 'schedule_enabled' => 1, 'title_library_id' => $library->id, 'ai_model_id' => $request['ai_model_id'], 'generation_engine' => $engine, 'prompt_preset_id' => $preset->id, 'article_limit' => 10, 'draft_limit' => 5], $scope));
+        $audit = TaskRun::create(['task_id' => $task->id, 'status' => 'running']);
+        $foreignBrand = KnowledgeBrand::create(['key' => 'foreign', 'name' => 'Foreign']);
+        $foreignSite = KnowledgeSite::create(['brand_id' => $foreignBrand->id, 'key' => 'foreign', 'canonical_host' => 'foreign.test', 'role' => 'commerce-primary']);
+        $foreignDirectory = KnowledgeDirectory::create(['brand_id' => $foreignBrand->id, 'key' => 'foreign', 'path' => 'foreign', 'name' => 'Foreign']);
+        $sibling = KnowledgeDirectory::create(['brand_id' => $scope['knowledge_brand_id'], 'key' => 'sibling', 'path' => 'sibling', 'name' => 'Sibling']);
+
+        // SQLite cannot exercise PG row contention. Preserve lock intent as harmless SQL
+        // comments, then inject committed writes only before the affected row is locked.
+        $connection = DB::connection();
+        $grammar = $connection->getQueryGrammar();
+        $connection->setQueryGrammar(new class($connection) extends SQLiteGrammar
+        {
+            protected function compileLock(Builder $query, $value)
+            {
+                return $value === true ? '/* selected-row-lock */' : '';
+            }
+        });
+        $lateBase = null;
+        $lateChunk = null;
+        $selected = false;
+        $changed = false;
+        $lockedBases = [];
+        $lockedChunks = [];
+        $connection->beforeExecuting(function ($sql) use (&$lateBase, &$lateChunk, &$selected, &$changed, &$lockedBases, &$lockedChunks, $base, $change, $foreignBrand, $foreignSite, $foreignDirectory, $sibling) {
+            if ($lateBase === null && str_contains($sql, 'from "knowledge_chunks"') && str_contains($sql, 'limit 301')) {
+                $lateBase = $base->replicate();
+                $lateBase->canonical_document_key = 'late';
+                $lateBase->save();
+                $lateChunk = KnowledgeChunk::create(['knowledge_base_id' => $lateBase->id, 'chunk_index' => 0, 'content' => 'Linen dress care uses cold water.']);
+            }
+            $lockingEvidence = str_contains($sql, 'selected-row-lock') && (str_contains($sql, 'from "knowledge_bases"') || str_contains($sql, 'from "knowledge_chunks"'));
+            $persistingAudit = str_starts_with($sql, 'update "task_runs"') || str_starts_with($sql, 'update "content_generation_runs"');
+            if ($selected && ! $changed && ($lockingEvidence || $persistingAudit)) {
+                $changed = true;
+                if ($change === 'body') {
+                    $this->assertNotContains($lateChunk->id, $lockedChunks, 'The interleaving must precede the chunk lock.');
+                    $lateChunk->update(['content' => 'Linen dress care now uses lukewarm water.']);
+                } else {
+                    $this->assertNotContains($lateBase->id, $lockedBases, 'The interleaving must precede the parent lock.');
+                    $lateBase->update(match ($change) {
+                        'brand' => ['brand_id' => $foreignBrand->id, 'site_id' => $foreignSite->id, 'primary_directory_id' => $foreignDirectory->id],
+                        'directory' => ['primary_directory_id' => $sibling->id],
+                        'eligibility' => ['generation_eligible' => false],
+                    });
+                }
+            }
+        });
+        DB::listen(function ($query) use (&$selected, &$lockedBases, &$lockedChunks) {
+            if (str_contains($query->sql, 'from "knowledge_chunks"') && str_contains($query->sql, 'limit 301')) {
+                $selected = true;
+            }
+            if (str_contains($query->sql, 'selected-row-lock') && (str_contains($query->sql, 'from "knowledge_bases"') || str_contains($query->sql, 'from "knowledge_chunks"'))) {
+                $rows = $query->connection->select(str_replace('/* selected-row-lock */', '', $query->sql), $query->bindings);
+                if (str_contains($query->sql, 'from "knowledge_bases"')) {
+                    $lockedBases = array_merge($lockedBases, array_column($rows, 'id'));
+                } else {
+                    $lockedChunks = array_merge($lockedChunks, array_column($rows, 'id'));
+                }
+            }
+        });
+        $modelPrompt = null;
+        $this->mock(ArticleContentGenerationService::class, function ($mock) use (&$modelPrompt) {
+            $mock->shouldReceive('generate')->andReturnUsing(function ($model, $prompt) use (&$modelPrompt) {
+                $modelPrompt = $prompt;
+                throw new \RuntimeException('test-model-stopped');
+            });
+        });
+
+        try {
+            $failure = null;
+            try {
+                $result = app(WorkerExecutionService::class)->executeTask($task->id, $audit->id);
+            } catch (ValidationException|\RuntimeException $exception) {
+                $failure = $exception;
+            }
+            $this->assertTrue($changed);
+            if ($change !== 'body') {
+                $this->assertInstanceOf(ValidationException::class, $failure, 'Changed scope/eligibility must reject reservation.');
+                $this->assertArrayHasKey('knowledge_chunk_ids', $failure->errors());
+                $this->assertNull($modelPrompt);
+                $this->assertSame(0, ContentGenerationRun::count());
+                $this->assertArrayNotHasKey('knowledge_retrieval_snapshot', (array) $audit->fresh()->meta);
+                Queue::assertNothingPushed();
+            } else {
+                if ($engine === 'quality_gated') {
+                    $this->assertNull($failure);
+                    $run = ContentGenerationRun::findOrFail($result['meta']['content_generation_run_id']);
+                    $snapshot = $run->knowledge_retrieval_snapshot;
+                    $this->assertSame('Linen dress care now uses lukewarm water.', $run->evidence()->sole()->evidence_snapshot['content']);
+                } else {
+                    $this->assertInstanceOf(\RuntimeException::class, $failure);
+                    $this->assertStringContainsString('test-model-stopped', $failure->getMessage());
+                    $this->assertStringContainsString('Linen dress care now uses lukewarm water.', $modelPrompt);
+                    $snapshot = $audit->fresh()->meta['knowledge_retrieval_snapshot'];
+                }
+                $this->assertContains($lateBase->id, $lockedBases);
+                $this->assertContains($lateChunk->id, $lockedChunks);
+                $this->assertSame('Linen dress care now uses lukewarm water.', $snapshot['evidence'][0]['content']);
+                $this->assertSame('automatic', $snapshot['evidence'][0]['selection_method']);
+                $this->assertSame($engine === 'quality_gated'
+                    ? 'Linen dress care What should a reader know before deciding on Linen dress care?'
+                    : 'Linen dress care', $snapshot['query']);
+            }
+        } finally {
+            $connection->setQueryGrammar($grammar);
+        }
+    }
+
+    public function test_http_replay_survives_deleted_excluded_evidence_without_bypassing_guards(): void
+    {
+        extract($this->fixture());
+        $excludedBase = $base->replicate();
+        $excludedBase->canonical_document_key = 'excluded';
+        $excludedBase->save();
+        $excluded = KnowledgeChunk::create(['knowledge_base_id' => $excludedBase->id, 'chunk_index' => 0, 'content' => 'Linen dress care alternative.']);
+        $request['knowledge_chunk_ids'] = [$chunk->id];
+        $request['excluded_knowledge_chunk_ids'] = [$excluded->id];
+        $url = route('admin.content-briefs.generations.store', $brief);
+        $this->actingAs($actor, 'admin')->post($url, $request)->assertSessionHasNoErrors();
+        $run = ContentGenerationRun::sole();
+        $snapshot = $run->knowledge_retrieval_snapshot;
+        $excluded->delete();
+
+        $this->post($url, $request)->assertRedirect(route('admin.content-generations.show', $run))->assertSessionHasNoErrors();
+        $this->assertSame($snapshot, $run->fresh()->knowledge_retrieval_snapshot);
+        $this->post($url, array_merge($request, ['excluded_knowledge_chunk_ids' => []]))->assertSessionHasErrors('idempotency_key');
+        $this->post($url, array_merge($request, ['excluded_knowledge_chunk_ids' => ['invalid']]))->assertSessionHasErrors('excluded_knowledge_chunk_ids.0');
+        $this->post($url, array_merge($request, ['idempotency_key' => 'fresh-request']))->assertSessionHasErrors('excluded_knowledge_chunk_ids.0');
+        $otherActor = Admin::create(['username' => 'other-super', 'email' => 'other@example.test', 'password' => 'password', 'status' => 'active', 'role' => 'super_admin']);
+        $this->actingAs($otherActor, 'admin')->post($url, $request)->assertSessionHasErrors('idempotency_key');
+        $this->assertSame(1, ContentGenerationRun::count());
+    }
+
+    public static function incompatibleRetryConfigurations(): array
+    {
+        return [
+            'mode change' => [['knowledge_mode' => 'legacy_manual']],
+            'engine change' => [['generation_engine' => 'quality_gated']],
+            'both changes' => [['knowledge_mode' => 'legacy_manual', 'generation_engine' => 'quality_gated']],
+        ];
+    }
+
+    #[DataProvider('incompatibleRetryConfigurations')]
+    public function test_failed_brand_model_retry_rejects_mode_or_engine_changes_before_routing(array $changes): void
+    {
+        extract($this->fixture());
+        $library = TitleLibrary::create(['name' => 'Titles']);
+        $title = Title::create(['library_id' => $library->id, 'title' => 'Linen dress care']);
+        $task = Task::create(array_merge(['name' => 'Task', 'status' => 'active', 'schedule_enabled' => 1, 'title_library_id' => $library->id, 'ai_model_id' => $request['ai_model_id'], 'generation_engine' => 'legacy', 'prompt_preset_id' => $preset->id, 'article_limit' => 10, 'draft_limit' => 5], $scope));
+        $audit = TaskRun::create(['task_id' => $task->id, 'status' => 'running']);
+        $calls = 0;
+        $this->mock(ArticleContentGenerationService::class, function ($mock) use (&$calls) {
+            $mock->shouldReceive('generate')->andReturnUsing(function () use (&$calls) {
+                $calls++;
+                throw new \RuntimeException('test-model-stopped');
+            });
+        });
+        try {
+            app(WorkerExecutionService::class)->executeTask($task->id, $audit->id);
+            $this->fail('The fake model must fail.');
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString('test-model-stopped', $exception->getMessage());
+        }
+        $snapshot = $audit->fresh()->meta['knowledge_retrieval_snapshot'];
+        $task->update($changes);
+        try {
+            app(WorkerExecutionService::class)->executeTask($task->id, $audit->id);
+            $this->fail('An incompatible audited retry was accepted.');
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString('enqueue a new run', $exception->getMessage());
+        }
+        $this->assertSame(1, $calls);
+        $this->assertSame($snapshot, $audit->fresh()->meta['knowledge_retrieval_snapshot']);
+        $this->assertSame(0, ContentGenerationRun::count());
+        $this->assertSame(0, $title->fresh()->used_count);
+        Queue::assertNothingPushed();
     }
 }
