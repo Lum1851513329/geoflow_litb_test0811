@@ -7,9 +7,13 @@ use App\Domain\ContentGeneration\BulkContentImportTemplateBuilder;
 use App\Models\Category;
 use App\Models\DistributionChannel;
 use App\Models\KnowledgeBase;
+use App\Models\KnowledgeBrand;
+use App\Models\KnowledgeDirectory;
+use App\Models\KnowledgeSite;
 use App\Models\PromptPreset;
 use App\Models\PromptPresetVersion;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use PhpOffice\PhpSpreadsheet\Cell\DataType;
 use PhpOffice\PhpSpreadsheet\Cell\DataValidation;
 use PhpOffice\PhpSpreadsheet\Writer\Xlsx;
 use Tests\TestCase;
@@ -17,6 +21,25 @@ use Tests\TestCase;
 final class BulkContentImportTemplateBuilderTest extends TestCase
 {
     use RefreshDatabase;
+
+    public function test_brand_template_exports_scope_references_as_strings(): void
+    {
+        $brand = KnowledgeBrand::create(['key' => 'brand', 'name' => '=1+1']);
+        KnowledgeSite::create(['role' => 'primary', 'brand_id' => $brand->id, 'key' => 'source', 'canonical_host' => '=source.example']);
+        KnowledgeDirectory::create(['brand_id' => $brand->id, 'key' => 'leaf', 'name' => '=Leaf', 'path' => '/root/leaf']);
+        $workbook = $this->app->make(BulkContentImportTemplateBuilder::class)->build();
+        $main = $workbook->getSheet(0);
+        $this->assertSame(['site', 'preset', 'category', 'topic', 'brand', 'directory', 'knowledge_site', 'core_question', 'primary_keyword', 'reference_urls'], $main->rangeToArray('A1:J1')[0]);
+        $this->assertStringContainsString('必填', $main->getCell('E2')->getValue());
+        $reference = $workbook->getSheetByName('可选值参考');
+        $this->assertSame('=1+1 (brand)', $reference->getCell('D2')->getValue());
+        $this->assertSame(DataType::TYPE_STRING, $reference->getCell('D2')->getDataType());
+        $this->assertStringContainsString('/root/leaf', $reference->getCell('E2')->getValue());
+        $this->assertSame(DataType::TYPE_STRING, $reference->getCell('E2')->getDataType());
+        $this->assertStringContainsString('(source)', $reference->getCell('F2')->getValue());
+        $this->assertSame(DataType::TYPE_STRING, $reference->getCell('F2')->getDataType());
+        $this->assertSame(DataValidation::TYPE_LIST, $main->getCell('E3')->getDataValidation()->getType());
+    }
 
     public function test_reference_sheet_values_match_the_format_the_parser_expects(): void
     {

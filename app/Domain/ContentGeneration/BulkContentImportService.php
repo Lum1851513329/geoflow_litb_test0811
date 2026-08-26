@@ -102,7 +102,11 @@ final class BulkContentImportService
                 'fixed_category_id' => $first->categoryId,
                 'generation_engine' => 'quality_gated',
                 'prompt_preset_id' => $first->promptPresetId,
-                'knowledge_base_ids' => [$first->knowledgeBaseId],
+                'knowledge_mode' => $first->knowledgeMode,
+                'knowledge_brand_id' => $first->knowledgeBrandId,
+                'knowledge_site_id' => $first->knowledgeSiteId,
+                'knowledge_directory_id' => $first->knowledgeDirectoryId,
+                'knowledge_base_ids' => $first->knowledgeBaseId === null ? [] : [$first->knowledgeBaseId],
             ];
 
             $channelIds = [$first->distributionChannelId];

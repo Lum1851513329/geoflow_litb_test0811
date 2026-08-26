@@ -7,6 +7,9 @@ use App\Domain\ContentGeneration\BulkContentImportRow;
 use App\Models\Category;
 use App\Models\DistributionChannel;
 use App\Models\KnowledgeBase;
+use App\Models\KnowledgeBrand;
+use App\Models\KnowledgeDirectory;
+use App\Models\KnowledgeSite;
 use App\Models\PromptPreset;
 use App\Models\PromptPresetVersion;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -91,7 +94,7 @@ final class BulkContentImportParserTest extends TestCase
         $this->assertSame(3, $result['errors'][0]['row']);
     }
 
-    public function test_conflicts_flags_a_differing_knowledge_base_within_the_same_group(): void
+    public function test_distinct_legacy_libraries_form_separate_groups(): void
     {
         $parser = $this->app->make(BulkContentImportParser::class);
         $rowA = new BulkContentImportRow(3, 1, 1, 1, 10, 'Topic A', null, null, []);
@@ -99,8 +102,105 @@ final class BulkContentImportParserTest extends TestCase
 
         $errors = $parser->conflicts([$rowA, $rowB]);
 
-        $this->assertCount(1, $errors);
-        $this->assertSame(4, $errors[0]['row']);
+        $this->assertSame([], $errors);
+        $this->assertNotSame($rowA->groupKey(), $rowB->groupKey());
+    }
+
+    public function test_brand_rows_resolve_unique_source_site_and_descendant_directory_by_path(): void
+    {
+        [$brand, $site] = $this->brandFixtures();
+        $parent = KnowledgeDirectory::create(['brand_id' => $brand->id, 'key' => 'root', 'name' => 'Root', 'path' => '/root']);
+        $child = KnowledgeDirectory::create(['brand_id' => $brand->id, 'parent_id' => $parent->id, 'key' => 'leaf', 'name' => 'Leaf', 'path' => '/root/leaf']);
+        $result = $this->parseBrandRows([['Brand (brand)', '/root/leaf', '', '', 'shoes']]);
+        $this->assertSame([], $result['errors']);
+        $row = $result['rows'][0];
+        $this->assertSame('brand_auto', $row->knowledgeMode);
+        $this->assertSame($brand->id, $row->knowledgeBrandId);
+        $this->assertSame($site->id, $row->knowledgeSiteId);
+        $this->assertSame($child->id, $row->knowledgeDirectoryId);
+        $this->assertNull($row->knowledgeBaseId);
+        $this->assertSame('shoes', $row->primaryKeyword);
+    }
+
+    public function test_explicit_source_site_and_distinct_brand_scopes_never_merge(): void
+    {
+        [$brand, $site] = $this->brandFixtures();
+        $secondSite = KnowledgeSite::create(['role' => 'primary', 'brand_id' => $brand->id, 'key' => 'second', 'canonical_host' => 'second.example']);
+        $other = KnowledgeBrand::create(['key' => 'other', 'name' => 'Other']);
+        KnowledgeSite::create(['role' => 'primary', 'brand_id' => $other->id, 'key' => 'other', 'canonical_host' => 'other.example']);
+        $result = $this->parseBrandRows([['brand', '', 'source'], ['brand', '', 'second'], ['Other']]);
+        $this->assertSame([], $result['errors']);
+        $this->assertSame($secondSite->id, $result['rows'][1]->knowledgeSiteId);
+        $this->assertCount(3, array_unique(array_map(fn ($row) => $row->groupKey(), $result['rows'])));
+    }
+
+    public function test_ambiguous_or_mixed_scope_rejects_every_row(): void
+    {
+        [$brand, $site] = $this->brandFixtures();
+        KnowledgeBase::create(['name' => 'Legacy', 'content' => 'x']);
+        KnowledgeDirectory::create(['brand_id' => $brand->id, 'key' => 'leaf', 'name' => 'Leaf', 'path' => '/one/leaf']);
+        KnowledgeDirectory::create(['brand_id' => $brand->id, 'key' => 'leaf', 'name' => 'Leaf', 'path' => '/two/leaf']);
+        KnowledgeBrand::create(['key' => 'duplicate1', 'name' => 'Duplicate']);
+        KnowledgeBrand::create(['key' => 'duplicate2', 'name' => 'Duplicate']);
+        foreach ([['brand', 'leaf'], ['brand', 'Leaf'], ['brand', '', '', 'Legacy'], ['', '/one/leaf', '', 'Legacy'], ['Duplicate'], ['missing'], ['']] as $badRow) {
+            $result = $this->parseBrandRows([['brand'], $badRow]);
+            $this->assertSame([], $result['rows']);
+            $this->assertSame(4, $result['errors'][0]['row']);
+        }
+        KnowledgeSite::create(['role' => 'primary', 'brand_id' => $brand->id, 'key' => 'second', 'canonical_host' => 'second.example']);
+        $result = $this->parseBrandRows([['brand', '', 'source'], ['brand']]);
+        $this->assertSame([], $result['rows']);
+        $this->assertSame(4, $result['errors'][0]['row']);
+        $this->assertStringContainsString('source site', $result['errors'][0]['message']);
+    }
+
+    private function brandFixtures(): array
+    {
+        DistributionChannel::create(['name' => 'Publish', 'domain' => 'publish.example', 'endpoint_url' => 'https://publish.example', 'channel_type' => 'wordpress', 'status' => 'active']);
+        $preset = PromptPreset::create(['preset_key' => 'preset', 'display_name' => 'Preset', 'is_enabled' => true]);
+        $version = PromptPresetVersion::forceCreate(['prompt_preset_id' => $preset->id, 'version' => 1, 'matching_rules' => [], 'generation_policy' => [], 'blueprint_template' => ['sections' => []], 'lifecycle_status' => PromptPresetVersion::STATUS_PRODUCTION]);
+        $preset->forceFill(['current_version_id' => $version->id])->save();
+        Category::create(['name' => 'Category', 'slug' => 'category']);
+        $brand = KnowledgeBrand::create(['key' => 'brand', 'name' => 'Brand']);
+        $site = KnowledgeSite::create(['role' => 'primary', 'brand_id' => $brand->id, 'key' => 'source', 'canonical_host' => 'source.example']);
+
+        return [$brand, $site];
+    }
+
+    public function test_exact_names_with_parentheses_and_full_directory_paths_are_accepted(): void
+    {
+        [$brand] = $this->brandFixtures();
+        $brand->update(['name' => 'Brand (US)']);
+        $directory = KnowledgeDirectory::create(['brand_id' => $brand->id, 'key' => 'leaf', 'name' => 'Leaf (US)', 'path' => '/root/leaf(us)']);
+        $result = $this->parseBrandRows([['Brand (US)', 'Leaf (US)'], ['brand', '/root/leaf(us)'], ['Brand (US) (brand)', 'brand / Leaf (US) (/root/leaf(us))']]);
+        $this->assertSame([], $result['errors']);
+        $this->assertSame($directory->id, $result['rows'][0]->knowledgeDirectoryId);
+        $this->assertSame($result['rows'][0]->groupKey(), $result['rows'][1]->groupKey());
+        $this->assertSame($result['rows'][0]->groupKey(), $result['rows'][2]->groupKey());
+    }
+
+    public function test_legacy_and_brand_rows_and_directory_scopes_have_distinct_groups(): void
+    {
+        [$brand] = $this->brandFixtures();
+        KnowledgeBase::create(['name' => 'Legacy', 'content' => 'x']);
+        KnowledgeDirectory::create(['brand_id' => $brand->id, 'key' => 'root', 'name' => 'Root', 'path' => '/root']);
+        $result = $this->parseBrandRows([['brand'], ['brand', 'root'], ['', '', '', 'Legacy']]);
+        $this->assertSame([], $result['errors']);
+        $this->assertCount(3, array_unique(array_map(fn ($row) => $row->groupKey(), $result['rows'])));
+        $this->assertSame('legacy_manual', $result['rows'][2]->knowledgeMode);
+    }
+
+    private function parseBrandRows(array $rows): array
+    {
+        $path = $this->buildFixture(array_merge([
+            ['site', 'preset', 'category', 'topic', 'brand', 'directory', 'knowledge_site', 'knowledge_base', 'primary_keyword'],
+            ['instructions'],
+        ], array_map(fn ($row) => array_merge(['Publish (publish.example)', 'Preset (preset)', 'Category', 'Topic'], $row), $rows)));
+        try {
+            return $this->app->make(BulkContentImportParser::class)->parse($path);
+        } finally {
+            unlink($path);
+        }
     }
 
     /** @param list<list<string>> $rows */

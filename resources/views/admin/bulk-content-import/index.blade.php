@@ -3,7 +3,9 @@
 @section('content')
 <div class="mx-auto max-w-2xl rounded-md border border-gray-200 bg-white p-6">
     <h1 class="text-lg font-semibold text-gray-900">批量导入文章任务</h1>
-    <p class="mt-1 text-sm text-gray-500">上传填好的模板表格，系统会按站点/内容模板/分类分组，自动创建对应的任务。</p>
+    <p class="mt-1 text-sm text-gray-500">上传填好的模板表格，系统按发布渠道/内容模板/分类及知识范围分组，自动创建任务。任意行校验失败时整批不导入。</p>
+    <p class="mt-2 text-sm text-gray-500">新模板必填 brand（知识品牌）；directory 可限定目录及子目录，重名时请用完整路径。knowledge_site 是知识来源站点，不是 site 发布渠道；品牌只有一个来源站点时可留空，否则必须指定。</p>
+    <p class="mt-2 text-sm text-gray-500">支持旧版 knowledge_base 模板，但同一行不能混填品牌范围与知识库。primary_keyword 用于知识检索；品牌模式下 reference_urls 仅保存，本期不抓取外部链接。此导入不导入商品图片或视频。</p>
     <p class="mt-2 text-sm">
         <a href="{{ route('admin.bulk-content-import.template') }}" class="font-medium text-blue-600 hover:text-blue-700">下载导入模板（.xlsx）</a>
     </p>

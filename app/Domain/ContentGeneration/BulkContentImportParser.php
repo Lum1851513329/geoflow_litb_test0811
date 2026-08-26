@@ -5,8 +5,14 @@ namespace App\Domain\ContentGeneration;
 use App\Models\Category;
 use App\Models\DistributionChannel;
 use App\Models\KnowledgeBase;
+use App\Models\KnowledgeBrand;
+use App\Models\KnowledgeDirectory;
+use App\Models\KnowledgeSite;
 use App\Models\PromptPreset;
 use App\Models\PromptPresetVersion;
+use App\Services\GeoFlow\KnowledgeGovernance\GenerationKnowledgeScopeResolver;
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Validation\ValidationException;
 use PhpOffice\PhpSpreadsheet\IOFactory;
 
 final class BulkContentImportParser
@@ -33,10 +39,13 @@ final class BulkContentImportParser
                 $columnIndexByKey[$key] = $index;
             }
         }
-        foreach (['site', 'preset', 'category', 'topic', 'knowledge_base'] as $requiredColumn) {
+        foreach (['site', 'preset', 'category', 'topic'] as $requiredColumn) {
             if (! array_key_exists($requiredColumn, $columnIndexByKey)) {
                 return ['rows' => [], 'errors' => [['row' => self::HEADER_ROW, 'message' => "Missing required column \"{$requiredColumn}\"."]]];
             }
+        }
+        if (! isset($columnIndexByKey['brand']) && ! isset($columnIndexByKey['knowledge_base'])) {
+            return ['rows' => [], 'errors' => [['row' => self::HEADER_ROW, 'message' => 'Missing required column "brand" (or legacy "knowledge_base").']]];
         }
 
         $rows = [];
@@ -69,21 +78,9 @@ final class BulkContentImportParser
      */
     public function conflicts(array $rows): array
     {
-        $knowledgeBaseIdByGroup = [];
-        $errors = [];
-        foreach ($rows as $row) {
-            $groupKey = $row->groupKey();
-            if (! array_key_exists($groupKey, $knowledgeBaseIdByGroup)) {
-                $knowledgeBaseIdByGroup[$groupKey] = $row->knowledgeBaseId;
-
-                continue;
-            }
-            if ($knowledgeBaseIdByGroup[$groupKey] !== $row->knowledgeBaseId) {
-                $errors[] = ['row' => $row->rowNumber, 'message' => 'knowledge_base differs from an earlier row in the same site/preset/category group.'];
-            }
-        }
-
-        return $errors;
+        // Scope is part of groupKey now. Different libraries/brands/sites/directories
+        // intentionally create separate tasks; conflicting row modes fail in parseRow.
+        return [];
     }
 
     /**
@@ -93,7 +90,7 @@ final class BulkContentImportParser
      */
     private function parseRow(int $rowNumber, array $rawRow, array $columnIndexByKey): array
     {
-        $get = fn (string $key): string => trim((string) ($rawRow[$columnIndexByKey[$key]] ?? ''));
+        $get = fn (string $key): string => isset($columnIndexByKey[$key]) ? trim((string) ($rawRow[$columnIndexByKey[$key]] ?? '')) : '';
 
         $siteCell = $get('site');
         $channel = $this->resolveByParenthetical($siteCell, fn (string $domain) => DistributionChannel::query()->where('domain', $domain)->first());
@@ -117,9 +114,47 @@ final class BulkContentImportParser
         }
 
         $knowledgeBaseName = $get('knowledge_base');
-        $knowledgeBase = KnowledgeBase::query()->where('name', $knowledgeBaseName)->first();
-        if ($knowledgeBase === null) {
-            return ['error' => "Could not resolve knowledge base \"{$knowledgeBaseName}\"."];
+        $knowledgeBase = null;
+        $scope = ['knowledge_mode' => 'legacy_manual', 'knowledge_brand_id' => null, 'knowledge_site_id' => null, 'knowledge_directory_id' => null];
+        $brandCell = $get('brand');
+        if ($knowledgeBaseName !== '' && ($brandCell !== '' || $get('directory') !== '' || $get('knowledge_site') !== '')) {
+            return ['error' => 'Do not mix brand/directory/knowledge_site with legacy knowledge_base in one row.'];
+        }
+        if ($brandCell !== '') {
+            $brand = $this->resolveUnique(KnowledgeBrand::query(), $brandCell, ['key', 'name']);
+            if ($brand === null) {
+                return ['error' => "Could not resolve brand \"{$brandCell}\" uniquely; use its key."];
+            }
+            $site = null;
+            if ($get('knowledge_site') !== '') {
+                $site = $this->resolveUnique(KnowledgeSite::where('brand_id', $brand->id), $get('knowledge_site'), ['key', 'canonical_host']);
+                if ($site === null) {
+                    return ['error' => 'Could not resolve knowledge_site uniquely within the selected brand.'];
+                }
+            }
+            $directory = null;
+            if ($get('directory') !== '') {
+                $directory = $this->resolveUnique(KnowledgeDirectory::where('brand_id', $brand->id), $get('directory'), ['path', 'key', 'name']);
+                if ($directory === null) {
+                    return ['error' => 'Could not resolve directory uniquely within the selected brand; use its full path.'];
+                }
+            }
+            try {
+                $scope = app(GenerationKnowledgeScopeResolver::class)->normalize([
+                    'knowledge_mode' => 'brand_auto', 'knowledge_brand_id' => $brand->id,
+                    'knowledge_site_id' => $site?->id, 'knowledge_directory_id' => $directory?->id,
+                ]);
+            } catch (ValidationException $exception) {
+                return ['error' => implode(' ', $exception->validator->errors()->all())];
+            }
+        } else {
+            if ($get('directory') !== '' || $get('knowledge_site') !== '' || $knowledgeBaseName === '') {
+                return ['error' => 'brand is required (or supply knowledge_base alone for a legacy row).'];
+            }
+            $knowledgeBase = $this->resolveUnique(KnowledgeBase::query(), $knowledgeBaseName, ['name']);
+            if ($knowledgeBase === null) {
+                return ['error' => "Could not resolve knowledge base \"{$knowledgeBaseName}\" uniquely."];
+            }
         }
 
         $topic = $get('topic');
@@ -134,12 +169,45 @@ final class BulkContentImportParser
             distributionChannelId: (int) $channel->id,
             promptPresetId: (int) $preset->id,
             categoryId: (int) $category->id,
-            knowledgeBaseId: (int) $knowledgeBase->id,
+            knowledgeBaseId: $knowledgeBase?->id,
             topic: $topic,
             coreQuestion: ($get('core_question') !== '') ? $get('core_question') : null,
             primaryKeyword: ($get('primary_keyword') !== '') ? $get('primary_keyword') : null,
             referenceUrls: $referenceUrls,
+            knowledgeMode: $scope['knowledge_mode'],
+            knowledgeBrandId: $scope['knowledge_brand_id'],
+            knowledgeSiteId: $scope['knowledge_site_id'],
+            knowledgeDirectoryId: $scope['knowledge_directory_id'],
         )];
+    }
+
+    private function resolveUnique(Builder $query, string $cell, array $columns): mixed
+    {
+        // Try exact names/keys first, including names containing parentheses.
+        $matches = (clone $query)->where(function (Builder $q) use ($columns, $cell): void {
+            foreach ($columns as $column) {
+                $q->orWhere($column, $cell);
+            }
+        })->limit(2)->get();
+        if ($matches->isNotEmpty()) {
+            return $matches->count() === 1 ? $matches->first() : null;
+        }
+        // Reference labels end with a stable key/full path. Balance parentheses
+        // so directory paths such as /products/shoes(us) survive a round trip.
+        if (count($columns) > 1 && str_ends_with($cell, ')')) {
+            $depth = 0;
+            for ($index = strlen($cell) - 1; $index >= 0; $index--) {
+                if ($cell[$index] === ')') {
+                    $depth++;
+                } elseif ($cell[$index] === '(' && --$depth === 0) {
+                    $key = trim(substr($cell, $index + 1, -1));
+                    $matches = $query->where($columns[0], $key)->limit(2)->get();
+                    break;
+                }
+            }
+        }
+
+        return $matches->count() === 1 ? $matches->first() : null;
     }
 
     private function resolveByParenthetical(string $cell, \Closure $resolve): mixed

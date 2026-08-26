@@ -4,25 +4,31 @@ namespace App\Domain\ContentGeneration;
 
 use App\Models\Category;
 use App\Models\DistributionChannel;
+use App\Models\KnowledgeBrand;
+use App\Models\KnowledgeDirectory;
+use App\Models\KnowledgeSite;
 use App\Models\PromptPreset;
 use App\Models\PromptPresetVersion;
+use PhpOffice\PhpSpreadsheet\Cell\DataType;
 use PhpOffice\PhpSpreadsheet\Cell\DataValidation;
 use PhpOffice\PhpSpreadsheet\Spreadsheet;
 use PhpOffice\PhpSpreadsheet\Worksheet\Worksheet;
 
 final class BulkContentImportTemplateBuilder
 {
-    private const HEADERS = ['site', 'preset', 'category', 'topic', 'knowledge_base', 'core_question', 'primary_keyword', 'reference_urls'];
+    private const HEADERS = ['site', 'preset', 'category', 'topic', 'brand', 'directory', 'knowledge_site', 'core_question', 'primary_keyword', 'reference_urls'];
 
     private const INSTRUCTIONS = [
         'site' => '【必填】发布到哪个站点，从"可选值参考"表中选，不要手打。',
         'preset' => '【必填】使用哪个内容模板，从"可选值参考"表中选。同一分类下可能有多个模板，请核对模板名称。',
         'category' => '【必填】文章分类，从"可选值参考"表中选。',
         'topic' => '【必填】选题方向，写清楚主题即可，不用是完整标题（最终标题由AI生成）。',
-        'knowledge_base' => '【必填】写作时参考的知识库名称，从"可选值参考"表中选。同一站点/模板/分类分组内必须一致。',
+        'brand' => '【必填】知识来源品牌，从"可选值参考"表中选，也可填写品牌 key 或唯一名称。系统自动检索品牌资料，不导入商品图片/视频。',
+        'directory' => '【选填】限定知识目录及子目录。选择对应品牌的完整路径；重名目录必须用完整路径。',
+        'knowledge_site' => '【选填】知识来源站点，与 site 发布渠道不同。品牌只有一个来源站点时可留空，多站点时必须指定。',
         'core_question' => '【选填】文章需要重点回答的具体问题，不填则由选题方向自动推导。',
         'primary_keyword' => '【选填】核心关键词。',
-        'reference_urls' => '【选填】参考资料链接，一个单元格内每行一个链接。',
+        'reference_urls' => '【选填】参考链接，每行一个；品牌自动检索模式仅保存链接，本期不抓取外部链接。',
     ];
 
     /**
@@ -36,8 +42,8 @@ final class BulkContentImportTemplateBuilder
      * 的模板往返用例（build() → parse() 必须 0 行 + 至少 1 条错误）。
      */
     private const EXAMPLE_ROWS = [
-        ['示例——请删除后再填真实数据 (示例-请勿使用)', 'Category Authority Guide (litb.geo_category_authority.en)', 'Style & Buying Guides', 'How to Choose Running Shoes', 'LITB Product KB', 'What should a first-time buyer check?', 'running shoes', ''],
-        ['示例——请删除后再填真实数据 (示例-请勿使用)', 'Category Authority Guide (litb.geo_category_authority.en)', 'Style & Buying Guides', 'Choosing the Right Duvet Cover', 'LITB Product KB', '', 'duvet cover', 'https://example.com/care-guide'],
+        ['示例——请删除后再填真实数据 (示例-请勿使用)', 'Category Authority Guide (litb.geo_category_authority.en)', 'Style & Buying Guides', 'How to Choose Running Shoes', 'LITB (litb)', '', '', 'What should a first-time buyer check?', 'running shoes', ''],
+        ['示例——请删除后再填真实数据 (示例-请勿使用)', 'Category Authority Guide (litb.geo_category_authority.en)', 'Style & Buying Guides', 'Choosing the Right Duvet Cover', 'LITB (litb)', '', '', '', 'duvet cover', 'https://example.com/care-guide'],
     ];
 
     public function build(): Spreadsheet
@@ -62,7 +68,7 @@ final class BulkContentImportTemplateBuilder
         $presetValues = $this->presetValues();
         $categoryValues = $this->categoryValues();
 
-        $referenceSheet->setCellValue('A1', '站点 site');
+        $referenceSheet->setCellValue('A1', '发布渠道 site（非知识来源）');
         $referenceSheet->setCellValue('B1', '内容模板 preset');
         $referenceSheet->setCellValue('C1', '分类 category');
         foreach ($siteValues as $index => $value) {
@@ -78,6 +84,19 @@ final class BulkContentImportTemplateBuilder
         $this->addDropdownValidation($sheet, 'A', count($siteValues), $referenceSheet, 'A', count($siteValues));
         $this->addDropdownValidation($sheet, 'B', count($presetValues), $referenceSheet, 'B', count($presetValues));
         $this->addDropdownValidation($sheet, 'C', count($categoryValues), $referenceSheet, 'C', count($categoryValues));
+
+        $scopeValues = [
+            ['D', 'E', '知识品牌 brand', KnowledgeBrand::orderBy('name')->get()->map(fn ($brand) => "{$brand->name} ({$brand->key})")->all()],
+            ['E', 'F', '知识目录 directory（品牌 / 路径）', KnowledgeDirectory::with('brand')->orderBy('brand_id')->orderBy('path')->get()->map(fn ($directory) => "{$directory->brand->key} / {$directory->name} ({$directory->path})")->all()],
+            ['F', 'G', '知识来源 knowledge_site（非发布渠道）', KnowledgeSite::with('brand')->orderBy('brand_id')->orderBy('key')->get()->map(fn ($site) => "{$site->brand->key} / {$site->canonical_host} ({$site->key})")->all()],
+        ];
+        foreach ($scopeValues as [$referenceColumn, $mainColumn, $label, $values]) {
+            $referenceSheet->setCellValue($referenceColumn.'1', $label);
+            foreach ($values as $index => $value) {
+                $referenceSheet->setCellValueExplicit($referenceColumn.($index + 2), $value, DataType::TYPE_STRING);
+            }
+            $this->addDropdownValidation($sheet, $mainColumn, count($values), $referenceSheet, $referenceColumn, count($values));
+        }
 
         $spreadsheet->setActiveSheetIndex(0);
 

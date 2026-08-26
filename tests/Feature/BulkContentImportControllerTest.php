@@ -2,11 +2,15 @@
 
 namespace Tests\Feature;
 
+use App\Domain\ContentGeneration\BulkContentImportService;
+use App\Domain\ContentGeneration\BulkContentImportValidationException;
 use App\Models\Admin;
 use App\Models\AiModel;
 use App\Models\Category;
 use App\Models\DistributionChannel;
 use App\Models\KnowledgeBase;
+use App\Models\KnowledgeBrand;
+use App\Models\KnowledgeSite;
 use App\Models\PromptPreset;
 use App\Models\PromptPresetVersion;
 use App\Models\Task;
@@ -25,6 +29,58 @@ use Tests\TestCase;
 final class BulkContentImportControllerTest extends TestCase
 {
     use RefreshDatabase;
+
+    public function test_brand_import_persists_separate_scopes_and_keyword_without_explicit_libraries(): void
+    {
+        config(['geoflow.content_strategy_enabled' => true, 'geoflow.modular_prompts_enabled' => true, 'geoflow.generation_quality_gate_enabled' => true]);
+        $admin = Admin::create(['username' => 'brand-import', 'password' => bcrypt('test'), 'role' => 'super_admin', 'status' => 'active']);
+        $model = AiModel::create(['name' => 'Test', 'status' => 'active', 'model_type' => 'chat', 'api_url' => 'https://example.invalid', 'api_key' => 'x', 'model_id' => 'x']);
+        DistributionChannel::create(['name' => 'Publish', 'domain' => 'publish.example', 'endpoint_url' => 'https://publish.example', 'channel_type' => 'wordpress', 'status' => 'active']);
+        $preset = PromptPreset::create(['preset_key' => 'preset', 'display_name' => 'Preset', 'is_enabled' => true]);
+        $version = PromptPresetVersion::forceCreate(['prompt_preset_id' => $preset->id, 'version' => 1, 'matching_rules' => [], 'generation_policy' => [], 'blueprint_template' => ['sections' => []], 'lifecycle_status' => PromptPresetVersion::STATUS_PRODUCTION]);
+        $preset->forceFill(['current_version_id' => $version->id])->save();
+        Category::create(['name' => 'Category', 'slug' => 'category']);
+        $brands = [];
+        foreach (['alpha', 'beta'] as $key) {
+            $brand = KnowledgeBrand::create(['key' => $key, 'name' => ucfirst($key)]);
+            $site = KnowledgeSite::create(['role' => 'primary', 'brand_id' => $brand->id, 'key' => $key, 'canonical_host' => $key.'.example']);
+            $brands[] = [$brand, $site];
+        }
+        $workbook = new Spreadsheet;
+        $sheet = $workbook->getActiveSheet();
+        $sheet->fromArray([
+            ['site', 'preset', 'category', 'topic', 'brand', 'directory', 'knowledge_site', 'core_question', 'primary_keyword', 'reference_urls'],
+            ['instructions'],
+            ['Publish (publish.example)', 'Preset (preset)', 'Category', 'Alpha topic', 'alpha', '', '', '', 'alpha keyword', 'https://example.invalid/reference'],
+            ['Publish (publish.example)', 'Preset (preset)', 'Category', 'Beta topic', 'beta', '', '', '', 'beta keyword'],
+        ]);
+        $path = tempnam(sys_get_temp_dir(), 'brand-bulk-').'.xlsx';
+        try {
+            (new Xlsx($workbook))->save($path);
+            $result = $this->app->make(BulkContentImportService::class)->import($path, $model->id, true, $admin);
+            $this->assertSame(['tasks_created' => 2, 'rows_imported' => 2], $result);
+            foreach ($brands as [$brand, $site]) {
+                $task = Task::where('knowledge_brand_id', $brand->id)->firstOrFail();
+                $this->assertSame('brand_auto', $task->knowledge_mode);
+                $this->assertSame($site->id, $task->knowledge_site_id);
+                $this->assertNull($task->knowledge_directory_id);
+                $this->assertSame(0, $task->knowledgeBases()->count());
+                $this->assertSame($brand->key.' keyword', $task->titleLibrary->titles()->firstOrFail()->keyword);
+            }
+            // A later invalid row must not leave the earlier valid row imported.
+            $sheet->setCellValue('E4', 'missing');
+            (new Xlsx($workbook))->save($path);
+            try {
+                $this->app->make(BulkContentImportService::class)->import($path, $model->id, true, $admin);
+                $this->fail('Expected whole-file validation failure');
+            } catch (BulkContentImportValidationException $exception) {
+                $this->assertSame(2, Task::count());
+                $this->assertSame(2, TitleLibrary::count());
+            }
+        } finally {
+            @unlink($path);
+        }
+    }
 
     protected function setUp(): void
     {
