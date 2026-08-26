@@ -23,7 +23,11 @@
             <input type="hidden" name="strategy_version_id" value="{{ $strategy->id }}">
             <input type="hidden" name="blueprint_version_id" value="{{ $blueprint->id }}">
             <input type="hidden" name="idempotency_key" value="{{ old('idempotency_key', 'content-generation-'.str()->uuid()) }}">
+            @if($brief->knowledge_mode === 'brand_auto')
+                @include('admin.partials.brand-knowledge-preview')
+            @else
             <fieldset class="rounded-lg border border-gray-200 p-4"><legend class="px-1 text-sm font-semibold text-gray-800">{{ __('admin.content_strategy.generation.evidence_sources') }}</legend><p class="mt-1 text-xs text-gray-500">{{ __('admin.content_strategy.generation.evidence_hint') }}</p><div class="mt-3 grid max-h-52 gap-2 overflow-y-auto sm:grid-cols-2">@forelse($evidenceChunks as $chunk)<label class="flex items-start gap-2 rounded border border-gray-100 p-2 text-sm"><input type="checkbox" name="knowledge_chunk_ids[]" value="{{ $chunk->id }}" @checked(in_array($chunk->id, old('knowledge_chunk_ids', [])))><span><span class="font-medium">{{ $chunk->chunk_title ?: $chunk->section_path ?: '#'.$chunk->id }}</span><span class="block text-xs text-gray-500">{{ $chunk->knowledgeBase?->name }} · knowledge-chunk:{{ $chunk->id }}</span></span></label>@empty<p class="text-sm text-gray-500">{{ __('admin.content_strategy.generation.no_evidence_sources') }}</p>@endforelse</div></fieldset>
+            @endif
             <details data-advanced-module-configuration class="rounded-lg border border-gray-200 bg-gray-50 p-4">
                 <summary class="cursor-pointer text-sm font-semibold text-gray-800">{{ __('admin.content_strategy.generation.advanced_configuration') }}</summary>
                 <p class="mt-2 text-xs text-gray-500">{{ __('admin.content_strategy.generation.advanced_hint') }}</p>

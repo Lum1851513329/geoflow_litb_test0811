@@ -4,9 +4,12 @@ namespace App\Http\Requests\Admin;
 
 use App\Models\Admin;
 use App\Models\ContentBrief;
+use App\Services\GeoFlow\KnowledgeGovernance\GenerationKnowledgeScopeResolver;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Support\Facades\Gate;
 use Illuminate\Validation\Rule;
+use Illuminate\Validation\ValidationException;
+use Illuminate\Validation\Validator;
 
 final class StoreContentBriefRequest extends FormRequest
 {
@@ -22,6 +25,10 @@ final class StoreContentBriefRequest extends FormRequest
     public function rules(): array
     {
         return [
+            'knowledge_mode' => ['nullable', 'in:legacy_manual,brand_auto'],
+            'knowledge_brand_id' => ['nullable', 'integer', 'min:1'],
+            'knowledge_site_id' => ['nullable', 'integer', 'min:1'],
+            'knowledge_directory_id' => ['nullable', 'integer', 'min:1'],
             'topic' => ['required', 'string', 'max:300'],
             'market_code' => ['sometimes', 'required_without:prompt_preset_id', 'string', 'max:10', 'regex:/^[A-Za-z0-9_-]+$/'],
             'language_code' => ['sometimes', 'required_without:prompt_preset_id', 'string', 'max:35', 'regex:/^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{1,8})*$/'],
@@ -57,11 +64,36 @@ final class StoreContentBriefRequest extends FormRequest
             ? ['starts_at' => $startsAt, 'ends_at' => $endsAt]
             : null;
 
-        return $data;
+        return array_merge($data, app(GenerationKnowledgeScopeResolver::class)->normalize($data));
+    }
+
+    public function withValidator(Validator $validator): void
+    {
+        $validator->after(function (Validator $validator): void {
+            if ($validator->errors()->isNotEmpty()) {
+                return;
+            }
+            try {
+                app(GenerationKnowledgeScopeResolver::class)->normalize($this->all());
+            } catch (ValidationException $exception) {
+                foreach ($exception->errors() as $key => $messages) {
+                    foreach ($messages as $message) {
+                        $validator->errors()->add($key, $message);
+                    }
+                }
+            }
+        });
     }
 
     protected function prepareForValidation(): void
     {
+        if ($this->filled('prompt_preset_id')) {
+            foreach (['market_code', 'language_code', 'audience', 'business_goal', 'content_type'] as $field) {
+                if (! $this->filled($field)) {
+                    $this->request->remove($field);
+                }
+            }
+        }
         $this->merge([
             'required_mentions' => $this->lines($this->input('required_mentions')),
             'prohibited_information' => $this->lines($this->input('prohibited_information')),

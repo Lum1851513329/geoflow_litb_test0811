@@ -16,6 +16,7 @@ use App\Models\PromptPresetVersion;
 use App\Models\Task;
 use App\Models\TitleLibrary;
 use App\Services\GeoFlow\DistributionOrchestrator;
+use App\Services\GeoFlow\KnowledgeGovernance\GenerationKnowledgeScopeResolver;
 use App\Services\GeoFlow\TaskDistributionChannelSelector;
 use App\Services\GeoFlow\TaskLifecycleService;
 use App\Services\GeoFlow\TaskMonitoringQueryService;
@@ -215,6 +216,10 @@ class TaskController extends Controller
             'taskId' => $taskId,
             'canManageProtectedWorkflows' => auth('admin')->user()?->canManageProtectedWorkflows() === true,
             'taskForm' => [
+                'knowledge_mode' => $taskModel->knowledge_mode ?? 'legacy_manual',
+                'knowledge_brand_id' => $taskModel->knowledge_brand_id,
+                'knowledge_site_id' => $taskModel->knowledge_site_id,
+                'knowledge_directory_id' => $taskModel->knowledge_directory_id,
                 'task_name' => (string) ($task['name'] ?? ''),
                 'title_library_id' => (string) ($task['title_library_id'] ?? ''),
                 'prompt_id' => (string) ($task['prompt_id'] ?? ''),
@@ -547,6 +552,7 @@ class TaskController extends Controller
             'aiModels' => $aiModels,
             'imageLibraries' => $imageLibraries,
             'knowledgeBases' => $knowledgeBases,
+            'knowledgeScopeOptions' => KnowledgeFormOptions::load(),
             'authors' => $authors,
             'categories' => $categories,
             'distributionChannels' => $distributionChannels,
@@ -581,6 +587,10 @@ class TaskController extends Controller
     private function validateTaskForm(Request $request): array
     {
         $validated = $request->validate([
+            'knowledge_mode' => ['nullable', 'in:legacy_manual,brand_auto'],
+            'knowledge_brand_id' => ['nullable', 'integer', 'min:1'],
+            'knowledge_site_id' => ['nullable', 'integer', 'min:1'],
+            'knowledge_directory_id' => ['nullable', 'integer', 'min:1'],
             'task_name' => ['required', 'string', 'max:200'],
             'title_library_id' => ['required', 'integer', 'min:1'],
             // required_if:generation_engine,legacy 无法覆盖 generation_engine 完全缺失（值为 null，不等于字符串 'legacy'）
@@ -629,6 +639,17 @@ class TaskController extends Controller
             if (! $hasTemplate) {
                 throw ValidationException::withMessages(['prompt_preset_id' => '请选择一个已配置内容蓝图模板的预设']);
             }
+        }
+
+        $scopeKeys = ['knowledge_mode', 'knowledge_brand_id', 'knowledge_site_id', 'knowledge_directory_id'];
+        if (array_intersect($scopeKeys, array_keys($validated)) !== []) {
+            $existing = $request->routeIs('admin.tasks.update')
+                ? Task::findOrFail($request->route('taskId'))->only($scopeKeys) : [];
+            $scope = array_replace($existing, array_intersect_key($validated, array_flip($scopeKeys)));
+            if (($scope['knowledge_mode'] ?? null) === 'legacy_manual') {
+                $scope = ['knowledge_mode' => 'legacy_manual'];
+            }
+            app(GenerationKnowledgeScopeResolver::class)->normalize($scope);
         }
 
         return $validated;
@@ -686,7 +707,9 @@ class TaskController extends Controller
             $taskData['prompt_preset_id'] = $generationEngineIsQualityGated ? (int) $payload['prompt_preset_id'] : null;
         }
 
-        return $taskData;
+        return array_merge($taskData, array_intersect_key($payload, array_flip([
+            'knowledge_mode', 'knowledge_brand_id', 'knowledge_site_id', 'knowledge_directory_id',
+        ])));
     }
 
     /**

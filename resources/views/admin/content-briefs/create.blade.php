@@ -16,6 +16,7 @@
 
     <form method="POST" action="{{ route('admin.content-briefs.store') }}" class="grid gap-5 rounded-lg bg-white p-6 shadow lg:grid-cols-2">
         @csrf
+        <div class="lg:col-span-2">@include('admin.partials.knowledge-scope')</div>
         <div class="mb-6 rounded-md border border-blue-200 bg-blue-50 p-4 lg:col-span-2">
             <label class="block text-sm font-medium text-gray-700">{{ __('admin.content_strategy.quick_create.label') }}</label>
             <select id="prompt_preset_id" name="prompt_preset_id" class="mt-1 w-full rounded-md border-gray-300">

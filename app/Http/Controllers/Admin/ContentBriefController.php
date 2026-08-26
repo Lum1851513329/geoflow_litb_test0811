@@ -23,10 +23,15 @@ use App\Models\KnowledgeChunk;
 use App\Models\PromptModuleVersion;
 use App\Models\PromptPreset;
 use App\Models\PromptPresetVersion;
+use App\Services\GeoFlow\BrandKnowledgeEvidenceSelector;
+use App\Services\GeoFlow\BrandKnowledgeQueryBuilder;
+use App\Services\GeoFlow\KnowledgeGovernance\GenerationKnowledgeScopeResolver;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Gate;
+use Illuminate\Validation\ValidationException;
 use Illuminate\View\View;
 use Throwable;
 
@@ -69,6 +74,7 @@ final class ContentBriefController extends Controller
             'pageTitle' => __('admin.content_strategy.create.title'),
             'activeMenu' => 'content_strategy',
             'categories' => Category::query()->orderBy('name')->get(['id', 'name']),
+            'knowledgeScopeOptions' => KnowledgeFormOptions::load(),
             'keywordClusters' => KeywordCluster::query()->orderBy('name')->get(['id', 'name']),
             'keywords' => Keyword::query()->orderBy('keyword')->limit(500)->get(['id', 'keyword']),
             'quickCreatePresets' => PromptPreset::query()
@@ -80,13 +86,14 @@ final class ContentBriefController extends Controller
 
     public function store(StoreContentBriefRequest $request): RedirectResponse
     {
-        $data = $request->validated();
+        $data = $request->briefData();
         $actor = $this->actor($request);
 
         $presetId = (int) ($data['prompt_preset_id'] ?? 0);
         if ($presetId > 0) {
             $preset = PromptPreset::query()->findOrFail($presetId);
             $brief = $this->quickCreate->create([
+                ...array_intersect_key($data, array_flip(['knowledge_mode', 'knowledge_brand_id', 'knowledge_site_id', 'knowledge_directory_id', 'language_code'])),
                 'topic' => (string) $data['topic'],
                 'core_question' => $data['core_question'] ?? null,
                 'category_id' => $data['category_id'] ?? null,
@@ -226,7 +233,34 @@ final class ContentBriefController extends Controller
             ->latest('id')
             ->paginate(20, ['*'], 'runs_page')
             ->withQueryString();
-        $evidenceChunks = KnowledgeChunk::query()
+        $knowledgePreview = null;
+        $knowledgePreviewError = null;
+        $manualKnowledgeChoices = collect();
+        if ($brief->knowledge_mode === 'brand_auto') {
+            try {
+                $resolver = app(GenerationKnowledgeScopeResolver::class);
+                $scope = $resolver->resolve($brief->toArray(), $brief->language_code);
+                $manualKnowledgeChoices = KnowledgeChunk::query()
+                    ->whereIn('knowledge_base_id', $resolver->eligibleQuery($scope)->select('id'))
+                    ->whereRaw("TRIM(content) <> ''")
+                    ->with('knowledgeBase:id,name')
+                    ->orderBy('id')->limit(101)
+                    ->get(['id', 'knowledge_base_id', 'chunk_title', 'section_path']);
+                $selection = validator([
+                    'knowledge_chunk_ids' => $request->old('knowledge_chunk_ids', []),
+                    'excluded_knowledge_chunk_ids' => $request->old('excluded_knowledge_chunk_ids', []),
+                ], [
+                    'knowledge_chunk_ids' => ['nullable', 'array', 'max:50'],
+                    'knowledge_chunk_ids.*' => ['integer', 'distinct', 'min:1'],
+                    'excluded_knowledge_chunk_ids' => ['nullable', 'array', 'max:50'],
+                    'excluded_knowledge_chunk_ids.*' => ['integer', 'distinct', 'min:1'],
+                ])->validate();
+                $knowledgePreview = $this->selectKnowledge($brief, $selection['knowledge_chunk_ids'] ?? [], $selection['excluded_knowledge_chunk_ids'] ?? []);
+            } catch (ValidationException $exception) {
+                $knowledgePreviewError = $exception->getMessage();
+            }
+        }
+        $evidenceChunks = $brief->knowledge_mode === 'brand_auto' ? collect() : KnowledgeChunk::query()
             ->with('knowledgeBase:id,name,review_status')
             ->whereHas('knowledgeBase', fn ($query) => $query->where('review_status', 'reviewed'))
             ->orderByDesc('id')
@@ -248,7 +282,38 @@ final class ContentBriefController extends Controller
             'runs' => $runs,
             'runSearch' => $runSearch,
             'evidenceChunks' => $evidenceChunks,
+            'knowledgePreview' => $knowledgePreview,
+            'knowledgePreviewError' => $knowledgePreviewError,
+            'knowledgeScopeOptions' => KnowledgeFormOptions::load(),
+            'manualKnowledgeChoices' => $manualKnowledgeChoices->take(100),
+            'manualKnowledgeChoicesTruncated' => $manualKnowledgeChoices->count() > 100,
         ]);
+    }
+
+    public function knowledgePreview(Request $request, ContentBrief $brief): JsonResponse
+    {
+        Gate::forUser($this->actor($request))->authorize('view', $brief);
+        abort_unless($brief->knowledge_mode === 'brand_auto', 422);
+        $data = $request->validate([
+            'knowledge_chunk_ids' => ['nullable', 'array', 'max:50'],
+            'knowledge_chunk_ids.*' => ['integer', 'distinct', 'min:1'],
+            'excluded_knowledge_chunk_ids' => ['nullable', 'array', 'max:50'],
+            'excluded_knowledge_chunk_ids.*' => ['integer', 'distinct', 'min:1'],
+        ]);
+
+        return response()->json($this->selectKnowledge($brief, $data['knowledge_chunk_ids'] ?? [], $data['excluded_knowledge_chunk_ids'] ?? []));
+    }
+
+    private function selectKnowledge(ContentBrief $brief, array $includes = [], array $excludes = []): array
+    {
+        $resolver = app(GenerationKnowledgeScopeResolver::class);
+
+        return app(BrandKnowledgeEvidenceSelector::class)->select(
+            $resolver->resolve($brief->toArray(), $brief->language_code),
+            app(BrandKnowledgeQueryBuilder::class)->forBrief($brief),
+            $includes,
+            $excludes,
+        );
     }
 
     private function actor(Request $request): Admin

@@ -141,6 +141,7 @@ Route::prefix($adminPrefix)->name('admin.')->middleware(['admin.locale'])->group
             Route::get('{brief}/blueprint', [ContentBriefController::class, 'blueprint'])->can('view', 'brief')->name('blueprint');
             Route::post('{brief}/blueprint', [ContentBriefController::class, 'confirmBlueprint'])->can('update', 'brief')->name('blueprint.confirm');
             Route::post('{brief}/generations', [ContentGenerationController::class, 'store'])->can('update', 'brief')->name('generations.store');
+            Route::post('{brief}/knowledge-preview', [ContentBriefController::class, 'knowledgePreview'])->can('view', 'brief')->name('knowledge-preview');
             Route::get('{brief}', [ContentBriefController::class, 'show'])->can('view', 'brief')->name('show');
         });
         Route::prefix('content-generations')->name('content-generations.')->group(function (): void {

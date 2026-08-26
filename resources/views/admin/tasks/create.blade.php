@@ -183,7 +183,8 @@
                                 </select>
                                 <p class="mt-1 text-sm text-gray-500">{!! $t('task_create.help.model_selection_mode') !!}</p>
                             </div>
-                            <div class="lg:col-span-3">
+                            @include('admin.partials.knowledge-scope', ['scopeValues' => $taskForm, 'knowledgeScopeOptions' => $formOptions['knowledgeScopeOptions']])
+                            <div data-legacy-knowledge @if(old('knowledge_mode', $taskForm['knowledge_mode'] ?? 'brand_auto') === 'brand_auto') hidden @endif class="lg:col-span-3">
                                 <div class="flex flex-wrap items-center justify-between gap-2">
                                     <div>
                                         <label class="block text-sm font-medium text-gray-700">{{ $t('task_create.field.knowledge_bases') }}</label>

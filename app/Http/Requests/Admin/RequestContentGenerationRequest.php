@@ -38,6 +38,8 @@ final class RequestContentGenerationRequest extends FormRequest
             'idempotency_key' => ['nullable', 'string', 'max:150'],
             'knowledge_chunk_ids' => ['nullable', 'array', 'max:50'],
             'knowledge_chunk_ids.*' => ['integer', 'distinct', 'exists:knowledge_chunks,id'],
+            'excluded_knowledge_chunk_ids' => ['nullable', 'array', 'max:50'],
+            'excluded_knowledge_chunk_ids.*' => ['integer', 'distinct', 'exists:knowledge_chunks,id'],
             'evidence' => ['nullable', 'array', 'max:50'],
             'evidence.*.fact_id' => ['required', 'string', 'max:150', 'regex:/^[A-Za-z0-9][A-Za-z0-9:._-]*$/'],
             'evidence.*.title' => ['nullable', 'string', 'max:300'],
