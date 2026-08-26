@@ -189,8 +189,8 @@ final class BulkContentImportParser
                 $q->orWhere($column, $cell);
             }
         })->limit(2)->get();
-        if ($matches->isNotEmpty()) {
-            return $matches->count() === 1 ? $matches->first() : null;
+        if ($matches->count() > 1) {
+            return null;
         }
         // Reference labels end with a stable key/full path. Balance parentheses
         // so directory paths such as /products/shoes(us) survive a round trip.
@@ -201,7 +201,9 @@ final class BulkContentImportParser
                     $depth++;
                 } elseif ($cell[$index] === '(' && --$depth === 0) {
                     $key = trim(substr($cell, $index + 1, -1));
-                    $matches = $query->where($columns[0], $key)->limit(2)->get();
+                    // A literal display name must never override a reference
+                    // label pointing at a different scope (or vice versa).
+                    $matches = $matches->merge($query->where($columns[0], $key)->limit(2)->get());
                     break;
                 }
             }

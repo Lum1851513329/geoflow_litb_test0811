@@ -190,6 +190,21 @@ final class BulkContentImportParserTest extends TestCase
         $this->assertSame('legacy_manual', $result['rows'][2]->knowledgeMode);
     }
 
+    public function test_reference_labels_colliding_with_literal_names_are_rejected(): void
+    {
+        [$brand] = $this->brandFixtures();
+        $collision = KnowledgeBrand::create(['key' => 'collision', 'name' => 'Brand (brand)']);
+        KnowledgeSite::create(['role' => 'primary', 'brand_id' => $collision->id, 'key' => 'collision', 'canonical_host' => 'collision.example']);
+        KnowledgeSite::create(['role' => 'primary', 'brand_id' => $brand->id, 'key' => 'other-source', 'canonical_host' => 'brand / source.example (source)']);
+        KnowledgeDirectory::create(['brand_id' => $brand->id, 'key' => 'root', 'name' => 'Root', 'path' => '/root']);
+        KnowledgeDirectory::create(['brand_id' => $brand->id, 'key' => 'other', 'name' => 'brand / Root (/root)', 'path' => '/other']);
+        foreach ([['Brand (brand)'], ['brand', '', 'brand / source.example (source)'], ['brand', 'brand / Root (/root)', 'source']] as $row) {
+            $result = $this->parseBrandRows([$row]);
+            $this->assertSame([], $result['rows']);
+            $this->assertSame(3, $result['errors'][0]['row']);
+        }
+    }
+
     private function parseBrandRows(array $rows): array
     {
         $path = $this->buildFixture(array_merge([
