@@ -237,6 +237,17 @@ final class BulkContentImportParserTest extends TestCase
         $this->assertSame([$site->id, $site->id], array_map(fn ($row) => $row->knowledgeSiteId, $result['rows']));
     }
 
+    public function test_literal_directory_name_with_slash_and_parentheses_is_not_a_reference_label(): void
+    {
+        [$brand] = $this->brandFixtures();
+        $directory = KnowledgeDirectory::create(['brand_id' => $brand->id, 'key' => 'shoes', 'name' => 'Products / Shoes (US)', 'path' => '/shoes']);
+
+        $result = $this->parseBrandRows([['brand', 'Products / Shoes (US)']]);
+
+        $this->assertSame([], $result['errors']);
+        $this->assertSame($directory->id, $result['rows'][0]->knowledgeDirectoryId);
+    }
+
     private function parseBrandRows(array $rows): array
     {
         $path = $this->buildFixture(array_merge([

@@ -200,16 +200,18 @@ final class BulkContentImportParser
                 if ($cell[$index] === ')') {
                     $depth++;
                 } elseif ($cell[$index] === '(' && --$depth === 0) {
+                    $key = trim(substr($cell, $index + 1, -1));
+                    $encodedMatches = $query->where($columns[0], $key)->limit(2)->get();
                     $labelParts = explode(' / ', trim(substr($cell, 0, $index)), 2);
-                    if ($brandKey !== null && count($labelParts) === 2 && $labelParts[0] !== $brandKey) {
+                    if ($encodedMatches->isNotEmpty() && $brandKey !== null && count($labelParts) === 2 && $labelParts[0] !== $brandKey) {
                         // Global dropdown labels are brand-qualified. Never retarget
-                        // another brand's label to this brand's shared key/path.
+                        // another brand's label to this brand's shared key/path. A
+                        // literal name without an encoded match has no qualifier.
                         return null;
                     }
-                    $key = trim(substr($cell, $index + 1, -1));
                     // A literal display name must never override a reference
                     // label pointing at a different scope (or vice versa).
-                    $matches = $matches->merge($query->where($columns[0], $key)->limit(2)->get());
+                    $matches = $matches->merge($encodedMatches);
                     break;
                 }
             }
