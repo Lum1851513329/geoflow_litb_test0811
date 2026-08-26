@@ -17,6 +17,7 @@ final class ContentBrief extends Model
     public const STATUS_ARCHIVED = 'archived';
 
     protected $fillable = [
+        'knowledge_mode', 'knowledge_brand_id', 'knowledge_site_id', 'knowledge_directory_id',
         'topic', 'market_code', 'language_code', 'audience', 'core_question', 'business_goal',
         'content_type', 'planned_publish_at', 'keyword_cluster_id', 'primary_keyword_id',
         'category_id', 'target_url', 'required_mentions', 'prohibited_information',
@@ -27,6 +28,9 @@ final class ContentBrief extends Model
     protected function casts(): array
     {
         return [
+            'knowledge_brand_id' => 'integer',
+            'knowledge_site_id' => 'integer',
+            'knowledge_directory_id' => 'integer',
             'planned_publish_at' => 'datetime',
             'keyword_cluster_id' => 'integer',
             'primary_keyword_id' => 'integer',

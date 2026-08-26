@@ -278,6 +278,20 @@ class ContentStrategySchemaTest extends TestCase
         $this->assertDatabaseRejects(fn () => $this->createPresetVersion($this->createPreset('preset-first'), 2));
     }
 
+    public function test_knowledge_retrieval_snapshot_is_write_once_before_generation(): void
+    {
+        $pipeline = $this->createPipeline('knowledge-audit');
+        $run = $pipeline['run'];
+        $run->update(['status' => 'pending']);
+        DB::table('content_generation_runs')->where('id', $run->id)->update(['knowledge_retrieval_snapshot' => '{"query":"linen dress"}']);
+        $this->assertSame(['query' => 'linen dress'], $run->fresh()->knowledge_retrieval_snapshot);
+        $this->assertDatabaseRejects(fn () => DB::table('content_generation_runs')->where('id', $run->id)->update(['knowledge_retrieval_snapshot' => '{"query":"changed"}']));
+        $this->assertDatabaseRejects(fn () => DB::table('content_generation_runs')->where('id', $run->id)->update(['knowledge_retrieval_snapshot' => null]));
+        $other = $this->createPipeline('knowledge-audit-late')['run'];
+        $other->update(['status' => 'generating']);
+        $this->assertDatabaseRejects(fn () => DB::table('content_generation_runs')->where('id', $other->id)->update(['knowledge_retrieval_snapshot' => '{"query":"late"}']));
+    }
+
     public function test_database_guards_reject_immutable_snapshot_updates_and_deletions(): void
     {
         $pipeline = $this->createPipeline('immutable');

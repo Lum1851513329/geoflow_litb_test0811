@@ -12,6 +12,7 @@ class Task extends Model
     protected $table = 'tasks';
 
     protected $fillable = [
+        'knowledge_mode', 'knowledge_brand_id', 'knowledge_site_id', 'knowledge_directory_id',
         'name',
         'title_library_id',
         'image_library_id',
@@ -54,6 +55,9 @@ class Task extends Model
     protected function casts(): array
     {
         return [
+            'knowledge_brand_id' => 'integer',
+            'knowledge_site_id' => 'integer',
+            'knowledge_directory_id' => 'integer',
             'title_library_id' => 'integer',
             'image_library_id' => 'integer',
             'image_count' => 'integer',

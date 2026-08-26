@@ -44,6 +44,7 @@ final class ContentGenerationRun extends Model
     protected function casts(): array
     {
         return [
+            'knowledge_retrieval_snapshot' => 'array',
             'content_brief_id' => 'integer',
             'strategy_version_id' => 'integer',
             'blueprint_version_id' => 'integer',
