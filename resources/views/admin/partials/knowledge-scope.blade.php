@@ -1,6 +1,11 @@
 @php
     $scopeValues = $scopeValues ?? [];
     $scopeMode = old('knowledge_mode', $scopeValues['knowledge_mode'] ?? 'brand_auto');
+    $selectedScopeIds = [];
+    foreach (['knowledge_brand_id', 'knowledge_site_id', 'knowledge_directory_id'] as $field) {
+        $value = old($field, $scopeValues[$field] ?? '');
+        $selectedScopeIds[$field] = is_int($value) || is_string($value) ? (string) $value : '';
+    }
 @endphp
 <fieldset data-knowledge-scope class="grid gap-3 rounded-lg border border-gray-200 p-4 lg:col-span-3">
     <legend class="px-1 font-semibold">Knowledge evidence scope</legend>
@@ -11,9 +16,9 @@
         </select>
     </label>
     <div data-brand-scope-fields @if($scopeMode !== 'brand_auto') hidden @endif class="grid gap-3 sm:grid-cols-3">
-        <label>Brand<select name="knowledge_brand_id" class="mt-1 block w-full rounded-md border-gray-300"><option value="">Select brand</option>@foreach($knowledgeScopeOptions['brands'] as $brand)<option value="{{ $brand->id }}" @selected((string) old('knowledge_brand_id', $scopeValues['knowledge_brand_id'] ?? '') === (string) $brand->id)>{{ $brand->name }}</option>@endforeach</select></label>
-        <label>Source site (not publishing channel)<select name="knowledge_site_id" class="mt-1 block w-full rounded-md border-gray-300"><option value="">Select source site</option>@foreach($knowledgeScopeOptions['sites'] as $site)<option value="{{ $site->id }}" data-brand="{{ $site->brand_id }}" @selected((string) old('knowledge_site_id', $scopeValues['knowledge_site_id'] ?? '') === (string) $site->id)>{{ $site->canonical_host }}</option>@endforeach</select></label>
-        <label>Directory (includes descendants)<select name="knowledge_directory_id" class="mt-1 block w-full rounded-md border-gray-300"><option value="">All brand directories</option>@foreach($knowledgeScopeOptions['directories'] as $directory)<option value="{{ $directory->id }}" data-brand="{{ $directory->brand_id }}" @selected((string) old('knowledge_directory_id', $scopeValues['knowledge_directory_id'] ?? '') === (string) $directory->id)>{{ $directory->path }} — {{ $directory->name }}</option>@endforeach</select></label>
+        <label>Brand<select name="knowledge_brand_id" class="mt-1 block w-full rounded-md border-gray-300"><option value="">Select brand</option>@foreach($knowledgeScopeOptions['brands'] as $brand)<option value="{{ $brand->id }}" @selected($selectedScopeIds['knowledge_brand_id'] === (string) $brand->id)>{{ $brand->name }}</option>@endforeach</select></label>
+        <label>Source site (not publishing channel)<select name="knowledge_site_id" class="mt-1 block w-full rounded-md border-gray-300"><option value="">Select source site</option>@foreach($knowledgeScopeOptions['sites'] as $site)<option value="{{ $site->id }}" data-brand="{{ $site->brand_id }}" @selected($selectedScopeIds['knowledge_site_id'] === (string) $site->id)>{{ $site->canonical_host }}</option>@endforeach</select></label>
+        <label>Directory (includes descendants)<select name="knowledge_directory_id" class="mt-1 block w-full rounded-md border-gray-300"><option value="">All brand directories</option>@foreach($knowledgeScopeOptions['directories'] as $directory)<option value="{{ $directory->id }}" data-brand="{{ $directory->brand_id }}" @selected($selectedScopeIds['knowledge_directory_id'] === (string) $directory->id)>{{ $directory->path }} — {{ $directory->name }}</option>@endforeach</select></label>
         <p class="text-sm text-gray-600 sm:col-span-3">Only reviewed, active, generation-eligible evidence in this brand, source site and language is retrieved. Reference URLs are not used as unreviewed evidence in brand mode. Generation retrieves current evidence automatically; preview is optional.</p>
     </div>
     @foreach(['knowledge_mode', 'knowledge_brand_id', 'knowledge_site_id', 'knowledge_directory_id'] as $field)

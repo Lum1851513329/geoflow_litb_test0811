@@ -18,6 +18,7 @@ use App\Models\Task;
 use App\Models\TitleLibrary;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Queue;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
 final class BrandScopedKnowledgeAdminTest extends TestCase
@@ -152,5 +153,36 @@ final class BrandScopedKnowledgeAdminTest extends TestCase
         extract($this->fixture());
         $this->withSession(['_old_input' => ['knowledge_chunk_ids' => 'bad', 'excluded_knowledge_chunk_ids' => 'bad']])
             ->get(route('admin.content-briefs.show', $brief))->assertOk();
+    }
+
+    public static function malformedScopeCases(): array
+    {
+        $cases = [];
+        foreach (['content-briefs', 'tasks'] as $form) {
+            foreach (['knowledge_brand_id', 'knowledge_site_id', 'knowledge_directory_id'] as $field) {
+                $cases[$form.' '.$field] = [$form, $field];
+            }
+        }
+
+        return $cases;
+    }
+
+    #[DataProvider('malformedScopeCases')]
+    public function test_malformed_scope_ids_survive_validation_redirect(string $form, string $field): void
+    {
+        extract($this->fixture());
+        Category::create(['name' => 'Care', 'slug' => 'care']);
+        $library = TitleLibrary::create(['name' => 'Titles']);
+        $model = AiModel::create(['name' => 'Test', 'model_id' => 'test', 'api_key' => 'test', 'api_url' => 'https://example.invalid', 'status' => 'active']);
+        $data = array_merge($scope, [
+            'topic' => 'Invalid scope', 'core_question' => 'Care?', 'prompt_preset_id' => $preset->id,
+            'task_name' => 'Invalid task', 'title_library_id' => $library->id, 'ai_model_id' => $model->id,
+            'generation_engine' => 'quality_gated', 'status' => 'paused',
+            $field => ['not-a-scalar'],
+        ]);
+        $createUrl = route('admin.'.$form.'.create');
+        $this->from($createUrl)->post(route('admin.'.$form.'.store'), $data)
+            ->assertRedirect($createUrl)->assertSessionHasErrors($field);
+        $this->get($createUrl)->assertOk()->assertSee('name="'.$field.'"', false);
     }
 }

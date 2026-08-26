@@ -21,7 +21,7 @@
     </div>
     <button type="button" data-add-chunk class="rounded border px-3 py-1">Advanced: add a scoped chunk ID</button>
     <div data-exclusion-inputs>
-        @foreach($oldExcludes as $id)<label class="block">Exclude chunk ID <input type="number" min="1" name="excluded_knowledge_chunk_ids[]" value="{{ $id }}"><button type="button" onclick="this.parentElement.remove()">Remove</button></label>@endforeach
+        @foreach($oldExcludes as $id)<label class="block">Exclude chunk ID <input type="number" min="1" name="excluded_knowledge_chunk_ids[]" value="{{ $id }}"><button type="button" data-remove-exclusion>Remove</button></label>@endforeach
     </div>
     <button type="button" data-refresh-preview class="rounded bg-blue-50 px-3 py-1 text-blue-700">Re-run evidence preview</button>
     <p data-preview-error role="alert" class="text-sm text-red-600">{{ $knowledgePreviewError }}</p>
@@ -49,20 +49,35 @@ document.addEventListener('DOMContentLoaded', () => {
     const results = panel.querySelector('[data-knowledge-preview-results]');
     const exclusions = panel.querySelector('[data-exclusion-inputs]');
     const additions = panel.querySelector('[data-manual-additions]');
+    // Submitted inputs are canonical; preview checkboxes only reflect those IDs.
+    function syncExclusions() {
+        const ids = new Set([...exclusions.querySelectorAll('input')].map(input => input.value));
+        panel.querySelectorAll('[data-exclude-chunk]').forEach(input => input.checked = ids.has(String(input.dataset.excludeChunk)));
+    }
     function inputRow(parent, name, value) {
         const label = document.createElement('label'); label.className = 'block';
         label.append(name === 'knowledge_chunk_ids[]' ? 'Add chunk ID ' : 'Exclude chunk ID ');
         const input = document.createElement('input'); input.type = 'number'; input.min = '1'; input.required = true; input.name = name; input.value = value;
-        const remove = document.createElement('button'); remove.type = 'button'; remove.textContent = 'Remove'; remove.addEventListener('click', () => label.remove());
+        const remove = document.createElement('button'); remove.type = 'button'; remove.textContent = 'Remove'; remove.addEventListener('click', () => { label.remove(); syncExclusions(); });
         label.append(input, remove); parent.append(label);
     }
     panel.querySelector('[data-add-chunk]').addEventListener('click', () => inputRow(additions, 'knowledge_chunk_ids[]', ''));
+    panel.addEventListener('click', event => {
+        const remove = event.target.closest('[data-remove-exclusion]');
+        if (remove) { remove.closest('label').remove(); syncExclusions(); }
+    });
+    panel.addEventListener('input', event => {
+        if (event.target.name === 'excluded_knowledge_chunk_ids[]') syncExclusions();
+    });
     panel.addEventListener('change', event => {
+        if (event.target.name === 'excluded_knowledge_chunk_ids[]') { syncExclusions(); return; }
         const id = event.target.dataset.excludeChunk;
         if (!id) return;
         exclusions.querySelectorAll('input').forEach(input => { if (input.value === id) input.parentElement.remove(); });
         if (event.target.checked) inputRow(exclusions, 'excluded_knowledge_chunk_ids[]', id);
+        syncExclusions();
     });
+    syncExclusions();
     panel.querySelector('[data-refresh-preview]').addEventListener('click', async event => {
         const button = event.currentTarget; button.disabled = true;
         const error = panel.querySelector('[data-preview-error]'); error.textContent = '';
@@ -84,6 +99,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 const label = document.createElement('label'); label.className = 'block'; const check = document.createElement('input'); check.type = 'checkbox'; check.dataset.excludeChunk = item.chunk_id; label.append(check, ' Exclude from generation'); article.append(label); results.append(article);
             });
             if (!data.evidence.length) text(results, 'No eligible matching evidence. Add a reviewed scoped chunk or update the knowledge library before generation.');
+            syncExclusions();
         } catch (exception) { error.textContent = exception.message; }
         finally { button.disabled = false; }
     });
