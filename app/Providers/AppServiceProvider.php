@@ -4,6 +4,8 @@ namespace App\Providers;
 
 use App\Contracts\Outbound\HostResolver;
 use App\Contracts\Outbound\OutboundTransport;
+use App\Domain\ContentGeneration\ExternalEvidence\ExternalEvidenceProvider;
+use App\Domain\ContentGeneration\ExternalEvidence\WigoloRestClient;
 use App\Events\ContentGenerationCompleted;
 use App\Events\ContentGenerationFailed;
 use App\Listeners\ArchiveLitbContentGeneration;
@@ -67,6 +69,10 @@ class AppServiceProvider extends ServiceProvider
         $this->app->singleton(TaskMonitoringQueryService::class);
         $this->app->singleton(TaskLifecycleService::class);
         $this->app->singleton(ArticleGeoFlowService::class);
+        $this->app->bind(
+            ExternalEvidenceProvider::class,
+            WigoloRestClient::class,
+        );
     }
 
     /**
