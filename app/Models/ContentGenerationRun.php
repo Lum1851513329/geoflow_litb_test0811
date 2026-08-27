@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 
 final class ContentGenerationRun extends Model
 {
@@ -115,5 +116,10 @@ final class ContentGenerationRun extends Model
     public function qualityReports(): HasMany
     {
         return $this->hasMany(ContentQualityReport::class, 'content_generation_run_id');
+    }
+
+    public function evidencePreparation(): HasOne
+    {
+        return $this->hasOne(GenerationEvidencePreparation::class, 'content_generation_run_id');
     }
 }

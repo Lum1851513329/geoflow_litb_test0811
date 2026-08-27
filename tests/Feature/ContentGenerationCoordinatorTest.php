@@ -3,6 +3,12 @@
 namespace Tests\Feature;
 
 use App\Domain\ContentGeneration\ContentGenerationCoordinator;
+use App\Domain\ContentGeneration\ExternalEvidence\EvidenceCoverageAssessment;
+use App\Domain\ContentGeneration\ExternalEvidence\EvidenceCoverageAssessor;
+use App\Domain\ContentGeneration\ExternalEvidence\EvidencePreparationCoordinator;
+use App\Domain\ContentGeneration\ExternalEvidence\ExternalEvidencePlanner;
+use App\Domain\ContentGeneration\ExternalEvidence\ExternalEvidenceProvider;
+use App\Domain\ContentGeneration\ExternalEvidence\ExternalSourcePolicy;
 use App\Events\ContentGenerationCompleted;
 use App\Events\ContentGenerationFailed;
 use App\Jobs\GenerateStrategyContent;
@@ -14,6 +20,7 @@ use App\Models\ContentGenerationRunEvidence;
 use App\Models\ContentGenerationRunStep;
 use App\Models\ContentQualityReport;
 use App\Models\ContentStrategyVersion;
+use App\Models\GenerationEvidencePreparation;
 use App\Models\PromptModule;
 use App\Models\PromptModuleVersion;
 use App\Models\PromptPreset;
@@ -150,6 +157,84 @@ class ContentGenerationCoordinatorTest extends TestCase
         $this->assertSame($run->idempotency_key, $job->uniqueId());
         $this->assertSame(0, $job->tries);
         $this->assertSame(3, $job->maxExceptions);
+    }
+
+    public function test_external_evidence_preparation_is_local_first_and_sealed_replay_is_free(): void
+    {
+        $run = $this->pendingRun(withEvidence: true);
+        $run->forceFill(['claim_token' => 'evidence-lease', 'lease_version' => 3])->save();
+        $provider = new class implements ExternalEvidenceProvider
+        {
+            public int $calls = 0;
+
+            public function search(array $queries, array $options = []): array
+            {
+                $this->calls++;
+
+                return ['status' => 'ok', 'results' => []];
+            }
+
+            public function fetch(string $url, array $options = []): array
+            {
+                $this->calls++;
+
+                return ['status' => 'failed'];
+            }
+        };
+        $assessor = new class implements EvidenceCoverageAssessor
+        {
+            public int $calls = 0;
+
+            public function assess(array $context, array $evidence, AiModel $aiModel): EvidenceCoverageAssessment
+            {
+                $this->calls++;
+
+                return EvidenceCoverageAssessment::fromArray(['claims' => [[
+                    'id' => 'fit', 'question' => 'How should shoes fit?', 'core' => true,
+                    'status' => 'supported', 'evidence_ids' => ['fit-source-1'],
+                    'quotes' => [['evidence_id' => 'fit-source-1', 'text' => 'Allow a thumb width']],
+                    'reason' => 'Direct local evidence.',
+                ]]], $evidence, ['fit']);
+            }
+        };
+        $coordinator = new EvidencePreparationCoordinator(
+            $assessor,
+            new ExternalEvidencePlanner($provider, new ExternalSourcePolicy),
+        );
+
+        $first = $coordinator->prepare($run, [
+            'claims' => [['id' => 'fit', 'question' => 'How should shoes fit?', 'core' => true]],
+            'official_domains' => ['lightinthebox.com'],
+        ]);
+        $second = $coordinator->prepare($run->fresh(), [
+            'claims' => [['id' => 'fit', 'question' => 'How should shoes fit?', 'core' => true]],
+            'official_domains' => ['lightinthebox.com'],
+        ]);
+
+        $this->assertSame('ready', $first['state']);
+        $this->assertSame($first, $second);
+        $this->assertSame(0, $provider->calls);
+        $this->assertSame(1, $assessor->calls);
+        $this->assertSame(1, GenerationEvidencePreparation::query()->count());
+        $this->assertNotNull(GenerationEvidencePreparation::query()->sole()->sealed_at);
+    }
+
+    public function test_unverified_optional_facts_are_prohibited_but_core_facts_force_draft_only(): void
+    {
+        [$result, $providerCalls] = $this->prepareMissingExternalClaim(false);
+
+        $this->assertSame('ready', $result['state']);
+        $this->assertSame(1, $providerCalls);
+        $this->assertSame(['seasonal-claim'], $result['prohibited_claims']);
+    }
+
+    public function test_unverified_core_fact_forces_draft_only(): void
+    {
+        [$result, $providerCalls] = $this->prepareMissingExternalClaim(true);
+
+        $this->assertSame('draft_only', $result['state']);
+        $this->assertSame(1, $providerCalls);
+        $this->assertSame(['seasonal-claim'], $result['missing_core']);
     }
 
     public function test_default_seeded_preset_reaches_review_with_real_evidence(): void
@@ -825,6 +910,51 @@ class ContentGenerationCoordinatorTest extends TestCase
             ->firstOrFail();
         $this->assertSame(ContentGenerationRunStep::STATUS_RUNNING, $staleStep->status);
         Event::assertNotDispatched(ContentGenerationFailed::class);
+    }
+
+    private function prepareMissingExternalClaim(bool $core): array
+    {
+        $run = $this->pendingRun();
+        $run->forceFill(['claim_token' => 'lease-missing-'.(int) $core, 'lease_version' => 1])->save();
+        $provider = new class implements ExternalEvidenceProvider
+        {
+            public int $calls = 0;
+
+            public function search(array $queries, array $options = []): array
+            {
+                $this->calls++;
+
+                return ['status' => 'unavailable', 'results' => []];
+            }
+
+            public function fetch(string $url, array $options = []): array
+            {
+                $this->calls++;
+
+                return ['status' => 'unavailable'];
+            }
+        };
+        $assessor = new class implements EvidenceCoverageAssessor
+        {
+            public function assess(array $context, array $evidence, AiModel $aiModel): EvidenceCoverageAssessment
+            {
+                $claim = $context['claims'][0];
+
+                return EvidenceCoverageAssessment::fromArray(['claims' => [[
+                    'id' => $claim['id'], 'question' => $claim['question'], 'core' => $claim['core'],
+                    'status' => 'missing', 'evidence_ids' => [], 'quotes' => [], 'reason' => 'Not verified.',
+                ]]], $evidence, $claim['core'] ? [$claim['id']] : []);
+            }
+        };
+        $result = (new EvidencePreparationCoordinator(
+            $assessor,
+            new ExternalEvidencePlanner($provider, new ExternalSourcePolicy),
+        ))->prepare($run, [
+            'claims' => [['id' => 'seasonal-claim', 'question' => 'Is it a new arrival?', 'core' => $core]],
+            'official_domains' => ['lightinthebox.com'],
+        ]);
+
+        return [$result, $provider->calls];
     }
 
     private function pendingRun(
