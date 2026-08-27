@@ -18,6 +18,7 @@ final class ContentBrief extends Model
 
     protected $fillable = [
         'knowledge_mode', 'knowledge_brand_id', 'knowledge_site_id', 'knowledge_directory_id',
+        'external_evidence_policy', 'external_general_domains',
         'topic', 'market_code', 'language_code', 'audience', 'core_question', 'business_goal',
         'content_type', 'planned_publish_at', 'keyword_cluster_id', 'primary_keyword_id',
         'category_id', 'target_url', 'required_mentions', 'prohibited_information',
@@ -31,6 +32,7 @@ final class ContentBrief extends Model
             'knowledge_brand_id' => 'integer',
             'knowledge_site_id' => 'integer',
             'knowledge_directory_id' => 'integer',
+            'external_general_domains' => 'array',
             'planned_publish_at' => 'datetime',
             'keyword_cluster_id' => 'integer',
             'primary_keyword_id' => 'integer',

@@ -51,7 +51,7 @@ final class GenerationEvidenceSnapshotter
             $selector = app(BrandKnowledgeEvidenceSelector::class);
             $selection = $selector->selectForSnapshot($scope, $retrieve ? app(BrandKnowledgeQueryBuilder::class)->forBrief($brief) : '', $knowledgeChunkIds, $excludedIds);
             $knowledgeChunkIds = $selection['chunk_ids'];
-            if ($knowledgeChunkIds === []) {
+            if ($knowledgeChunkIds === [] && (string) $brief->external_evidence_policy !== 'on_insufficient') {
                 throw ValidationException::withMessages(['knowledge_chunk_ids' => '该品牌内证据不足']);
             }
             $run->forceFill(['knowledge_retrieval_snapshot' => $selection])->save();

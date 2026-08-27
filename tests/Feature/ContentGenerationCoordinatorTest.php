@@ -100,7 +100,7 @@ class ContentGenerationCoordinatorTest extends TestCase
         $run = $this->coordinator->generate($this->pendingRun(withEvidence: true));
 
         $fresh = $run->fresh();
-        $this->assertSame(ContentGenerationRun::STATUS_READY_FOR_REVIEW, $fresh->status);
+        $this->assertSame(ContentGenerationRun::STATUS_READY_FOR_REVIEW, $fresh->status, (string) $fresh->error_message);
         $this->assertNotNull($fresh->compiled_prompt);
         $this->assertStringNotContainsString('secret-campaign-value', (string) $fresh->compiled_prompt);
         $this->assertStringNotContainsString('secret-campaign-value', (string) $fresh->encrypted_model_payload);
@@ -235,6 +235,55 @@ class ContentGenerationCoordinatorTest extends TestCase
         $this->assertSame('draft_only', $result['state']);
         $this->assertSame(1, $providerCalls);
         $this->assertSame(['seasonal-claim'], $result['missing_core']);
+    }
+
+    public function test_enabled_flow_keeps_unverified_core_output_as_non_adoptable_draft(): void
+    {
+        $run = $this->pendingRun();
+        $run->contentBrief->forceFill([
+            'external_evidence_policy' => 'on_insufficient',
+            'external_general_domains' => ['example.org'],
+        ])->save();
+        $run->forceFill(['external_evidence_policy_snapshot' => [
+            'external_evidence_policy' => 'on_insufficient',
+            'external_general_domains' => ['example.org'],
+        ]])->save();
+        $this->app->instance(ExternalEvidenceProvider::class, new class implements ExternalEvidenceProvider
+        {
+            public function search(array $queries, array $options = []): array
+            {
+                return ['status' => 'unavailable', 'results' => []];
+            }
+
+            public function fetch(string $url, array $options = []): array
+            {
+                return ['status' => 'unavailable'];
+            }
+        });
+        $this->app->instance(EvidenceCoverageAssessor::class, new class implements EvidenceCoverageAssessor
+        {
+            public function assess(array $context, array $evidence, AiModel $aiModel): EvidenceCoverageAssessment
+            {
+                $claims = array_map(static fn (array $claim): array => [
+                    'id' => $claim['id'], 'question' => $claim['question'], 'core' => $claim['core'],
+                    'status' => 'missing', 'evidence_ids' => [], 'quotes' => [], 'reason' => 'No source.',
+                ], $context['claims']);
+
+                return EvidenceCoverageAssessment::fromArray(
+                    ['claims' => $claims],
+                    $evidence,
+                    array_column(array_filter($claims, static fn (array $claim): bool => $claim['core']), 'id'),
+                );
+            }
+        });
+        $this->fakeGenerator->queue($this->substantiveArticle());
+
+        $fresh = $this->app->make(ContentGenerationCoordinator::class)->generate($run)->fresh();
+
+        $this->assertSame(ContentGenerationRun::STATUS_NEEDS_EVIDENCE, $fresh->status, (string) $fresh->error_message);
+        $this->assertSame($this->substantiveArticle(), $fresh->raw_output);
+        $this->assertNull($fresh->article_id);
+        $this->assertSame('draft_only', $fresh->evidencePreparation->result_json['state']);
     }
 
     public function test_default_seeded_preset_reaches_review_with_real_evidence(): void

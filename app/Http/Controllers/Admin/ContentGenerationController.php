@@ -42,6 +42,7 @@ final class ContentGenerationController extends Controller
         $run->load([
             'contentBrief', 'strategyVersion', 'blueprintVersion', 'presetVersion.preset', 'aiModel', 'article',
             'modules.promptModuleVersion.module', 'evidence', 'qualityReports', 'steps',
+            'evidencePreparation',
         ]);
 
         return view('admin.content-generations.show', [

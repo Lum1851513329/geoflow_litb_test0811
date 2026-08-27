@@ -184,6 +184,20 @@
                                 <p class="mt-1 text-sm text-gray-500">{!! $t('task_create.help.model_selection_mode') !!}</p>
                             </div>
                             @include('admin.partials.knowledge-scope', ['scopeValues' => $taskForm, 'knowledgeScopeOptions' => $formOptions['knowledgeScopeOptions']])
+                            <div class="lg:col-span-3 rounded-md border border-blue-100 bg-blue-50 p-4">
+                                <label for="external_evidence_policy" class="block text-sm font-medium text-gray-800">外部证据验证</label>
+                                <select name="external_evidence_policy" id="external_evidence_policy" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500">
+                                    @php($externalPolicy = (string) old('external_evidence_policy', (string) ($taskForm['external_evidence_policy'] ?? 'off')))
+                                    <option value="off" @selected($externalPolicy === 'off')>关闭（仅使用所选品牌知识）</option>
+                                    <option value="on_insufficient" @selected($externalPolicy === 'on_insufficient')>本地证据不足时验证外部来源</option>
+                                </select>
+                                <label for="external_general_domains" class="mt-3 block text-sm font-medium text-gray-800">允许的通用来源域名（可选）</label>
+                                <input type="text" name="external_general_domains" id="external_general_domains"
+                                       value="{{ old('external_general_domains', implode(', ', (array) ($taskForm['external_general_domains'] ?? []))) }}"
+                                       placeholder="who.int, example.org"
+                                       class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500">
+                                <p class="mt-2 text-xs text-gray-600">只在本地证据不足时调用。品牌事实限定为所选知识站点的官方域名；无法验证的核心事实会阻止采纳与发布。</p>
+                            </div>
                             <div data-legacy-knowledge @if(old('knowledge_mode', $taskForm['knowledge_mode'] ?? 'brand_auto') === 'brand_auto') hidden @endif class="lg:col-span-3">
                                 <div class="flex flex-wrap items-center justify-between gap-2">
                                     <div>

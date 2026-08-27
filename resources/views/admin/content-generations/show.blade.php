@@ -24,6 +24,25 @@
 
     @if($run->error_message)<div class="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">{{ $run->error_message }}</div>@endif
 
+    @if($run->evidencePreparation)
+        @php($preparationResult = (array) ($run->evidencePreparation->result_json ?? []))
+        <section class="rounded-lg border border-blue-200 bg-blue-50 p-6 shadow-sm">
+            <div class="flex flex-wrap items-center justify-between gap-3">
+                <div><h2 class="text-lg font-semibold text-blue-950">外部证据准备审计</h2><p class="mt-1 text-sm text-blue-800">本地优先；只有证据不足时才会抓取允许域名。</p></div>
+                <span class="rounded-full bg-white px-3 py-1 text-sm font-semibold text-blue-800">{{ data_get($preparationResult, 'state', $run->evidencePreparation->phase) }}</span>
+            </div>
+            <dl class="mt-4 grid gap-3 text-sm sm:grid-cols-4">
+                <div><dt class="text-blue-700">抓取页面</dt><dd class="font-semibold text-blue-950">{{ $run->evidencePreparation->pages_fetched }} / 6</dd></div>
+                <div><dt class="text-blue-700">搜索轮次</dt><dd class="font-semibold text-blue-950">{{ $run->evidencePreparation->search_rounds }} / 2</dd></div>
+                <div><dt class="text-blue-700">未验证核心事实</dt><dd class="font-semibold text-blue-950">{{ count((array) data_get($preparationResult, 'missing_core', [])) }}</dd></div>
+                <div><dt class="text-blue-700">禁止写入的非核心事实</dt><dd class="font-semibold text-blue-950">{{ count((array) data_get($preparationResult, 'prohibited_claims', [])) }}</dd></div>
+            </dl>
+            @if((array) $run->evidencePreparation->attempt_log !== [])
+                <details class="mt-4 rounded-md bg-white p-4"><summary class="cursor-pointer text-sm font-semibold text-gray-800">查看搜索/抓取记录</summary><div class="mt-3 space-y-2">@foreach((array) $run->evidencePreparation->attempt_log as $attempt)<div class="break-all font-mono text-xs text-gray-700">{{ data_get($attempt, 'type') }} · {{ data_get($attempt, 'status') }} · {{ data_get($attempt, 'url', implode(' | ', (array) data_get($attempt, 'queries', []))) }}</div>@endforeach</div></details>
+            @endif
+        </section>
+    @endif
+
     <section class="rounded-lg bg-white p-6 shadow">
         <h2 class="text-lg font-semibold text-gray-900">{{ __('admin.content_strategy.run.modules') }}</h2>
         <p class="mt-1 text-sm text-gray-600">{{ __('admin.content_strategy.run.modules_hint') }}</p>

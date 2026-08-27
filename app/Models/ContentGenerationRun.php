@@ -55,6 +55,7 @@ final class ContentGenerationRun extends Model
             'variables_snapshot' => 'array',
             'model_snapshot' => 'array',
             'generation_parameters' => 'array',
+            'external_evidence_policy_snapshot' => 'array',
             'created_by_admin_id' => 'integer',
             'dispatch_enqueued_at' => 'datetime',
             'lease_version' => 'integer',

@@ -103,6 +103,10 @@ final class ContentGenerationRequestService
                     'status' => ContentGenerationRun::STATUS_PENDING,
                     'idempotency_key' => $idempotencyKey,
                     'request_fingerprint' => $fingerprint,
+                    'external_evidence_policy_snapshot' => [
+                        'external_evidence_policy' => (string) ($lockedBrief->external_evidence_policy ?? 'off'),
+                        'external_general_domains' => array_values((array) ($lockedBrief->external_general_domains ?? [])),
+                    ],
                     'created_by_admin_id' => $actor->id,
                 ]);
                 $this->evidenceSnapshotter->snapshot(
@@ -229,6 +233,7 @@ final class ContentGenerationRequestService
     /** @param array{strategy_version_id: int, blueprint_version_id: int, preset_version_id: int, ai_model_id: int} $data */
     private function fingerprint(int $briefId, array $data, bool $includeEvidence): string
     {
+        $briefPolicy = ContentBrief::query()->find($briefId, ['external_evidence_policy', 'external_general_domains']);
         $payload = [
             'content_brief_id' => $briefId,
             'strategy_version_id' => (int) $data['strategy_version_id'],
@@ -236,6 +241,12 @@ final class ContentGenerationRequestService
             'preset_version_id' => (int) $data['preset_version_id'],
             'ai_model_id' => (int) $data['ai_model_id'],
         ];
+        $externalPolicy = (string) ($briefPolicy?->external_evidence_policy ?? 'off');
+        $externalDomains = array_values((array) ($briefPolicy?->external_general_domains ?? []));
+        if ($externalPolicy !== 'off' || $externalDomains !== []) {
+            $payload['external_evidence_policy'] = $externalPolicy;
+            $payload['external_general_domains'] = $externalDomains;
+        }
         if ($includeEvidence) {
             $knowledgeIds = array_values(array_unique(array_map('intval', (array) ($data['knowledge_chunk_ids'] ?? []))));
             sort($knowledgeIds, SORT_NUMERIC);

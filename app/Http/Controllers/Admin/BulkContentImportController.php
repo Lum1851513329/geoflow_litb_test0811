@@ -60,6 +60,8 @@ final class BulkContentImportController extends Controller
             'spreadsheet' => ['required', 'file', 'mimes:xlsx'],
             'ai_model_id' => ['required', 'integer', 'min:1'],
             'need_review' => ['sometimes', 'boolean'],
+            'external_evidence_policy' => ['nullable', 'in:off,on_insufficient'],
+            'external_general_domains' => ['nullable', 'string', 'max:1000'],
         ]);
 
         $actor = $request->user('admin');
@@ -73,6 +75,8 @@ final class BulkContentImportController extends Controller
                 (int) $request->integer('ai_model_id'),
                 $request->boolean('need_review'),
                 $actor,
+                (string) $request->input('external_evidence_policy', 'off'),
+                $this->parseDomains((string) $request->input('external_general_domains', '')),
             );
         } catch (BulkContentImportValidationException $exception) {
             return back()->withErrors([
@@ -84,5 +88,13 @@ final class BulkContentImportController extends Controller
 
         return redirect()->route('admin.tasks.index')
             ->with('message', "已创建 {$result['tasks_created']} 个任务，共导入 {$result['rows_imported']} 行。");
+    }
+
+    private function parseDomains(string $value): array
+    {
+        return array_values(array_unique(array_filter(array_map(
+            static fn (string $domain): string => strtolower(trim($domain, " .\t\n\r\0\x0B")),
+            preg_split('/[,\s]+/', $value) ?: [],
+        ))));
     }
 }

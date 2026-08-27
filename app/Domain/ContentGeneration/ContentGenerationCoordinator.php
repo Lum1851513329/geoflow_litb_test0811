@@ -2,6 +2,8 @@
 
 namespace App\Domain\ContentGeneration;
 
+use App\Domain\ContentGeneration\ExternalEvidence\EvidencePreparationCoordinator;
+use App\Domain\PromptComposition\CompiledPrompt;
 use App\Domain\PromptComposition\MandatoryPromptModuleGuard;
 use App\Domain\PromptComposition\PromptCompiler;
 use App\Domain\PromptComposition\PromptContext;
@@ -18,6 +20,7 @@ use App\Models\ContentGenerationRunModule;
 use App\Models\ContentGenerationRunStep;
 use App\Models\ContentQualityReport;
 use App\Models\ContentStrategyVersion;
+use App\Models\KnowledgeSite;
 use App\Models\PromptPresetVersion;
 use App\Services\GeoFlow\ArticleContentGenerationService;
 use Illuminate\Database\QueryException;
@@ -50,6 +53,7 @@ final class ContentGenerationCoordinator
         private readonly DeterministicQualityGate $deterministicQualityGate,
         private readonly SemanticQualityReviewer $semanticReviewer,
         private readonly SensitiveContentRedactor $redactor,
+        private readonly EvidencePreparationCoordinator $evidencePreparation,
     ) {}
 
     public function generate(ContentGenerationRun $run): ContentGenerationRun
@@ -60,7 +64,8 @@ final class ContentGenerationCoordinator
         }
 
         try {
-            $prepared = $this->prepare((int) $run->id, $claim);
+            $externalPreparation = $this->prepareExternalEvidence($run, $claim);
+            $prepared = $this->prepare((int) $run->id, $claim, $externalPreparation);
         } catch (Throwable $exception) {
             if ($exception instanceof PromptCompilationException && $exception->codeName === 'required_evidence_unavailable') {
                 return $this->needsEvidence((int) $run->id, $claim);
@@ -144,6 +149,9 @@ final class ContentGenerationCoordinator
         if (! $this->updateRawOutput($run, $initial['output'], $claim)) {
             return $run->fresh() ?? $run;
         }
+        if (($prepared['draft_only'] ?? false) === true) {
+            return $this->finish($run, ContentGenerationRun::STATUS_NEEDS_EVIDENCE, $claim, 'Core facts could not be verified; the generated output is draft-only.');
+        }
         $deterministic = $this->deterministicReview($run, $initial['step'], $initial['output'], $blueprint, $requirements, $claim);
         if ($deterministic === null) {
             return $run->fresh() ?? $run;
@@ -217,9 +225,9 @@ final class ContentGenerationCoordinator
     /**
      * @return array{run: ContentGenerationRun, blueprint: array<string, mixed>, requirements: array<string, mixed>, initial_step: ContentGenerationRunStep|null, manual_review: bool}|null
      */
-    private function prepare(int $runId, array $claim): ?array
+    private function prepare(int $runId, array $claim, ?array $externalPreparation = null): ?array
     {
-        return DB::transaction(function () use ($runId, $claim): ?array {
+        return DB::transaction(function () use ($runId, $claim, $externalPreparation): ?array {
             $run = $this->lockClaim($runId, $claim);
             if ($run === null) {
                 return null;
@@ -233,7 +241,7 @@ final class ContentGenerationCoordinator
                 ContentGenerationRun::STATUS_GENERATING,
                 ContentGenerationRun::STATUS_RUNNING,
             ], true)) {
-                return $this->resumePreparedRun($run);
+                return $this->resumePreparedRun($run, $externalPreparation);
             }
             if (! in_array((string) $run->status, [ContentGenerationRun::STATUS_PENDING, ContentGenerationRun::STATUS_QUEUED], true)) {
                 throw new RuntimeException('The generation run is not pending.');
@@ -255,12 +263,24 @@ final class ContentGenerationCoordinator
             $this->mandatoryModules->assertComplete($preset, $selectionContext);
             $modules = $this->moduleResolver->resolve($preset, $selectionContext);
             $generationPolicy = is_array($preset->generation_policy) ? $preset->generation_policy : [];
+            $frozenPolicy = is_array($run->external_evidence_policy_snapshot) ? $run->external_evidence_policy_snapshot : [];
+            $generationPolicy = array_merge($generationPolicy, $frozenPolicy);
             $budgets = $this->modelBudgets($model, $generationPolicy);
+            $contextEvidence = $externalPreparation === null
+                ? $run->evidence->pluck('evidence_snapshot')->values()->all()
+                : (array) ($externalPreparation['evidence'] ?? []);
+            $externalProhibitions = array_map(
+                static fn (string $id): string => 'Do not state unsupported claim: '.$id,
+                (array) ($externalPreparation['prohibited_claims'] ?? []),
+            );
+            if ($externalProhibitions !== []) {
+                $generationPolicy['prohibited_information'] = array_values(array_merge((array) $brief->prohibited_information, $externalProhibitions));
+            }
             $context = new PromptContext(
                 strategy: $strategy->strategy,
                 blueprint: $blueprint->blueprint,
                 keywords: $this->keywords($brief, $strategy->strategy, $blueprint->blueprint),
-                evidence: $run->evidence->pluck('evidence_snapshot')->values()->all(),
+                evidence: $contextEvidence,
                 products: $this->products($strategy->strategy, $blueprint->blueprint),
                 language: (string) $brief->language_code,
                 market: (string) $brief->market_code,
@@ -268,6 +288,20 @@ final class ContentGenerationCoordinator
                 modelTokenBudget: $budgets['input_token_budget'],
             );
             $compiled = $this->promptCompiler->compile($modules, $context);
+            if ($externalPreparation !== null) {
+                $citationRule = "\n\nEXTERNAL EVIDENCE CITATION RULE\nAfter each factual statement supported by an evidence item, add its exact marker [[evidence:FACT_ID]]. Never invent a FACT_ID. Do not create a Sources section; the system renders validated links after generation.";
+                $modelPayload = rtrim($compiled->modelPayload).$citationRule;
+                $compiled = new CompiledPrompt(
+                    text: rtrim($compiled->text).$citationRule,
+                    modelPayload: $modelPayload,
+                    sensitiveValues: $compiled->sensitiveValues,
+                    moduleSnapshots: $compiled->moduleSnapshots,
+                    resolvedVariables: $compiled->resolvedVariables,
+                    conflictDecisions: $compiled->conflictDecisions,
+                    estimatedTokens: $compiled->estimatedTokens + 55,
+                    contextDigest: hash('sha256', $modelPayload),
+                );
+            }
 
             foreach ($compiled->moduleSnapshots as $index => $snapshot) {
                 ContentGenerationRunModule::query()->create([
@@ -288,10 +322,12 @@ final class ContentGenerationCoordinator
                     'language_code' => (string) $brief->language_code,
                     'primary_keyword' => $brief->primaryKeyword?->keyword,
                     'required_mentions' => $brief->required_mentions ?? [],
-                    'prohibited_information' => $brief->prohibited_information ?? [],
+                    'prohibited_information' => array_values(array_merge((array) $brief->prohibited_information, $externalProhibitions)),
                     'market_code' => (string) $brief->market_code,
                     'target_length' => (int) ($blueprint->blueprint['target_length'] ?? 0),
-                    'evidence_fact_ids' => $run->evidence->pluck('evidence_key')->values()->all(),
+                    'evidence_fact_ids' => $externalPreparation === null
+                        ? $run->evidence->pluck('evidence_key')->values()->all()
+                        : array_values(array_filter(array_column($contextEvidence, 'fact_id'))),
                 ],
             );
             $run->forceFill([
@@ -321,12 +357,70 @@ final class ContentGenerationCoordinator
                 'requirements' => $requirements,
                 'initial_step' => null,
                 'manual_review' => false,
+                'draft_only' => ($externalPreparation['state'] ?? null) === 'draft_only',
             ];
         });
     }
 
+    private function prepareExternalEvidence(ContentGenerationRun $run, array $claim): ?array
+    {
+        $run->forceFill(['claim_token' => $claim['token'], 'lease_version' => $claim['version']]);
+        $parameters = is_array($run->external_evidence_policy_snapshot) ? $run->external_evidence_policy_snapshot : [];
+        if (($parameters['external_evidence_policy'] ?? 'off') !== 'on_insufficient') {
+            return null;
+        }
+        $run->loadMissing(['contentBrief', 'blueprintVersion', 'aiModel', 'evidence']);
+        $brief = $run->contentBrief;
+        $officialDomains = [];
+        if ($brief?->knowledge_site_id !== null) {
+            $host = KnowledgeSite::query()
+                ->whereKey($brief->knowledge_site_id)
+                ->where('brand_id', $brief->knowledge_brand_id)
+                ->value('canonical_host');
+            if (is_string($host) && trim($host) !== '') {
+                $officialDomains[] = strtolower(trim($host, " .\t\n\r\0\x0B"));
+            }
+        }
+
+        return $this->evidencePreparation->prepare($run, [
+            'claims' => $this->evidenceClaims($brief, (array) $run->blueprintVersion->blueprint),
+            'official_domains' => $officialDomains,
+            'general_domains' => array_values((array) ($parameters['external_general_domains'] ?? [])),
+            'claim_token' => $claim['token'],
+            'lease_version' => $claim['version'],
+        ]);
+    }
+
+    private function evidenceClaims(?ContentBrief $brief, array $blueprint): array
+    {
+        $claims = [[
+            'id' => 'core-question',
+            'question' => (string) ($brief?->core_question ?: $brief?->topic ?: 'What core facts must be verified?'),
+            'core' => true,
+            'source_scope' => $brief?->knowledge_mode === 'brand_auto' ? 'official' : 'general',
+        ]];
+        foreach ((array) ($blueprint['sections'] ?? []) as $sectionIndex => $section) {
+            if (! is_array($section)) {
+                continue;
+            }
+            foreach ((array) ($section['questions_to_answer'] ?? []) as $questionIndex => $question) {
+                if (trim((string) $question) === '') {
+                    continue;
+                }
+                $claims[] = [
+                    'id' => 'section-'.($section['key'] ?? $sectionIndex).'-'.$questionIndex,
+                    'question' => (string) $question,
+                    'core' => false,
+                    'source_scope' => $brief?->knowledge_mode === 'brand_auto' ? 'official' : 'general',
+                ];
+            }
+        }
+
+        return $claims;
+    }
+
     /** @return array{run: ContentGenerationRun, blueprint: array<string, mixed>, requirements: array<string, mixed>, initial_step: ContentGenerationRunStep|null, manual_review: bool}|null */
-    private function resumePreparedRun(ContentGenerationRun $run): ?array
+    private function resumePreparedRun(ContentGenerationRun $run, ?array $externalPreparation = null): ?array
     {
         if ($run->compiled_prompt === null || $run->variables_snapshot === null || $run->model_snapshot === null) {
             return null;
@@ -340,6 +434,7 @@ final class ContentGenerationCoordinator
                 'requirements' => [],
                 'initial_step' => null,
                 'manual_review' => true,
+                'draft_only' => ($externalPreparation['state'] ?? null) === 'draft_only',
             ];
         }
 
@@ -365,6 +460,7 @@ final class ContentGenerationCoordinator
             'requirements' => $requirements,
             'initial_step' => $initialStep,
             'manual_review' => false,
+            'draft_only' => ($externalPreparation['state'] ?? null) === 'draft_only',
         ];
     }
 
@@ -420,8 +516,8 @@ final class ContentGenerationCoordinator
             'cta_strength' => $brief->cta_strength,
         ];
         $variables = array_intersect_key($briefValues, $declared);
-        foreach (['cta_allowed', 'requested_cta', 'external_links_allowed', 'requested_external_links', 'evidence_required', 'allow_unsupported_claims', 'output_format', 'required_output_format', 'target_length', 'requested_target_length'] as $name) {
-            if (array_key_exists($name, $policy)) {
+        foreach (['cta_allowed', 'requested_cta', 'external_links_allowed', 'requested_external_links', 'evidence_required', 'allow_unsupported_claims', 'output_format', 'required_output_format', 'target_length', 'requested_target_length', 'prohibited_information'] as $name) {
+            if (array_key_exists($name, $policy) && isset($declared[$name])) {
                 $variables[$name] = $policy[$name];
             }
         }

@@ -108,6 +108,8 @@ class TaskLifecycleService
                 'knowledge_brand_id' => $normalized['knowledge_brand_id'],
                 'knowledge_site_id' => $normalized['knowledge_site_id'],
                 'knowledge_directory_id' => $normalized['knowledge_directory_id'],
+                'external_evidence_policy' => $normalized['external_evidence_policy'],
+                'external_general_domains' => $normalized['external_general_domains'],
             ]);
 
             $taskId = (int) $task->id;
@@ -433,6 +435,26 @@ class TaskLifecycleService
     {
         $output = [];
         $fieldErrors = [];
+
+        if (array_key_exists('external_evidence_policy', $data) || ! $isUpdate) {
+            $policy = (string) ($data['external_evidence_policy'] ?? 'off');
+            if (! in_array($policy, ['off', 'on_insufficient'], true)) {
+                $fieldErrors['external_evidence_policy'] = '外部证据策略无效';
+            } else {
+                $output['external_evidence_policy'] = $policy;
+            }
+        }
+        if (array_key_exists('external_general_domains', $data) || ! $isUpdate) {
+            $domains = array_values(array_unique(array_filter(array_map(
+                static fn ($domain): string => strtolower(trim((string) $domain, " .\t\n\r\0\x0B")),
+                (array) ($data['external_general_domains'] ?? []),
+            ))));
+            if (count($domains) > 20 || collect($domains)->contains(static fn (string $domain): bool => preg_match('/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/', $domain) !== 1)) {
+                $fieldErrors['external_general_domains'] = '外部来源域名格式无效';
+            } else {
+                $output['external_general_domains'] = $domains;
+            }
+        }
 
         if (array_key_exists('name', $data)) {
             $name = trim((string) $data['name']);

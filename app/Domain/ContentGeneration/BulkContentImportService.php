@@ -23,7 +23,7 @@ final class BulkContentImportService
     /**
      * @return array{tasks_created: int, rows_imported: int}
      */
-    public function import(string $filePath, int $aiModelId, bool $needReview, Admin $actor): array
+    public function import(string $filePath, int $aiModelId, bool $needReview, Admin $actor, string $externalEvidencePolicy = 'off', array $externalGeneralDomains = []): array
     {
         $parsed = $this->parser->parse($filePath);
         if ($parsed['errors'] !== []) {
@@ -46,10 +46,10 @@ final class BulkContentImportService
         // would leave groups 1..N-1 committed as real Tasks while import() still throws out to the
         // controller. Laravel nests DB::transaction() calls as savepoints, so createTaskForGroup()'s own
         // transaction continues to work unchanged inside this one.
-        $tasksCreated = DB::transaction(function () use ($groups, $aiModelId, $needReview, $actor): int {
+        $tasksCreated = DB::transaction(function () use ($groups, $aiModelId, $needReview, $actor, $externalEvidencePolicy, $externalGeneralDomains): int {
             $tasksCreated = 0;
             foreach ($groups as $rowsInGroup) {
-                $this->createTaskForGroup($rowsInGroup, $aiModelId, $needReview, $actor);
+                $this->createTaskForGroup($rowsInGroup, $aiModelId, $needReview, $actor, $externalEvidencePolicy, $externalGeneralDomains);
                 $tasksCreated++;
             }
 
@@ -60,11 +60,11 @@ final class BulkContentImportService
     }
 
     /** @param list<BulkContentImportRow> $rows */
-    private function createTaskForGroup(array $rows, int $aiModelId, bool $needReview, Admin $actor): void
+    private function createTaskForGroup(array $rows, int $aiModelId, bool $needReview, Admin $actor, string $externalEvidencePolicy, array $externalGeneralDomains): void
     {
         $first = $rows[0];
 
-        DB::transaction(function () use ($rows, $first, $aiModelId, $needReview, $actor): void {
+        DB::transaction(function () use ($rows, $first, $aiModelId, $needReview, $actor, $externalEvidencePolicy, $externalGeneralDomains): void {
             $library = TitleLibrary::query()->create([
                 'name' => 'Bulk import '.now()->format('Y-m-d H:i').' — '.Str::limit($first->topic, 40),
                 'generation_type' => 'manual',
@@ -101,6 +101,8 @@ final class BulkContentImportService
                 'category_mode' => 'fixed',
                 'fixed_category_id' => $first->categoryId,
                 'generation_engine' => 'quality_gated',
+                'external_evidence_policy' => $externalEvidencePolicy,
+                'external_general_domains' => $externalGeneralDomains,
                 'prompt_preset_id' => $first->promptPresetId,
                 'knowledge_mode' => $first->knowledgeMode,
                 'knowledge_brand_id' => $first->knowledgeBrandId,

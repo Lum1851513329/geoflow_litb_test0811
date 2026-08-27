@@ -41,6 +41,8 @@ final class ContentBriefQuickCreateService
             }
             $scope = app(GenerationKnowledgeScopeResolver::class)->normalize($scopeData);
             $brief = ContentBrief::forceCreate(array_merge($scope, [
+                'external_evidence_policy' => (string) ($data['external_evidence_policy'] ?? 'off'),
+                'external_general_domains' => array_values((array) ($data['external_general_domains'] ?? [])),
                 'topic' => $topic,
                 'market_code' => (string) ($defaults['market_code'] ?? 'GLOBAL'),
                 'language_code' => (string) ($data['language_code'] ?? $defaults['language_code'] ?? 'en'),

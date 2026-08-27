@@ -304,8 +304,9 @@ class WorkerExecutionService
         }
 
         $brandAuto = $task->knowledge_mode === 'brand_auto';
-        $referenceUrls = $brandAuto ? [] : (array) ($titleRow->reference_urls ?? []);
-        $fetchedReferences = $referenceUrls !== [] ? $this->referenceEvidenceFetcher->fetch($referenceUrls) : [];
+        $referenceUrls = (array) ($titleRow->reference_urls ?? []);
+        $externalPolicyEnabled = (string) ($task->external_evidence_policy ?? 'off') === 'on_insufficient';
+        $fetchedReferences = ! $externalPolicyEnabled && $referenceUrls !== [] ? $this->referenceEvidenceFetcher->fetch($referenceUrls) : [];
         $knowledgeChunkIds = $brandAuto ? [] : $this->resolveReviewedKnowledgeChunkIds($task);
 
         // Brief/Strategy/Blueprint 与 run 预约必须在同一个事务内提交：
@@ -315,7 +316,7 @@ class WorkerExecutionService
         // reserve() 成功后才自增，于是下一个调度周期会挑中同一个标题、再造一批
         // 孤儿数据，在配置错误的任务上每分钟重复一次。
         [$brief, $reservation] = DB::transaction(function () use ($task, $titleRow, $category, $referenceUrls, $fetchedReferences, $knowledgeChunkIds, $preset, $presetVersion, $systemAdmin): array {
-            $brief = $this->briefQuickCreateService->create(array_merge($task->only(['knowledge_mode', 'knowledge_brand_id', 'knowledge_site_id', 'knowledge_directory_id']), [
+            $brief = $this->briefQuickCreateService->create(array_merge($task->only(['knowledge_mode', 'knowledge_brand_id', 'knowledge_site_id', 'knowledge_directory_id', 'external_evidence_policy', 'external_general_domains']), [
                 'topic' => (string) $titleRow->title,
                 'core_question' => $titleRow->core_question,
                 'retrieval_keyword' => $titleRow->keyword,

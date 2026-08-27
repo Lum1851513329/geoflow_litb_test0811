@@ -243,6 +243,8 @@ class TaskController extends Controller
                 'publish_scope' => (string) $taskModel->publish_scope,
                 'generation_engine' => (string) ($taskModel->generation_engine ?? 'legacy'),
                 'prompt_preset_id' => (string) (($taskModel->prompt_preset_id ?? '') ?: ''),
+                'external_evidence_policy' => (string) ($taskModel->external_evidence_policy ?? 'off'),
+                'external_general_domains' => (array) ($taskModel->external_general_domains ?? []),
                 'distribution_strategy' => (string) ($task['distribution_strategy'] ?? TaskDistributionChannelSelector::STRATEGY_BROADCAST),
                 'distribution_channel_ids' => $this->taskDistributionChannelIds($taskId),
                 'task_revision' => $this->distributionOrchestrator->taskRevision($taskModel),
@@ -618,7 +620,16 @@ class TaskController extends Controller
             'task_revision' => [$request->routeIs('admin.tasks.update') ? 'required' : 'nullable', 'string', 'size:64'],
             'generation_engine' => ['nullable', 'string', 'in:legacy,quality_gated'],
             'prompt_preset_id' => ['nullable', 'integer', 'min:1'],
+            'external_evidence_policy' => ['nullable', 'string', 'in:off,on_insufficient'],
+            'external_general_domains' => ['nullable', 'string', 'max:1000'],
         ]);
+
+        if (array_key_exists('external_general_domains', $validated)) {
+            $validated['external_general_domains'] = array_values(array_unique(array_filter(array_map(
+                static fn (string $domain): string => strtolower(trim($domain, " .\t\n\r\0\x0B")),
+                preg_split('/[,\s]+/', (string) $validated['external_general_domains']) ?: [],
+            ))));
+        }
 
         // 请求层的 in:legacy,quality_gated 规则无法表达"quality_gated 依赖流水线开关与预设选择"这一跨字段约束，
         // 因此单独做一次后置校验；此处不使用 FormRequest 的 withValidator() 钩子，是因为 validateTaskForm() 只是
@@ -709,6 +720,7 @@ class TaskController extends Controller
 
         return array_merge($taskData, array_intersect_key($payload, array_flip([
             'knowledge_mode', 'knowledge_brand_id', 'knowledge_site_id', 'knowledge_directory_id',
+            'external_evidence_policy', 'external_general_domains',
         ])));
     }
 

@@ -2,6 +2,7 @@
 
 namespace App\Domain\ContentGeneration;
 
+use App\Domain\ContentGeneration\ExternalEvidence\EvidenceCitationRenderer;
 use App\Models\Admin;
 use App\Models\Article;
 use App\Models\ContentGenerationRun;
@@ -15,6 +16,7 @@ final class GenerationAdoptionService
     public function __construct(
         private readonly ArticleGeoFlowService $articleGeoFlowService,
         private readonly SensitiveContentRedactor $redactor,
+        private readonly EvidenceCitationRenderer $citationRenderer,
     ) {}
 
     /**
@@ -47,8 +49,12 @@ final class GenerationAdoptionService
             }
 
             $safeArticleData = $this->redactor->value($articleData, $sensitiveValues);
+            $candidateContent = (string) ($safeArticleData['content'] ?? $rawOutput);
+            $preparationEvidence = (array) ($lockedRun->evidencePreparation?->result_json['evidence'] ?? []);
+            $runEvidence = $lockedRun->evidence->pluck('evidence_snapshot')->values()->all();
+            $safeArticleData['content'] = $this->citationRenderer->render($candidateContent, array_merge($runEvidence, $preparationEvidence));
             $created = $this->articleGeoFlowService->createArticle(array_merge($safeArticleData, [
-                'content' => $safeArticleData['content'] ?? $rawOutput,
+                'content' => $safeArticleData['content'],
                 'status' => 'draft',
                 'review_status' => 'pending',
                 'is_ai_generated' => 1,
