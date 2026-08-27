@@ -9,9 +9,13 @@ final class BrandKnowledgeQueryBuilder
 {
     public function forBrief(ContentBrief $brief): string
     {
+        $retrievalKeyword = trim((string) ($brief->asset_provenance['retrieval_keyword'] ?? ''));
+        if ($retrievalKeyword !== '') {
+            return $this->compose([$retrievalKeyword]);
+        }
+
         return $this->compose([
             $brief->primaryKeyword?->keyword,
-            $brief->asset_provenance['retrieval_keyword'] ?? null,
             $brief->topic,
             $brief->core_question,
             ...($brief->keywordCluster?->keywords()->orderBy('keywords.id')->limit(8)->pluck('keyword')->all() ?? []),

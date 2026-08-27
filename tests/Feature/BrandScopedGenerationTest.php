@@ -240,6 +240,20 @@ final class BrandScopedGenerationTest extends TestCase
         $this->assertSame('linen dress Washing How to wash?', $builder->forTitle(new Title(['keyword' => 'linen dress', 'title' => 'Washing', 'core_question' => 'How to wash?'])));
     }
 
+    public function test_explicit_retrieval_keyword_is_not_diluted_by_generated_title_context(): void
+    {
+        $brief = new ContentBrief([
+            'topic' => 'A long generated title about an unrelated product category',
+            'core_question' => 'What should shoppers know about that generated title?',
+            'asset_provenance' => ['retrieval_keyword' => 'LightInTheBox return policy and return process'],
+        ]);
+
+        $this->assertSame(
+            'LightInTheBox return policy and return process',
+            app(BrandKnowledgeQueryBuilder::class)->forBrief($brief),
+        );
+    }
+
     public function test_legacy_task_rejects_mixed_owned_and_unowned_libraries(): void
     {
         extract($this->fixture());
