@@ -1,0 +1,33 @@
+services:
+  wigolo:
+    image: ghcr.io/knockoutez/wigolo:0.2.0
+    profiles: ["external-evidence"]
+    command: ["serve", "--host", "0.0.0.0", "--port", "3333"]
+    expose:
+      - "3333"
+    environment:
+      WIGOLO_DATA_DIR: /data
+      WIGOLO_API_TOKEN_FILE: /run/secrets/wigolo_api_token
+      MAX_BROWSERS: "2"
+      WIGOLO_RERANKER: none
+      LOG_LEVEL: info
+    secrets:
+      - wigolo_api_token
+    volumes:
+      - wigolo-private-data:/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3333/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
+    mem_limit: 2g
+    cpus: 2
+    restart: unless-stopped
+
+secrets:
+  wigolo_api_token:
+    file: ./docker-data/secrets/wigolo_api_token
+
+volumes:
+  wigolo-private-data:

@@ -134,6 +134,61 @@ final class TaskControllerGenerationEngineTest extends TestCase
         $response->assertSessionHasErrors('prompt_id');
     }
 
+    public function test_external_evidence_policy_is_rejected_for_legacy_and_saved_for_quality_gated_tasks(): void
+    {
+        config([
+            'geoflow.content_strategy_enabled' => true,
+            'geoflow.modular_prompts_enabled' => true,
+            'geoflow.generation_quality_gate_enabled' => true,
+        ]);
+        Category::query()->create(['name' => '科技资讯', 'slug' => 'tech']);
+        $library = TitleLibrary::query()->create(['name' => 'Evidence policy library']);
+        $aiModel = $this->makeAiModel();
+        $preset = $this->makePresetWithProductionBlueprint('test.external-policy');
+        $prompt = Prompt::query()->create(['name' => 'Legacy', 'type' => 'content', 'content' => 'Write']);
+        $service = app(TaskLifecycleService::class);
+
+        try {
+            $service->createTask([
+                'name' => 'Invalid legacy evidence', 'title_library_id' => $library->id,
+                'ai_model_id' => $aiModel->id, 'prompt_id' => $prompt->id, 'status' => 'paused',
+                'generation_engine' => 'legacy', 'external_evidence_policy' => 'on_insufficient',
+            ]);
+            $this->fail('Expected legacy external evidence policy rejection.');
+        } catch (ApiException $exception) {
+            $this->assertArrayHasKey('external_evidence_policy', $exception->getDetails()['field_errors'] ?? []);
+        }
+
+        $created = $service->createTask([
+            'name' => 'Quality evidence', 'title_library_id' => $library->id,
+            'ai_model_id' => $aiModel->id, 'status' => 'paused',
+            'generation_engine' => 'quality_gated', 'prompt_preset_id' => $preset->id,
+            'external_evidence_policy' => 'on_insufficient',
+            'external_general_domains' => ['WHO.INT', 'who.int'],
+        ]);
+        $task = Task::query()->findOrFail($created['id']);
+
+        $this->assertSame('on_insufficient', $task->external_evidence_policy);
+        $this->assertSame(['who.int'], $task->external_general_domains);
+    }
+
+    public function test_task_form_exposes_policy_without_leaking_service_token(): void
+    {
+        config([
+            'geoflow.content_strategy_enabled' => true,
+            'geoflow.modular_prompts_enabled' => true,
+            'geoflow.generation_quality_gate_enabled' => true,
+            'external_evidence.api_token' => 'test-secret-token',
+            'external_evidence.enabled' => false,
+        ]);
+        $admin = $this->makeAdmin('external-policy-form');
+        Category::query()->create(['name' => '科技资讯', 'slug' => 'external-policy-form']);
+
+        $response = $this->actingAs($admin, 'admin')->get(route('admin.tasks.create'));
+
+        $response->assertOk()->assertSee('on_insufficient')->assertDontSee('test-secret-token');
+    }
+
     /**
      * 回归用例：TaskController::store()/update() 并非唯一入口——API 侧
      * App\Http\Controllers\Api\V1\TaskController::store()/update() 直接调用

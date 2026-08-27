@@ -25,7 +25,9 @@
     @if($run->error_message)<div class="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">{{ $run->error_message }}</div>@endif
 
     @if($run->evidencePreparation)
-        @php($preparationResult = (array) ($run->evidencePreparation->result_json ?? []))
+        @php
+            $preparationResult = (array) ($run->evidencePreparation->result_json ?? []);
+        @endphp
         <section class="rounded-lg border border-blue-200 bg-blue-50 p-6 shadow-sm">
             <div class="flex flex-wrap items-center justify-between gap-3">
                 <div><h2 class="text-lg font-semibold text-blue-950">外部证据准备审计</h2><p class="mt-1 text-sm text-blue-800">本地优先；只有证据不足时才会抓取允许域名。</p></div>

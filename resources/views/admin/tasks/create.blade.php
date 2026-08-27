@@ -197,6 +197,7 @@
                                        placeholder="who.int, example.org"
                                        class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500">
                                 <p class="mt-2 text-xs text-gray-600">只在本地证据不足时调用。品牌事实限定为所选知识站点的官方域名；无法验证的核心事实会阻止采纳与发布。</p>
+                                @if(!config('external_evidence.enabled'))<p class="mt-2 rounded bg-amber-100 px-3 py-2 text-xs font-medium text-amber-900">当前环境尚未启用 Wigolo 外部证据服务；可保存策略，但在运维完成配置前不会发起外部请求。</p>@endif
                             </div>
                             <div data-legacy-knowledge @if(old('knowledge_mode', $taskForm['knowledge_mode'] ?? 'brand_auto') === 'brand_auto') hidden @endif class="lg:col-span-3">
                                 <div class="flex flex-wrap items-center justify-between gap-2">

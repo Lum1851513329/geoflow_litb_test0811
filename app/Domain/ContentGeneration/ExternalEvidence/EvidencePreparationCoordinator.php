@@ -10,10 +10,6 @@ use RuntimeException;
 
 final class EvidencePreparationCoordinator
 {
-    private const MAX_PAGES = 6;
-
-    private const MAX_SEARCH_ROUNDS = 2;
-
     public function __construct(
         private readonly EvidenceCoverageAssessor $assessor,
         private readonly ExternalEvidencePlanner $planner,
@@ -35,7 +31,7 @@ final class EvidencePreparationCoordinator
                 'attempt_log' => [],
                 'lease_token' => $run->claim_token,
                 'lease_version' => (int) $run->lease_version,
-                'deadline_at' => now()->addSeconds(180),
+                'deadline_at' => now()->addSeconds((int) config('external_evidence.budget_seconds', 180)),
             ],
         );
         if (! hash_equals((string) $preparation->input_digest, $digest)) {
@@ -63,14 +59,16 @@ final class EvidencePreparationCoordinator
             $missing,
         );
 
-        if ($missing !== [] && count($external) < self::MAX_PAGES) {
+        $maxPages = (int) config('external_evidence.max_pages', 6);
+        $maxSearchRounds = (int) config('external_evidence.max_search_rounds', 2);
+        if ($missing !== [] && count($external) < $maxPages) {
             $collected = $this->planner->collect(
                 $missingForPlanner,
                 (array) ($input['reference_urls'] ?? []),
                 (array) ($input['official_domains'] ?? []),
                 (array) ($input['general_domains'] ?? []),
-                self::MAX_PAGES - (int) $preparation->pages_fetched,
-                self::MAX_SEARCH_ROUNDS - (int) $preparation->search_rounds,
+                $maxPages - (int) $preparation->pages_fetched,
+                $maxSearchRounds - (int) $preparation->search_rounds,
                 array_values(array_unique(array_merge(
                     array_filter(array_column($external, 'source_url')),
                     array_filter(array_column((array) $preparation->attempt_log, 'url')),

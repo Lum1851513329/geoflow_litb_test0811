@@ -511,6 +511,20 @@ class TaskLifecycleService
             $output['prompt_preset_id'] = null;
         }
 
+        $effectiveEngine = array_key_exists('generation_engine', $data)
+            ? $generationEngine
+            : (string) ($current?->generation_engine ?? $generationEngine);
+        $effectiveExternalPolicy = array_key_exists('external_evidence_policy', $data)
+            ? (string) $data['external_evidence_policy']
+            : (string) ($current?->external_evidence_policy ?? 'off');
+        if ($effectiveExternalPolicy === 'on_insufficient' && $effectiveEngine !== 'quality_gated') {
+            $fieldErrors['external_evidence_policy'] = '外部证据验证仅支持质量门禁生成引擎';
+        }
+        if (array_key_exists('generation_engine', $data) && $generationEngine === 'legacy' && $effectiveExternalPolicy !== 'on_insufficient') {
+            $output['external_evidence_policy'] = 'off';
+            $output['external_general_domains'] = [];
+        }
+
         $referenceMap = [
             'title_library_id' => ['model' => TitleLibrary::class, 'message' => '选择的标题库不存在', 'required' => ! $isUpdate],
             'image_library_id' => ['model' => ImageLibrary::class, 'message' => '选择的图片库不存在', 'required' => false],
