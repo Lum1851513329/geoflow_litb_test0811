@@ -456,9 +456,17 @@ final class PromptCompiler
 
     private function evidenceRelevance(mixed $evidence): float
     {
-        return is_array($evidence) && is_numeric($evidence['relevance'] ?? null)
-            ? (float) $evidence['relevance']
-            : 0.5;
+        if (! is_array($evidence)) {
+            return 0.5;
+        }
+
+        foreach (['relevance', 'score'] as $field) {
+            if (is_numeric($evidence[$field] ?? null)) {
+                return (float) $evidence[$field];
+            }
+        }
+
+        return 0.5;
     }
 
     private function normalizedEvidenceContent(mixed $evidence): string

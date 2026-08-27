@@ -282,6 +282,24 @@ class PromptCompilerTest extends TestCase
         $this->assertLessThanOrEqual($context->modelTokenBudget, $compiled->estimatedTokens);
     }
 
+    public function test_budget_trimming_accepts_the_knowledge_selector_score_field(): void
+    {
+        $baseline = app(PromptCompiler::class)->compile($this->modules(), $this->context(evidence: []));
+        $low = str_repeat('irrelevant retrieved knowledge ', 120);
+        $context = $this->context(
+            evidence: [
+                ['id' => 'selector-low', 'content' => $low, 'score' => 0.1],
+            ],
+            modelTokenBudget: $baseline->estimatedTokens + 100,
+        );
+
+        $compiled = app(PromptCompiler::class)->compile($this->modules(), $context);
+
+        $this->assertStringNotContainsString($low, $compiled->text);
+        $this->assertContains('low_relevance_evidence_removed', array_column($compiled->conflictDecisions, 'code'));
+        $this->assertLessThanOrEqual($context->modelTokenBudget, $compiled->estimatedTokens);
+    }
+
     public function test_duplicate_trimming_keeps_the_most_relevant_copy_deterministically(): void
     {
         $content = str_repeat('same fact ', 80);
