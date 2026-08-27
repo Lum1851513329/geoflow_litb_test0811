@@ -43,6 +43,25 @@
                         </select>
                     </div>
                     <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-2">关键词分类（包含子分类）</label>
+                        <input type="hidden" name="taxonomy_node_id" id="title-taxonomy-node" value="{{ old('taxonomy_node_id') }}">
+                        <div id="title-taxonomy-levels" class="grid gap-2"><p class="text-sm text-gray-500">请先选择关键词库</p></div>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-2">Topic Cluster（可选）</label>
+                        <select name="keyword_cluster_id" id="title-keyword-cluster" class="block w-full border-gray-300 rounded-md shadow-sm text-sm">
+                            <option value="">使用所选分类中的全部关键词</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-2">标题输出语言</label>
+                        <select name="output_language" class="block w-full border-gray-300 rounded-md shadow-sm text-sm" required>
+                            @foreach (['en' => 'English', 'de' => 'Deutsch', 'fr' => 'Français', 'es' => 'Español', 'it' => 'Italiano', 'pt' => 'Português'] as $code => $label)
+                                <option value="{{ $code }}" @selected(old('output_language', 'en') === $code)>{{ $label }}</option>
+                            @endforeach
+                        </select>
+                    </div>
+                    <div>
                         <label class="block text-sm font-medium text-gray-700 mb-2">{{ __('admin.title_ai_generate.field.count') }}</label>
                         <input type="number" name="title_count" value="{{ old('title_count', 10) }}" min="1" max="50" class="block w-full border-gray-300 rounded-md shadow-sm focus:ring-purple-500 focus:border-purple-500 text-sm" required>
                     </div>
@@ -82,4 +101,38 @@
             </ul>
         </div>
     </div>
+    <script>
+        (() => {
+            const library = document.querySelector('[name="keyword_library_id"]');
+            const nodeInput = document.getElementById('title-taxonomy-node');
+            const levels = document.getElementById('title-taxonomy-levels');
+            const cluster = document.getElementById('title-keyword-cluster');
+            const endpoint = @json(route('admin.title-libraries.ai-generate.scopes', ['libraryId' => (int) $library->id]));
+            const loadLevel = async (parentId = '', level = 0) => {
+                [...levels.querySelectorAll('select')].slice(level).forEach(element => element.remove());
+                cluster.innerHTML = '<option value="">使用所选分类中的全部关键词</option>';
+                nodeInput.value = parentId;
+                if (!library.value) {
+                    levels.innerHTML = '<p class="text-sm text-gray-500">请先选择关键词库</p>';
+                    return;
+                }
+                const params = new URLSearchParams({keyword_library_id: library.value});
+                if (parentId) params.set('parent_id', parentId);
+                if (parentId) params.set('selected_node_id', parentId);
+                const response = await fetch(`${endpoint}?${params.toString()}`, {headers: {'Accept': 'application/json'}});
+                const data = await response.json();
+                if (data.nodes.length) {
+                    levels.querySelector('p')?.remove();
+                    const select = document.createElement('select');
+                    select.className = 'block w-full border-gray-300 rounded-md shadow-sm text-sm';
+                    select.innerHTML = '<option value="">请选择分类层级</option>' + data.nodes.map(item => `<option value="${item.id}">${item.name}</option>`).join('');
+                    select.addEventListener('change', () => loadLevel(select.value, level + 1));
+                    levels.appendChild(select);
+                }
+                data.clusters.forEach(item => cluster.add(new Option(`${item.name} · ${item.language_code}/${item.market_scope} · ${item.keywords_count} keywords`, item.id)));
+            };
+            library.addEventListener('change', () => loadLevel());
+            if (library.value) loadLevel();
+        })();
+    </script>
 @endsection

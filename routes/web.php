@@ -360,6 +360,7 @@ Route::prefix($adminPrefix)->name('admin.')->middleware(['admin.locale'])->group
             Route::post('{libraryId}/titles/delete', [TitleLibraryController::class, 'destroyTitles'])->name('titles.delete');
             Route::post('{libraryId}/import', [TitleLibraryController::class, 'importTitles'])->name('import');
             Route::get('{libraryId}/ai-generate', [TitleLibraryController::class, 'aiGenerate'])->name('ai-generate');
+            Route::get('{libraryId}/ai-generate/scopes', [TitleLibraryController::class, 'aiGenerateScopes'])->name('ai-generate.scopes');
             Route::post('{libraryId}/ai-generate', [TitleLibraryController::class, 'generateWithAi'])->name('ai-generate.submit');
             Route::put('{libraryId}', [TitleLibraryController::class, 'update'])->name('update');
             Route::post('{libraryId}/delete', [TitleLibraryController::class, 'destroy'])->name('delete');
