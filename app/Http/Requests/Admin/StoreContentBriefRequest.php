@@ -29,6 +29,9 @@ final class StoreContentBriefRequest extends FormRequest
             'knowledge_brand_id' => ['nullable', 'integer', 'min:1'],
             'knowledge_site_id' => ['nullable', 'integer', 'min:1'],
             'knowledge_directory_id' => ['nullable', 'integer', 'min:1'],
+            'external_evidence_policy' => ['nullable', Rule::in(['off', 'on_insufficient'])],
+            'external_general_domains' => ['nullable', 'array', 'max:20'],
+            'external_general_domains.*' => ['string', 'max:253', 'regex:/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/'],
             'topic' => ['required', 'string', 'max:300'],
             'market_code' => ['sometimes', 'required_without:prompt_preset_id', 'string', 'max:10', 'regex:/^[A-Za-z0-9_-]+$/'],
             'language_code' => ['sometimes', 'required_without:prompt_preset_id', 'string', 'max:35', 'regex:/^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{1,8})*$/'],
@@ -98,6 +101,11 @@ final class StoreContentBriefRequest extends FormRequest
             'required_mentions' => $this->lines($this->input('required_mentions')),
             'prohibited_information' => $this->lines($this->input('prohibited_information')),
             'reference_urls' => $this->lines($this->input('reference_urls')),
+            'external_general_domains' => array_values(array_unique(array_map(
+                static fn (mixed $domain): string => strtolower(trim((string) $domain, " .\t\n\r\0\x0B")),
+                $this->lines($this->input('external_general_domains')) ?? [],
+            ))),
+            'external_evidence_policy' => (string) $this->input('external_evidence_policy', 'off'),
         ]);
 
         // Only normalize market_code/language_code when actually submitted: the quick-create

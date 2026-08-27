@@ -40,13 +40,20 @@ final class EvidencePreparationCoordinator
         if ($preparation->sealed_at !== null) {
             return (array) $preparation->result_json;
         }
+        $preparation = $this->acquireLease($run, $preparation);
         if ($preparation->deadline_at?->isPast()) {
             return $this->seal($run, $preparation, $digest, $this->draftOnly([], [], 'evidence_preparation_deadline_exceeded'));
         }
 
         $claims = (array) ($input['claims'] ?? []);
         $external = (array) ($preparation->external_evidence ?? []);
-        $assessment = $this->assessor->assess(['claims' => $claims, 'language' => $input['language']], array_merge($localEvidence, $external), $run->aiModel);
+        try {
+            $assessment = $this->assessor->assess(['claims' => $claims, 'language' => $input['language']], array_merge($localEvidence, $external), $run->aiModel);
+        } catch (\Throwable $exception) {
+            $this->recordAssessmentFailure($preparation, $exception);
+
+            return $this->seal($run, $preparation, $digest, $this->draftOnly(array_merge($localEvidence, $external), [], 'evidence_assessment_invalid'));
+        }
         $missing = array_merge($assessment->missingCore, $assessment->missingOptional);
         $claimsById = [];
         foreach ($claims as $claim) {
@@ -73,17 +80,23 @@ final class EvidencePreparationCoordinator
                     array_filter(array_column($external, 'source_url')),
                     array_filter(array_column((array) $preparation->attempt_log, 'url')),
                 ))),
+                fn (array $event) => $this->persistPlannerEvent((int) $preparation->id, $event, (string) $run->claim_token, (int) $run->lease_version),
+                $preparation->deadline_at?->timestamp,
             );
-            $external = $this->mergeEvidence($external, $collected['evidence']);
+            $preparation->refresh();
+            $external = $this->mergeEvidence((array) $preparation->external_evidence, $collected['evidence']);
             $this->archiveMarkdown($run, $external);
             $preparation->forceFill([
                 'phase' => 'assessing_combined',
                 'external_evidence' => $external,
-                'attempt_log' => array_merge((array) $preparation->attempt_log, $collected['attempts']),
-                'pages_fetched' => (int) $preparation->pages_fetched + (int) $collected['pages_used'],
-                'search_rounds' => (int) $preparation->search_rounds + (int) $collected['search_rounds_used'],
             ])->save();
-            $assessment = $this->assessor->assess(['claims' => $claims, 'language' => $input['language']], array_merge($localEvidence, $external), $run->aiModel);
+            try {
+                $assessment = $this->assessor->assess(['claims' => $claims, 'language' => $input['language']], array_merge($localEvidence, $external), $run->aiModel);
+            } catch (\Throwable $exception) {
+                $this->recordAssessmentFailure($preparation, $exception);
+
+                return $this->seal($run, $preparation, $digest, $this->draftOnly(array_merge($localEvidence, $external), [], 'evidence_assessment_invalid'));
+            }
         }
 
         $result = [
@@ -170,6 +183,8 @@ final class EvidencePreparationCoordinator
                 return (array) $locked->result_json;
             }
             if (! hash_equals((string) $locked->input_digest, $digest)
+                || (string) $locked->lease_token !== (string) $run->claim_token
+                || (int) $locked->lease_version !== (int) $run->lease_version
                 || (string) $lockedRun->claim_token !== (string) $locked->lease_token
                 || (int) $lockedRun->lease_version !== (int) $locked->lease_version) {
                 throw new RuntimeException('Evidence preparation lease was lost before sealing.');
@@ -177,6 +192,69 @@ final class EvidencePreparationCoordinator
             $locked->forceFill(['phase' => 'sealed', 'result_json' => $result, 'sealed_at' => now()])->save();
 
             return $result;
+        });
+    }
+
+    private function acquireLease(ContentGenerationRun $run, GenerationEvidencePreparation $preparation): GenerationEvidencePreparation
+    {
+        return DB::transaction(function () use ($run, $preparation): GenerationEvidencePreparation {
+            $lockedRun = ContentGenerationRun::query()->lockForUpdate()->findOrFail($run->id);
+            $locked = GenerationEvidencePreparation::query()->lockForUpdate()->findOrFail($preparation->id);
+            if ($locked->sealed_at !== null) {
+                return $locked;
+            }
+            if ((string) $lockedRun->claim_token !== (string) $run->claim_token
+                || (int) $lockedRun->lease_version !== (int) $run->lease_version) {
+                throw new RuntimeException('Generation lease was lost before evidence preparation.');
+            }
+            if ((string) $locked->lease_token !== (string) $run->claim_token
+                || (int) $locked->lease_version !== (int) $run->lease_version) {
+                $locked->forceFill([
+                    'lease_token' => $run->claim_token,
+                    'lease_version' => (int) $run->lease_version,
+                    'phase' => 'retrying',
+                ])->save();
+            }
+
+            return $locked->fresh();
+        });
+    }
+
+    private function recordAssessmentFailure(GenerationEvidencePreparation $preparation, \Throwable $exception): void
+    {
+        $preparation->forceFill([
+            'phase' => 'assessment_failed',
+            'attempt_log' => array_merge((array) $preparation->attempt_log, [[
+                'type' => 'assessment',
+                'status' => 'failed',
+                'error_class' => $exception::class,
+            ]]),
+        ])->save();
+    }
+
+    private function persistPlannerEvent(int $preparationId, array $event, string $leaseToken, int $leaseVersion): void
+    {
+        DB::transaction(function () use ($preparationId, $event, $leaseToken, $leaseVersion): void {
+            $preparation = GenerationEvidencePreparation::query()->lockForUpdate()->findOrFail($preparationId);
+            if ($preparation->sealed_at !== null) {
+                throw new RuntimeException('Cannot append to a sealed evidence preparation.');
+            }
+            if ((string) $preparation->lease_token !== $leaseToken || (int) $preparation->lease_version !== $leaseVersion) {
+                throw new RuntimeException('Evidence preparation lease was lost during an external call.');
+            }
+            $document = is_array($event['document'] ?? null) ? $event['document'] : null;
+            unset($event['document']);
+            $changes = ['attempt_log' => array_merge((array) $preparation->attempt_log, [$event])];
+            if (($event['phase'] ?? null) === 'started' && ($event['type'] ?? null) === 'fetch') {
+                $changes['pages_fetched'] = (int) $preparation->pages_fetched + 1;
+            }
+            if (($event['phase'] ?? null) === 'started' && ($event['type'] ?? null) === 'search') {
+                $changes['search_rounds'] = (int) $preparation->search_rounds + 1;
+            }
+            if ($document !== null) {
+                $changes['external_evidence'] = $this->mergeEvidence((array) $preparation->external_evidence, [$document]);
+            }
+            $preparation->forceFill($changes)->save();
         });
     }
 

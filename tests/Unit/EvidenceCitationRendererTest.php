@@ -36,4 +36,15 @@ final class EvidenceCitationRendererTest extends TestCase
             }
         }
     }
+
+    public function test_lists_validated_required_external_sources_even_when_the_model_omits_markers(): void
+    {
+        $result = (new EvidenceCitationRenderer)->render('Verified fact.', [[
+            'fact_id' => 'external:one', 'title' => 'Original page',
+            'source_url' => 'https://example.com/original', 'source_type' => 'external',
+        ]], ['external:one']);
+
+        self::assertStringContainsString('## Sources', $result);
+        self::assertStringContainsString('[Original page](https://example.com/original)', $result);
+    }
 }

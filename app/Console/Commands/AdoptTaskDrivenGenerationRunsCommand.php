@@ -173,6 +173,9 @@ final class AdoptTaskDrivenGenerationRunsCommand extends Command
      */
     private function appendReferencesSection(ContentGenerationRun $run, string $content): string
     {
+        if ($run->evidencePreparation()->exists()) {
+            return $content;
+        }
         $template = (array) ($run->presetVersion->blueprint_template ?? []);
         if (! (bool) ($template['show_references_section'] ?? false)) {
             return $content;

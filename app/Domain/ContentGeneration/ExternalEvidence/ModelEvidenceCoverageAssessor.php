@@ -17,11 +17,23 @@ final class ModelEvidenceCoverageAssessor implements EvidenceCoverageAssessor
             static fn (array $claim): string => (string) ($claim['id'] ?? ''),
             array_filter($claims, static fn ($claim): bool => is_array($claim) && ($claim['core'] ?? false) === true),
         ));
-        $safeEvidence = array_map(static fn (array $item): array => [
-            'fact_id' => (string) ($item['fact_id'] ?? ''),
-            'title' => mb_substr((string) ($item['title'] ?? ''), 0, 300),
-            'content' => mb_substr((string) ($item['content'] ?? ''), 0, 5000),
-        ], array_slice($evidence, 0, 40));
+        $contextTokens = max(2048, (int) ($aiModel->context_window_tokens ?: config('geoflow.content_context_window_tokens', 32768)));
+        $outputTokens = max(512, (int) ($aiModel->max_tokens ?: 4096));
+        $safetyTokens = max(512, (int) config('geoflow.content_context_safety_margin_tokens', 1024));
+        $remainingChars = max(4000, min(120000, ($contextTokens - $outputTokens - $safetyTokens) * 3));
+        $safeEvidence = [];
+        foreach (array_slice($evidence, 0, 40) as $item) {
+            if ($remainingChars <= 0) {
+                break;
+            }
+            $content = mb_substr((string) ($item['content'] ?? ''), 0, min(5000, $remainingChars));
+            $safeEvidence[] = [
+                'fact_id' => (string) ($item['fact_id'] ?? ''),
+                'title' => mb_substr((string) ($item['title'] ?? ''), 0, 300),
+                'content' => $content,
+            ];
+            $remainingChars -= mb_strlen($content) + 400;
+        }
 
         $prompt = <<<'PROMPT'
 You are a strict evidence auditor. Return JSON only, with exactly this shape:
@@ -39,6 +51,24 @@ PROMPT;
             throw new InvalidArgumentException('Evidence assessment returned invalid JSON.');
         }
 
-        return EvidenceCoverageAssessment::fromArray($decoded, $safeEvidence, $required);
+        $requestedContract = [];
+        foreach ($claims as $claim) {
+            if (is_array($claim) && trim((string) ($claim['id'] ?? '')) !== '') {
+                $requestedContract[(string) $claim['id']] = [
+                    'core' => ($claim['core'] ?? false) === true,
+                    'question' => trim((string) ($claim['question'] ?? '')),
+                ];
+            }
+        }
+        foreach ((array) ($decoded['claims'] ?? []) as $claim) {
+            $id = is_array($claim) ? (string) ($claim['id'] ?? '') : '';
+            if (! array_key_exists($id, $requestedContract)
+                || (($claim['core'] ?? null) === true) !== $requestedContract[$id]['core']
+                || trim((string) ($claim['question'] ?? '')) !== $requestedContract[$id]['question']) {
+                throw new InvalidArgumentException('Evidence assessment changed the requested claim contract.');
+            }
+        }
+
+        return EvidenceCoverageAssessment::fromArray($decoded, $safeEvidence, $required, array_keys($requestedContract));
     }
 }

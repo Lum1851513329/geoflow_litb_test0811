@@ -9,7 +9,7 @@ final class ExternalEvidencePlanner
         private readonly ExternalSourcePolicy $sourcePolicy,
     ) {}
 
-    public function collect(array $missingClaims, array $referenceUrls, array $officialDomains, array $generalDomains, int $remainingPages = 6, int $remainingSearchRounds = 2, array $excludedUrls = []): array
+    public function collect(array $missingClaims, array $referenceUrls, array $officialDomains, array $generalDomains, int $remainingPages = 6, int $remainingSearchRounds = 2, array $excludedUrls = [], ?callable $persist = null, ?int $deadlineTimestamp = null): array
     {
         $startingPages = max(0, $remainingPages);
         $startingSearchRounds = max(0, $remainingSearchRounds);
@@ -29,30 +29,32 @@ final class ExternalEvidencePlanner
         $seenUrls = array_fill_keys(array_filter(array_map('strval', $excludedUrls)), true);
 
         foreach (array_values(array_unique(array_filter(array_map('strval', $referenceUrls)))) as $url) {
-            if ($remainingPages <= 0 || isset($seenUrls[$url]) || ! $this->sourcePolicy->accepts($url, $allowedDomains)) {
+            if ($remainingPages <= 0 || $this->expired($deadlineTimestamp) || isset($seenUrls[$url]) || ! $this->sourcePolicy->accepts($url, $allowedDomains)) {
                 continue;
             }
             $seenUrls[$url] = true;
-            $this->fetchOne($url, $allowedDomains, $documents, $attempts);
+            $this->fetchOne($url, $allowedDomains, $documents, $attempts, $persist, $deadlineTimestamp);
             $remainingPages--;
         }
 
-        if ($remainingPages > 0 && $remainingSearchRounds > 0 && $missingClaims !== []) {
+        if ($remainingPages > 0 && $remainingSearchRounds > 0 && $missingClaims !== [] && ! $this->expired($deadlineTimestamp)) {
             $queries = array_values(array_slice(array_filter(array_map(
                 static fn (array $claim): string => trim((string) ($claim['question'] ?? '')),
                 $missingClaims,
             )), 0, 3));
             if ($queries !== []) {
-                $search = $this->provider->search($queries, ['include_domains' => $allowedDomains]);
+                $persist?->__invoke(['type' => 'search', 'phase' => 'started', 'queries' => $queries]);
+                $search = $this->provider->search($queries, ['include_domains' => $allowedDomains, 'timeout_seconds' => $this->remainingSeconds($deadlineTimestamp)]);
                 $attempts[] = ['type' => 'search', 'queries' => $queries, 'status' => $search['status'] ?? 'failed'];
+                $persist?->__invoke(['type' => 'search', 'phase' => 'finished', 'queries' => $queries, 'status' => $search['status'] ?? 'failed']);
                 $remainingSearchRounds--;
                 foreach ((array) ($search['results'] ?? []) as $candidate) {
                     $url = trim((string) ($candidate['url'] ?? ''));
-                    if ($remainingPages <= 0 || isset($seenUrls[$url]) || ! $this->sourcePolicy->accepts($url, $allowedDomains)) {
+                    if ($remainingPages <= 0 || $this->expired($deadlineTimestamp) || isset($seenUrls[$url]) || ! $this->sourcePolicy->accepts($url, $allowedDomains)) {
                         continue;
                     }
                     $seenUrls[$url] = true;
-                    $this->fetchOne($url, $allowedDomains, $documents, $attempts);
+                    $this->fetchOne($url, $allowedDomains, $documents, $attempts, $persist, $deadlineTimestamp);
                     $remainingPages--;
                 }
             }
@@ -66,12 +68,15 @@ final class ExternalEvidencePlanner
         ];
     }
 
-    private function fetchOne(string $url, array $domains, array &$documents, array &$attempts): void
+    private function fetchOne(string $url, array $domains, array &$documents, array &$attempts, ?callable $persist, ?int $deadlineTimestamp): void
     {
-        $result = $this->provider->fetch($url, ['include_domains' => $domains]);
+        $persist?->__invoke(['type' => 'fetch', 'phase' => 'started', 'url' => $url]);
+        $result = $this->provider->fetch($url, ['include_domains' => $domains, 'timeout_seconds' => $this->remainingSeconds($deadlineTimestamp)]);
         $finalUrl = trim((string) ($result['final_url'] ?? $url));
         $attempts[] = ['type' => 'fetch', 'url' => $url, 'final_url' => $finalUrl, 'status' => $result['status'] ?? 'failed', 'error_code' => $result['error_code'] ?? null];
         if (($result['status'] ?? null) !== 'fetched' || ! $this->sourcePolicy->accepts($finalUrl, $domains)) {
+            $persist?->__invoke(end($attempts) + ['phase' => 'finished']);
+
             return;
         }
         $markdown = trim((string) ($result['markdown'] ?? ''));
@@ -87,5 +92,16 @@ final class ExternalEvidencePlanner
             'content_sha256' => hash('sha256', $markdown),
             'retrieved_at' => now()->toIso8601String(),
         ];
+        $persist?->__invoke(end($attempts) + ['phase' => 'finished', 'document' => $documents[$finalUrl]]);
+    }
+
+    private function expired(?int $deadlineTimestamp): bool
+    {
+        return $deadlineTimestamp !== null && time() >= $deadlineTimestamp;
+    }
+
+    private function remainingSeconds(?int $deadlineTimestamp): int
+    {
+        return $deadlineTimestamp === null ? 30 : max(1, $deadlineTimestamp - time());
     }
 }

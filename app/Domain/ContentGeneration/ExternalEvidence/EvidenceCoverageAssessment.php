@@ -12,7 +12,7 @@ final class EvidenceCoverageAssessment
         public readonly array $missingCore,
     ) {}
 
-    public static function fromArray(array $payload, array $evidence, array $requiredClaimIds): self
+    public static function fromArray(array $payload, array $evidence, array $requiredClaimIds, ?array $expectedClaimIds = null): self
     {
         if (array_keys($payload) !== ['claims'] || ! is_array($payload['claims'])) {
             throw new InvalidArgumentException('Assessment must contain exactly one claims array.');
@@ -92,6 +92,15 @@ final class EvidenceCoverageAssessment
         foreach (array_keys($required) as $id) {
             if (! isset($seen[$id])) {
                 throw new InvalidArgumentException("Missing required claim {$id}.");
+            }
+        }
+        if ($expectedClaimIds !== null) {
+            $expected = array_values(array_unique(array_map('strval', $expectedClaimIds)));
+            sort($expected);
+            $actual = array_keys($seen);
+            sort($actual);
+            if ($actual !== $expected) {
+                throw new InvalidArgumentException('Assessment must contain every requested claim and no unknown claims.');
             }
         }
 

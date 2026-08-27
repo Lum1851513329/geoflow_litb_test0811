@@ -41,7 +41,7 @@ final class WigoloRestClient implements ExternalEvidenceProvider
                 $payload[$key] = mb_substr(trim((string) $options[$key]), 0, 20);
             }
         }
-        $response = $this->request('/v1/search', $payload);
+        $response = $this->request('/v1/search', $payload, isset($options['timeout_seconds']) ? (int) $options['timeout_seconds'] : null);
         if ($response['status'] !== 'ok') {
             return ['status' => $response['status'], 'results' => [], 'warnings' => [$response['error_code']]];
         }
@@ -71,7 +71,7 @@ final class WigoloRestClient implements ExternalEvidenceProvider
             return array_merge($empty, ['status' => 'failed', 'error_code' => 'unsafe_target_url']);
         }
 
-        $response = $this->request('/v1/fetch', ['url' => $url, 'render_js' => 'auto']);
+        $response = $this->request('/v1/fetch', ['url' => $url, 'render_js' => 'auto'], isset($options['timeout_seconds']) ? (int) $options['timeout_seconds'] : null);
         if ($response['status'] !== 'ok') {
             return array_merge($empty, ['status' => $response['status'], 'error_code' => $response['error_code']]);
         }
@@ -93,10 +93,11 @@ final class WigoloRestClient implements ExternalEvidenceProvider
         return array_merge($empty, ['status' => 'fetched', 'final_url' => $finalUrl, 'title' => mb_substr(trim((string) ($data['title'] ?? '')), 0, 500), 'markdown' => $markdown, 'metadata' => $metadata]);
     }
 
-    private function request(string $path, array $payload): array
+    private function request(string $path, array $payload, ?int $timeoutSeconds = null): array
     {
         try {
-            $request = $this->http->timeout((int) config('external_evidence.timeout_seconds', 30))
+            $timeout = min((int) config('external_evidence.timeout_seconds', 30), max(1, $timeoutSeconds ?? PHP_INT_MAX));
+            $request = $this->http->timeout($timeout)
                 ->connectTimeout((int) config('external_evidence.connect_timeout_seconds', 5))
                 ->acceptJson()->asJson()->withToken((string) config('external_evidence.api_token'));
             $response = $this->client->post($request, (string) config('external_evidence.base_url').$path, $payload, (int) config('external_evidence.max_response_bytes', 2_000_000));

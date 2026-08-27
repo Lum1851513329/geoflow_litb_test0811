@@ -93,7 +93,7 @@ final class ContentBriefController extends Controller
         if ($presetId > 0) {
             $preset = PromptPreset::query()->findOrFail($presetId);
             $brief = $this->quickCreate->create([
-                ...array_intersect_key($data, array_flip(['knowledge_mode', 'knowledge_brand_id', 'knowledge_site_id', 'knowledge_directory_id', 'language_code'])),
+                ...array_intersect_key($data, array_flip(['knowledge_mode', 'knowledge_brand_id', 'knowledge_site_id', 'knowledge_directory_id', 'language_code', 'external_evidence_policy', 'external_general_domains'])),
                 'topic' => (string) $data['topic'],
                 'core_question' => $data['core_question'] ?? null,
                 'category_id' => $data['category_id'] ?? null,

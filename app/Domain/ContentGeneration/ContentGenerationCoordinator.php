@@ -92,7 +92,10 @@ final class ContentGenerationCoordinator
                 $requiredFactIds = array_merge($requiredFactIds, array_filter((array) ($section['required_fact_ids'] ?? []), 'is_string'));
             }
         }
-        $missingFactIds = array_values(array_diff(array_unique($requiredFactIds), (array) ($requirements['evidence_fact_ids'] ?? [])));
+        $coverageIds = ($prepared['external_preparation_enabled'] ?? false)
+            ? (array) ($requirements['supported_claim_ids'] ?? [])
+            : (array) ($requirements['evidence_fact_ids'] ?? []);
+        $missingFactIds = array_values(array_diff(array_unique($requiredFactIds), $coverageIds));
         if ((($requirements['evidence_required'] ?? false) === true && (array) ($requirements['evidence'] ?? []) === [])
             || $missingFactIds !== []) {
             $issue = [[
@@ -328,6 +331,7 @@ final class ContentGenerationCoordinator
                     'evidence_fact_ids' => $externalPreparation === null
                         ? $run->evidence->pluck('evidence_key')->values()->all()
                         : array_values(array_filter(array_column($contextEvidence, 'fact_id'))),
+                    'supported_claim_ids' => array_values(array_filter(array_column((array) data_get($externalPreparation, 'assessment.supported', []), 'id'))),
                 ],
             );
             $run->forceFill([
@@ -358,6 +362,7 @@ final class ContentGenerationCoordinator
                 'initial_step' => null,
                 'manual_review' => false,
                 'draft_only' => ($externalPreparation['state'] ?? null) === 'draft_only',
+                'external_preparation_enabled' => $externalPreparation !== null,
             ];
         });
     }
@@ -414,6 +419,18 @@ final class ContentGenerationCoordinator
                     'source_scope' => $brief?->knowledge_mode === 'brand_auto' ? 'official' : 'general',
                 ];
             }
+            foreach ((array) ($section['required_fact_ids'] ?? []) as $factId) {
+                $factId = trim((string) $factId);
+                if ($factId === '' || collect($claims)->contains(static fn (array $claim): bool => $claim['id'] === $factId)) {
+                    continue;
+                }
+                $claims[] = [
+                    'id' => $factId,
+                    'question' => 'Verify the required fact identified as "'.$factId.'" for this article.',
+                    'core' => true,
+                    'source_scope' => $brief?->knowledge_mode === 'brand_auto' ? 'official' : 'general',
+                ];
+            }
         }
 
         return $claims;
@@ -435,6 +452,7 @@ final class ContentGenerationCoordinator
                 'initial_step' => null,
                 'manual_review' => true,
                 'draft_only' => ($externalPreparation['state'] ?? null) === 'draft_only',
+                'external_preparation_enabled' => $externalPreparation !== null,
             ];
         }
 
@@ -461,6 +479,7 @@ final class ContentGenerationCoordinator
             'initial_step' => $initialStep,
             'manual_review' => false,
             'draft_only' => ($externalPreparation['state'] ?? null) === 'draft_only',
+            'external_preparation_enabled' => $externalPreparation !== null,
         ];
     }
 

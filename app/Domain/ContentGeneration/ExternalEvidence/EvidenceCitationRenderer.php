@@ -8,7 +8,7 @@ final class EvidenceCitationRenderer
 {
     public function __construct(private readonly ExternalSourcePolicy $sourcePolicy = new ExternalSourcePolicy) {}
 
-    public function render(string $markdown, array $evidence): string
+    public function render(string $markdown, array $evidence, array $requiredSourceIds = []): string
     {
         $byId = [];
         foreach ($evidence as $item) {
@@ -39,6 +39,21 @@ final class EvidenceCitationRenderer
         }, $markdown);
         if ($rendered === null) {
             throw new DomainException('Unable to render evidence citations.');
+        }
+        foreach (array_values(array_unique(array_map('strval', $requiredSourceIds))) as $id) {
+            if (! isset($byId[$id])) {
+                throw new DomainException("Unknown required evidence source: {$id}");
+            }
+            $url = trim((string) ($byId[$id]['source_url'] ?? ''));
+            if ($url === '') {
+                continue;
+            }
+            if (! $this->sourcePolicy->accepts($url, [])) {
+                throw new DomainException("Unsafe required evidence source URL: {$id}");
+            }
+            $title = trim((string) ($byId[$id]['title'] ?? 'Source')) ?: 'Source';
+            $label = str_replace(['\\', '[', ']'], ['\\\\', '\\[', '\\]'], $title);
+            $sources[$url] ??= "[{$label}]({$url})";
         }
         if ($sources !== []) {
             $rendered = rtrim($rendered)."\n\n## Sources\n\n".implode("\n", array_map(static fn (string $link): string => '- '.$link, $sources))."\n";

@@ -43,4 +43,15 @@ final class EvidenceCoverageAssessmentTest extends TestCase
             ]], ['c'], 'duplicate'],
         ];
     }
+
+    public function test_rejects_missing_or_unknown_claims_when_the_contract_is_frozen(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('every requested claim');
+
+        EvidenceCoverageAssessment::fromArray(['claims' => [[
+            'id' => 'unexpected', 'question' => 'Q', 'core' => false, 'status' => 'missing',
+            'evidence_ids' => [], 'quotes' => [], 'reason' => 'x',
+        ]]], [], [], ['expected']);
+    }
 }

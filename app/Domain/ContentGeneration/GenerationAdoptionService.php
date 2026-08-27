@@ -51,8 +51,20 @@ final class GenerationAdoptionService
             $safeArticleData = $this->redactor->value($articleData, $sensitiveValues);
             $candidateContent = (string) ($safeArticleData['content'] ?? $rawOutput);
             $preparationEvidence = (array) ($lockedRun->evidencePreparation?->result_json['evidence'] ?? []);
+            $supportedClaims = (array) ($lockedRun->evidencePreparation?->result_json['assessment']['supported'] ?? []);
+            $externalIds = array_fill_keys(array_values(array_filter(array_map(
+                static fn (array $item): ?string => ($item['source_type'] ?? null) === 'external' ? (string) ($item['fact_id'] ?? '') : null,
+                $preparationEvidence,
+            ))), true);
+            $requiredSourceIds = [];
+            foreach ($supportedClaims as $claim) {
+                $requiredSourceIds = array_merge($requiredSourceIds, array_values(array_filter(
+                    (array) ($claim['evidence_ids'] ?? []),
+                    static fn ($id): bool => isset($externalIds[(string) $id]),
+                )));
+            }
             $runEvidence = $lockedRun->evidence->pluck('evidence_snapshot')->values()->all();
-            $safeArticleData['content'] = $this->citationRenderer->render($candidateContent, array_merge($runEvidence, $preparationEvidence));
+            $safeArticleData['content'] = $this->citationRenderer->render($candidateContent, array_merge($runEvidence, $preparationEvidence), $requiredSourceIds);
             $created = $this->articleGeoFlowService->createArticle(array_merge($safeArticleData, [
                 'content' => $safeArticleData['content'],
                 'status' => 'draft',
