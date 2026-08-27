@@ -4,7 +4,9 @@ namespace App\Providers;
 
 use App\Contracts\Outbound\HostResolver;
 use App\Contracts\Outbound\OutboundTransport;
+use App\Domain\ContentGeneration\ExternalEvidence\EvidenceCoverageAssessor;
 use App\Domain\ContentGeneration\ExternalEvidence\ExternalEvidenceProvider;
+use App\Domain\ContentGeneration\ExternalEvidence\ModelEvidenceCoverageAssessor;
 use App\Domain\ContentGeneration\ExternalEvidence\WigoloRestClient;
 use App\Events\ContentGenerationCompleted;
 use App\Events\ContentGenerationFailed;
@@ -73,6 +75,7 @@ class AppServiceProvider extends ServiceProvider
             ExternalEvidenceProvider::class,
             WigoloRestClient::class,
         );
+        $this->app->bind(EvidenceCoverageAssessor::class, ModelEvidenceCoverageAssessor::class);
     }
 
     /**
