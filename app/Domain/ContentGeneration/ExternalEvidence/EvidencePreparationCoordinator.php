@@ -52,7 +52,7 @@ final class EvidencePreparationCoordinator
         } catch (\Throwable $exception) {
             $this->recordAssessmentFailure($preparation, $exception);
 
-            return $this->seal($run, $preparation, $digest, $this->draftOnly(array_merge($localEvidence, $external), [], 'evidence_assessment_invalid'));
+            return $this->seal($run, $preparation, $digest, $this->draftOnly([], [], 'evidence_assessment_invalid'));
         }
         $missing = array_merge($assessment->missingCore, $assessment->missingOptional);
         $claimsById = [];
@@ -95,13 +95,13 @@ final class EvidencePreparationCoordinator
             } catch (\Throwable $exception) {
                 $this->recordAssessmentFailure($preparation, $exception);
 
-                return $this->seal($run, $preparation, $digest, $this->draftOnly(array_merge($localEvidence, $external), [], 'evidence_assessment_invalid'));
+                return $this->seal($run, $preparation, $digest, $this->draftOnly([], [], 'evidence_assessment_invalid'));
             }
         }
 
         $result = [
             'state' => $assessment->missingCore === [] ? 'ready' : 'draft_only',
-            'evidence' => array_merge($localEvidence, $external),
+            'evidence' => $this->supportedEvidence(array_merge($localEvidence, $external), $assessment),
             'prohibited_claims' => array_values(array_map(static fn (array $claim): string => $claim['id'], $assessment->missingOptional)),
             'missing_core' => array_values(array_map(static fn (array $claim): string => $claim['id'], $assessment->missingCore)),
             'assessment' => [
@@ -159,6 +159,21 @@ final class EvidencePreparationCoordinator
         }
 
         return array_values($byUrl);
+    }
+
+    private function supportedEvidence(array $evidence, EvidenceCoverageAssessment $assessment): array
+    {
+        $supportedIds = [];
+        foreach ($assessment->supported as $claim) {
+            foreach ((array) ($claim['evidence_ids'] ?? []) as $evidenceId) {
+                $supportedIds[(string) $evidenceId] = true;
+            }
+        }
+
+        return array_values(array_filter(
+            $evidence,
+            static fn (array $item): bool => isset($supportedIds[(string) ($item['fact_id'] ?? '')]),
+        ));
     }
 
     private function archiveMarkdown(ContentGenerationRun $run, array $evidence): void

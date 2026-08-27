@@ -237,6 +237,48 @@ class ContentGenerationCoordinatorTest extends TestCase
         $this->assertSame(['seasonal-claim'], $result['missing_core']);
     }
 
+    public function test_unsupported_evidence_is_retained_for_audit_but_excluded_from_generation_context(): void
+    {
+        $run = $this->pendingRun(withEvidence: true);
+        $run->forceFill(['claim_token' => 'unsupported-evidence', 'lease_version' => 1])->save();
+        $provider = new class implements ExternalEvidenceProvider
+        {
+            public function search(array $queries, array $options = []): array
+            {
+                return ['status' => 'unavailable', 'results' => []];
+            }
+
+            public function fetch(string $url, array $options = []): array
+            {
+                return ['status' => 'unavailable'];
+            }
+        };
+        $assessor = new class implements EvidenceCoverageAssessor
+        {
+            public function assess(array $context, array $evidence, AiModel $aiModel): EvidenceCoverageAssessment
+            {
+                $claim = $context['claims'][0];
+
+                return EvidenceCoverageAssessment::fromArray(['claims' => [[
+                    'id' => $claim['id'], 'question' => $claim['question'], 'core' => true,
+                    'status' => 'missing', 'evidence_ids' => [], 'quotes' => [], 'reason' => 'Not verified.',
+                ]]], $evidence, [$claim['id']]);
+            }
+        };
+
+        $result = (new EvidencePreparationCoordinator(
+            $assessor,
+            new ExternalEvidencePlanner($provider, new ExternalSourcePolicy),
+        ))->prepare($run, [
+            'claims' => [['id' => 'fit', 'question' => 'How should shoes fit?', 'core' => true]],
+            'official_domains' => ['lightinthebox.com'],
+        ]);
+
+        $this->assertSame('draft_only', $result['state']);
+        $this->assertSame([], $result['evidence']);
+        $this->assertTrue($run->evidence()->exists());
+    }
+
     public function test_enabled_flow_keeps_unverified_core_output_as_non_adoptable_draft(): void
     {
         $run = $this->pendingRun();
