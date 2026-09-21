@@ -212,17 +212,29 @@ final class SeedPresetBlueprintTemplatesCommand extends Command
 
         $existingBindings = PromptPresetModuleVersion::query()
             ->where('prompt_preset_version_id', $currentVersion->id)
+            ->with('promptModuleVersion.module')
             ->orderBy('sort_order')
             ->get();
         $nextSortOrder = ((int) $existingBindings->max('sort_order')) + 1;
 
-        $bindings = $existingBindings->map(fn (PromptPresetModuleVersion $binding): array => [
-            'prompt_module_version_id' => (int) $binding->prompt_module_version_id,
-            'sort_order' => (int) $binding->sort_order,
-            'is_required' => (bool) $binding->is_required,
-            'selection_source' => $binding->selection_source,
-            'configuration' => $binding->configuration,
-        ])->all();
+        $bindings = $existingBindings->map(function (PromptPresetModuleVersion $binding): array {
+            $module = $binding->promptModuleVersion?->module;
+            $moduleVersionId = $module !== null
+                && $module->is_system
+                && $module->is_mandatory
+                && $module->is_enabled
+                && $module->current_version_id !== null
+                    ? (int) $module->current_version_id
+                    : (int) $binding->prompt_module_version_id;
+
+            return [
+                'prompt_module_version_id' => $moduleVersionId,
+                'sort_order' => (int) $binding->sort_order,
+                'is_required' => (bool) $binding->is_required,
+                'selection_source' => $binding->selection_source,
+                'configuration' => $binding->configuration,
+            ];
+        })->all();
         if (! $alreadyBound) {
             $bindings[] = [
                 'prompt_module_version_id' => $titleCraftingVersionId,

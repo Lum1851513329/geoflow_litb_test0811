@@ -9,15 +9,24 @@ use InvalidArgumentException;
 
 final class MandatoryPromptModuleGuard
 {
+    /** @var array<string, string> */
+    private const CANONICAL_ALIASES = [
+        'foundation_truth' => 'litb.foundation.truth_evidence',
+        'geo_citability' => 'litb.geo.citable_answers',
+        'seo_structure' => 'litb.seo.structure',
+        'language_market' => 'litb.language.market_en_global',
+        'output_format' => 'litb.output.markdown_article',
+        'quality_checks' => 'litb.quality.preflight',
+    ];
+
     /** @param array<string, mixed>|null $context */
     public function assertComplete(PromptPresetVersion $presetVersion, ?array $context = null): void
     {
         $bound = $presetVersion->moduleVersions()
-            ->with('promptModuleVersion')
+            ->with('promptModuleVersion.module')
             ->get()
-            ->mapWithKeys(fn ($binding): array => [
-                (int) $binding->promptModuleVersion?->prompt_module_id => $binding->promptModuleVersion,
-            ]);
+            ->groupBy(fn ($binding): string => self::CANONICAL_ALIASES[$binding->promptModuleVersion?->module?->module_key] ?? (string) $binding->promptModuleVersion?->module?->module_key)
+            ->map(fn ($bindings) => $bindings->pluck('promptModuleVersion'));
 
         $missing = PromptModule::query()
             ->where('is_system', true)
@@ -29,11 +38,14 @@ final class MandatoryPromptModuleGuard
             ->get()
             ->filter(fn (PromptModule $module): bool => $this->applies($module, $presetVersion, $context))
             ->filter(function (PromptModule $module) use ($bound): bool {
-                $version = $bound->get((int) $module->id);
+                $canonicalKey = self::CANONICAL_ALIASES[$module->module_key] ?? $module->module_key;
+                $version = $bound->get($canonicalKey, collect())->first(
+                    fn (?PromptModuleVersion $candidate): bool => $candidate instanceof PromptModuleVersion
+                        && $candidate->lifecycle_status === PromptModuleVersion::STATUS_PRODUCTION
+                        && (int) $candidate->id === (int) ($candidate->module?->current_version_id ?? 0),
+                );
 
-                return ! $version instanceof PromptModuleVersion
-                    || (int) $version->id !== (int) $module->current_version_id
-                    || $version->lifecycle_status !== PromptModuleVersion::STATUS_PRODUCTION;
+                return ! $version instanceof PromptModuleVersion;
             })
             ->pluck('module_key')
             ->all();

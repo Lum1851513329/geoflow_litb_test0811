@@ -92,7 +92,7 @@ $this->assertSame('draft_only', $missingCoreResult['state']);
 
 ## Task 4: Wire all quality-gated entrypoints and draft-only guard
 
-**Files:** migration `2026_08_26_000003_add_external_evidence_policy.php`; modify `app/Models/Task.php`, `ContentBrief.php`, `ContentGenerationRun.php`; `ContentGenerationRequestService.php`, `GenerationEvidenceSnapshotter.php`, `ContentGenerationCoordinator.php`, `GenerationAdoptionService.php`, `WorkerExecutionService.php`, `ContentBriefQuickCreateService.php`, `BulkContentImportService.php`, `AdoptTaskDrivenGenerationRunsCommand.php`; tests `tests/Feature/ExternalEvidenceGenerationFlowTest.php` and targeted existing flow tests.
+**Files:** migration `2026_08_26_000003_add_external_evidence_policy.php`; modify `app/Models/Task.php`, `ContentBrief.php`, `ContentGenerationRun.php`; `ContentGenerationRequestService.php`, `GenerationEvidenceSnapshotter.php`, `ContentGenerationCoordinator.php`, `GenerationAdoptionService.php`, `WorkerExecutionService.php`, `TaskLifecycleService.php`, `ContentBriefQuickCreateService.php`, `BulkContentImportService.php`, `AdoptTaskDrivenGenerationRunsCommand.php`; tests `tests/Feature/ExternalEvidenceGenerationFlowTest.php` and targeted existing flow tests.
 
 - [ ] RED existing off runs unchanged; on_insufficient brand_auto with zero chunks can reserve/freeze preparation input; plain explicit user evidence still cannot bypass brand scope; references not fetched during reserve; run replays require matching policy fingerprint. Draft-only output remains run raw_output and cannot adopt, approve, publish or WordPress sync. No auto re-generation of a blocked title on scheduler tick.
 ```php

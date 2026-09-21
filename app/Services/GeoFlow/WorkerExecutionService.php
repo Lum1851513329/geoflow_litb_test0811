@@ -304,10 +304,18 @@ class WorkerExecutionService
         }
 
         $brandAuto = $task->knowledge_mode === 'brand_auto';
+        $sourceMode = $this->resolveKnowledgeSourceMode($task, $titleRow, $preset);
+        // General education/recommendation topics should not be polluted by
+        // the brand-only knowledge tree. Keep external evidence enabled, but
+        // omit local chunks unless the topic is explicitly brand/product or
+        // policy related.
+        if ($sourceMode === 'web_first') {
+            $brandAuto = false;
+        }
         $referenceUrls = (array) ($titleRow->reference_urls ?? []);
         $externalPolicyEnabled = (string) ($task->external_evidence_policy ?? 'off') === 'on_insufficient';
         $fetchedReferences = ! $externalPolicyEnabled && $referenceUrls !== [] ? $this->referenceEvidenceFetcher->fetch($referenceUrls) : [];
-        $knowledgeChunkIds = $brandAuto ? [] : $this->resolveReviewedKnowledgeChunkIds($task);
+        $knowledgeChunkIds = ($brandAuto || $sourceMode === 'web_first') ? [] : $this->resolveReviewedKnowledgeChunkIds($task);
 
         // Brief/Strategy/Blueprint 与 run 预约必须在同一个事务内提交：
         // `ContentBriefQuickCreateService::create()` 自带事务并会立刻提交三张表，
@@ -315,15 +323,23 @@ class WorkerExecutionService
         // 事务，失败时这三行会被永久遗留成孤儿数据，而 Title.used_count 又只在
         // reserve() 成功后才自增，于是下一个调度周期会挑中同一个标题、再造一批
         // 孤儿数据，在配置错误的任务上每分钟重复一次。
-        [$brief, $reservation] = DB::transaction(function () use ($task, $titleRow, $category, $referenceUrls, $fetchedReferences, $knowledgeChunkIds, $preset, $presetVersion, $systemAdmin): array {
-            $brief = $this->briefQuickCreateService->create(array_merge($task->only(['knowledge_mode', 'knowledge_brand_id', 'knowledge_site_id', 'knowledge_directory_id', 'external_evidence_policy', 'external_general_domains']), [
+        [$brief, $reservation] = DB::transaction(function () use ($task, $titleRow, $category, $referenceUrls, $fetchedReferences, $knowledgeChunkIds, $preset, $presetVersion, $systemAdmin, $sourceMode): array {
+            $briefData = array_merge($task->only(['knowledge_mode', 'knowledge_brand_id', 'knowledge_site_id', 'knowledge_directory_id', 'external_evidence_policy', 'external_general_domains']), [
                 'topic' => (string) $titleRow->title,
                 'core_question' => $titleRow->core_question,
                 'retrieval_keyword' => $titleRow->keyword,
                 'category_id' => $category?->id,
                 'reference_urls' => $referenceUrls,
                 'task_id' => (int) $task->id,
-            ]), $preset, $systemAdmin);
+                'ai_model_id' => (int) $task->ai_model_id,
+            ]);
+            if ($sourceMode === 'web_first') {
+                $briefData['knowledge_mode'] = 'legacy_manual';
+                $briefData['knowledge_brand_id'] = null;
+                $briefData['knowledge_site_id'] = null;
+                $briefData['knowledge_directory_id'] = null;
+            }
+            $brief = $this->briefQuickCreateService->create($briefData, $preset, $systemAdmin);
 
             $strategyVersion = $brief->strategyVersions()->latest('version')->firstOrFail();
             $blueprintVersion = $brief->blueprintVersions()->latest('version')->firstOrFail();
@@ -411,9 +427,48 @@ class WorkerExecutionService
      * 预约成功的同一个事务里自增，因此重试窗口内它保持不变（键稳定、正确去重），
      * 而下一轮循环时它已经变化（键不同、允许重新生成）。
      */
+    /**
+     * 决定这篇文章用本地品牌知识库还是外部检索作为证据来源。
+     *
+     * 以 preset 为准，而不是在标题里做子串匹配。内容类型本来就编码在 preset 里，
+     * 而子串匹配会把它判反：`litb.geo_product_buying_guide.en` 含 "buying_guide"
+     * 被判成 brand_required，于是选购指南只能查品牌知识库——那里没有任何商品数据，
+     * 模型只能编造，最后被语义审核拦下；反过来 `brand_company_explainer` 不含任何
+     * 品牌信号，品牌故事却去外部搜索。两个方向都是错的。
+     *
+     * 分层对应运营定义：
+     *   brand_required —— 退换货、物流、品牌故事、官方新闻、帮助中心：查本地知识库
+     *   web_first      —— 选购指南、对比、场景穿搭、品类科普：优先外部检索，
+     *                     文中适度提及 LITB
+     */
+    private function resolveKnowledgeSourceMode(Task $task, Title $titleRow, PromptPreset $preset): string
+    {
+        $presetKey = strtolower(trim((string) $preset->preset_key));
+
+        $byPreset = (array) config('geoflow.knowledge_source_mode_by_preset', []);
+        if (isset($byPreset[$presetKey])) {
+            return (string) $byPreset[$presetKey] === 'brand_required' ? 'brand_required' : 'web_first';
+        }
+
+        // 未在映射表里的 preset：回退到主题里的品牌信号判断。这里只保留真正属于
+        // 品牌自有资料的词，不再包含 buying guide / product comparison / new arrivals，
+        // 那些是选品类内容，应当走外部检索。
+        $topic = strtolower(trim((string) $titleRow->title.' '.(string) $titleRow->keyword));
+        foreach (['lightinthebox', 'light in the box', 'brand story', 'official news', 'customer service'] as $signal) {
+            if (str_contains($topic, $signal)) {
+                return 'brand_required';
+            }
+        }
+
+        return 'web_first';
+    }
+
     private function buildReservationIdempotencyKey(Task $task, Title $titleRow): string
     {
-        return 'task:'.(int) $task->id
+        // Version the reservation namespace when generation policy changes;
+        // otherwise an old run created with the previous evidence/title
+        // settings is rejected as a configuration conflict on retry.
+        return 'v2:task:'.(int) $task->id
             .':title:'.(int) $titleRow->id
             .':use:'.(int) ($titleRow->used_count ?? 0);
     }
@@ -774,10 +829,56 @@ class WorkerExecutionService
             ->first();
 
         if (! $title) {
+            // Bulk-import libraries contain the imported topics only as seed
+            // inputs; the final headline is authored by the title_crafting
+            // module during generation. A failed/blocked generation must not
+            // permanently consume that seed and prevent a retry.
+            if ((int) ($task->is_loop ?? 0) !== 1) {
+                $retryable = Title::query()->where('library_id', $libraryId)
+                    ->whereDoesntHave('articles')
+                    ->orderBy('id')->first();
+                if ($retryable) {
+                    // 不能重置回 0：`buildReservationIdempotencyKey()` 用的是
+                    // 自增前的 used_count，这个标题原本第一次尝试时用的正是
+                    // "use:0"——那次尝试失败后仍作为 content_generation_runs
+                    // 里一条不可变记录留存。重置回 0 会让下一次预约算出完全
+                    // 相同的幂等键，`assertReplayMatches()` 一比对 brief_id
+                    // （每次重试都会先建一条新 Brief）必然不同，直接判定为
+                    // "配置冲突"拒绝——不是偶发失败，是必然重现的死循环。
+                    // 必须跳到这个标题从未用过的下一个 use 序号。
+                    $nextUse = $this->nextUnusedTitleSequence($task, $retryable);
+                    $retryable->forceFill(['used_count' => $nextUse, 'usage_count' => $nextUse])->save();
+
+                    return $retryable;
+                }
+            }
             throw new RuntimeException((int) ($task->is_loop ?? 0) === 1 ? '没有可用的标题' : '标题库已用尽');
         }
 
         return $title;
+    }
+
+    /**
+     * 找到某个标题下一个从未出现在 idempotency_key 里的 use 序号。
+     *
+     * 键的格式固定为 `buildReservationIdempotencyKey()` 生成的
+     * "v2:task:{task}:title:{title}:use:{n}"，直接按这个前缀查已存在的
+     * n 取最大值加一，而不是假设 n 是连续的（这个标题可能已经被这个
+     * 重试 fallback 命中过不止一次）。
+     */
+    private function nextUnusedTitleSequence(Task $task, Title $title): int
+    {
+        $prefix = 'v2:task:'.(int) $task->id.':title:'.(int) $title->id.':use:';
+
+        $maxUsed = ContentGenerationRun::query()
+            ->where('idempotency_key', 'like', $prefix.'%')
+            ->get(['idempotency_key'])
+            ->map(static function (ContentGenerationRun $run) use ($prefix): int {
+                return (int) substr((string) $run->idempotency_key, strlen($prefix));
+            })
+            ->max();
+
+        return $maxUsed === null ? 0 : $maxUsed + 1;
     }
 
     private function pickAuthor(Task $task): Author

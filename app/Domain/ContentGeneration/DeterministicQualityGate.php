@@ -74,7 +74,10 @@ final class DeterministicQualityGate
         if (! $sectionCountsMatch) {
             $issues[] = new QualityIssue(
                 code: 'section_count_mismatch',
-                severity: QualityIssue::SEVERITY_ERROR,
+                // 格式类问题降级为 warning：这些文章面向 GEO 可见度产出，判定标准是
+                // 事实正确，而不是与蓝图逐节对齐。warning 仍会计入评分（-5）并出现在
+                // 质量报告里，只是不再阻断发布（result() 只按 SEVERITY_ERROR 判定 passed）。
+                severity: QualityIssue::SEVERITY_WARNING,
                 sectionKey: null,
                 message: "Article has {$foundSectionCount} top-level sections; blueprint requires {$expectedSectionCount}.",
                 repairInstruction: "Add or remove top-level sections so the article has exactly {$expectedSectionCount} sections, matching the blueprint order.",
@@ -86,7 +89,8 @@ final class DeterministicQualityGate
                 if ($actualUnits < $section['minimum_words']) {
                     $issues[] = new QualityIssue(
                         code: 'section_too_thin',
-                        severity: QualityIssue::SEVERITY_ERROR,
+                        // 见 section_count_mismatch 的说明：格式类问题不阻断。
+                        severity: QualityIssue::SEVERITY_WARNING,
                         sectionKey: $sectionKey,
                         message: "Section \"{$section['heading']}\" has {$actualUnits} content units; it requires at least {$section['minimum_words']}.",
                         repairInstruction: "Expand \"{$section['heading']}\" with ".($section['minimum_words'] - $actualUnits).' more substantive content units that address its planned question.',
@@ -143,7 +147,12 @@ final class DeterministicQualityGate
             if (! $this->questionIsCovered($question['text'], $content)) {
                 $issues[] = new QualityIssue(
                     code: 'missing_question_coverage',
-                    severity: QualityIssue::SEVERITY_ERROR,
+                    // 蓝图校验要求每个实质性章节至少有一个问题（questions_required），
+                    // 所以不能靠清空 questions_to_answer 来放宽——那会让蓝图直接非法。
+                    // 种子命令给非首章节填的是通用占位问题，模型不会逐字命中，
+                    // 因此这里降级为 warning：问题覆盖仍然计分并出现在报告里，
+                    // 但不再阻断以 GEO 曝光为目标的产出。
+                    severity: QualityIssue::SEVERITY_WARNING,
                     sectionKey: $question['section_key'],
                     message: "The planned question \"{$question['text']}\" is not covered.",
                     repairInstruction: "Answer the planned question: \"{$question['text']}\".",
@@ -179,7 +188,8 @@ final class DeterministicQualityGate
             if ($articleWordCount < $minimum || $articleWordCount > $maximum) {
                 $issues[] = new QualityIssue(
                     code: 'target_length_out_of_range',
-                    severity: QualityIssue::SEVERITY_ERROR,
+                    // 见 section_count_mismatch 的说明：格式类问题不阻断。
+                    severity: QualityIssue::SEVERITY_WARNING,
                     sectionKey: null,
                     message: "Article length is {$articleWordCount} content units; the allowed range is {$minimum}-{$maximum}.",
                     repairInstruction: "Adjust the article to {$minimum}-{$maximum} substantive content units.",

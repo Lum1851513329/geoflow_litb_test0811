@@ -99,10 +99,19 @@ final class BulkContentImportParser
         }
 
         $presetCell = $get('preset');
-        $preset = $this->resolveByParenthetical($presetCell, fn (string $key) => PromptPreset::query()
+        // Presets are normally supplied as their canonical key (e.g.
+        // litb.geo_product_buying_guide.en). Keep accepting the optional
+        // parenthetical form for backwards compatibility, but do not route
+        // canonical keys through the domain-oriented resolver: that resolver
+        // intentionally returns null when no parentheses are present.
+        $presetLookup = fn (string $key) => PromptPreset::query()
             ->where('preset_key', $key)
             ->whereHas('currentVersion', fn ($q) => $q->where('lifecycle_status', PromptPresetVersion::STATUS_PRODUCTION)->whereNotNull('blueprint_template'))
-            ->first());
+            ->first();
+        $preset = $presetLookup($presetCell);
+        if ($preset === null) {
+            $preset = $this->resolveByParenthetical($presetCell, $presetLookup);
+        }
         if ($preset === null) {
             return ['error' => "Could not resolve preset \"{$presetCell}\" to a preset with a blueprint template."];
         }
@@ -135,6 +144,36 @@ final class BulkContentImportParser
             $directory = null;
             if ($get('directory') !== '') {
                 $directory = $this->resolveUnique(KnowledgeDirectory::where('brand_id', $brand->id), $get('directory'), ['path', 'key', 'name'], $brand->key);
+                // Imported opportunity files may carry the approved keyword
+                // taxonomy path (for example
+                // "Fashion & Apparel/Women's Clothing"), while the current
+                // knowledge tree may only have its brand-level root
+                // directories. In that case, safely fall back to the unique
+                // top-level root instead of rejecting every row. Ambiguous
+                // roots still fail closed and require a full path.
+                if ($directory === null && str_contains($get('directory'), '/')) {
+                    $root = trim(strtok($get('directory'), '/'));
+                    $rootAliases = [
+                        'Brand & Company' => 'Brand & Company',
+                        'Logistics & Fulfilment' => 'Logistics & Fulfilment',
+                        'Official News' => 'Official News',
+                        'Investor Relations' => 'Investor Relations',
+                        'Research Reference' => 'Research Reference',
+                        'Help Center' => 'Customer Transaction',
+                        'About LightInTheBox' => 'Brand & Company',
+                    ];
+                    if (!isset($rootAliases[$root]) && $root !== '') {
+                        // Product taxonomy roots (Fashion, Home, Shoes, etc.)
+                        // are intentionally stored under the single product
+                        // directory in the current knowledge tree.
+                        $root = 'Product Category';
+                    } else {
+                        $root = $rootAliases[$root] ?? $root;
+                    }
+                    if ($root !== '') {
+                        $directory = $this->resolveUnique(KnowledgeDirectory::where('brand_id', $brand->id), $root, ['path', 'key', 'name'], $brand->key);
+                    }
+                }
                 if ($directory === null) {
                     return ['error' => 'Could not resolve directory uniquely within the selected brand; use its full path.'];
                 }

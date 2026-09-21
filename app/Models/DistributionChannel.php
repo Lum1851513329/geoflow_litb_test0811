@@ -445,7 +445,8 @@ class DistributionChannel extends Model
      *   wordpress_fixed_category:string,
      *   wordpress_tag_strategy:string,
      *   wordpress_image_strategy:string,
-     *   wordpress_content_format:string
+     *   wordpress_content_format:string,
+     *   wordpress_category_mapping:array<string,list<string>>
      * }
      */
     public function resolvedChannelConfig(): array
@@ -455,6 +456,8 @@ class DistributionChannel extends Model
         $categoryStrategy = (string) ($stored['wordpress_category_strategy'] ?? 'match_or_create');
         $tagStrategy = (string) ($stored['wordpress_tag_strategy'] ?? 'keywords_to_tags');
         $imageStrategy = (string) ($stored['wordpress_image_strategy'] ?? 'upload_to_media');
+        $categoryMapping = is_array($stored['wordpress_category_mapping'] ?? null)
+            ? $stored['wordpress_category_mapping'] : [];
 
         return [
             'wordpress_username' => trim((string) ($stored['wordpress_username'] ?? '')),
@@ -464,6 +467,7 @@ class DistributionChannel extends Model
             'wordpress_tag_strategy' => in_array($tagStrategy, ['keywords_to_tags', 'disabled'], true) ? $tagStrategy : 'keywords_to_tags',
             'wordpress_image_strategy' => in_array($imageStrategy, ['upload_to_media', 'keep_original'], true) ? $imageStrategy : 'upload_to_media',
             'wordpress_content_format' => 'html',
+            'wordpress_category_mapping' => $categoryMapping,
         ];
     }
 

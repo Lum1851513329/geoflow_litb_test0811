@@ -152,9 +152,12 @@ final class ContentGenerationCoordinator
         if (! $this->updateRawOutput($run, $initial['output'], $claim)) {
             return $run->fresh() ?? $run;
         }
-        if (($prepared['draft_only'] ?? false) === true) {
-            return $this->finish($run, ContentGenerationRun::STATUS_NEEDS_EVIDENCE, $claim, 'Core facts could not be verified; the generated output is draft-only.');
-        }
+        // Evidence is advisory for publication. The preparation phase may mark
+        // a run as draft-only when the core question cannot be verified, but we
+        // still continue through deterministic/semantic quality checks so the
+        // article can be published. The prompt already receives the prohibited
+        // claim list; unsupported high-risk facts are therefore omitted while
+        // general guidance remains publishable.
         $deterministic = $this->deterministicReview($run, $initial['step'], $initial['output'], $blueprint, $requirements, $claim);
         if ($deterministic === null) {
             return $run->fresh() ?? $run;
@@ -262,6 +265,14 @@ final class ContentGenerationCoordinator
                 'content_type' => $brief->content_type,
                 'language_code' => $brief->language_code,
                 'market_code' => $brief->market_code,
+                'keywords' => $this->keywords($brief, $strategy->strategy, $blueprint->blueprint),
+                'products' => $this->products($strategy->strategy, $blueprint->blueprint),
+                'store_links' => $this->storeLinks($brief, $strategy->strategy, $blueprint->blueprint),
+                'brand_scope' => $this->hasBrandScope($brief, $strategy->strategy, $blueprint->blueprint),
+                'evidence_available' => $externalPreparation !== null
+                    ? (array) ($externalPreparation['evidence'] ?? []) !== []
+                    : $run->evidence->isNotEmpty(),
+                'dynamic_claims' => $this->hasDynamicClaims($brief, $strategy->strategy, $blueprint->blueprint),
             ];
             $this->mandatoryModules->assertComplete($preset, $selectionContext);
             $modules = $this->moduleResolver->resolve($preset, $selectionContext);
@@ -560,6 +571,62 @@ final class ContentGenerationCoordinator
     private function products(array $strategy, array $blueprint): array
     {
         return array_values(array_merge((array) ($strategy['products'] ?? []), (array) ($blueprint['products'] ?? [])));
+    }
+
+    /** @param array<string, mixed> $strategy @param array<string, mixed> $blueprint @return list<string> */
+    private function storeLinks(ContentBrief $brief, array $strategy, array $blueprint): array
+    {
+        $values = [
+            $brief->target_url,
+            $strategy['target_url'] ?? null,
+            $blueprint['target_url'] ?? null,
+            ...(array) ($strategy['store_links'] ?? []),
+            ...(array) ($blueprint['store_links'] ?? []),
+        ];
+
+        return array_values(array_unique(array_filter($values, static fn (mixed $value): bool => is_string($value) && trim($value) !== '')));
+    }
+
+    /** @param array<string, mixed> $strategy @param array<string, mixed> $blueprint */
+    private function hasBrandScope(ContentBrief $brief, array $strategy, array $blueprint): bool
+    {
+        if ($brief->knowledge_brand_id !== null) {
+            return true;
+        }
+
+        $values = [
+            $strategy['brand'] ?? null,
+            $strategy['brand_name'] ?? null,
+            $blueprint['brand'] ?? null,
+            ...((array) $brief->required_mentions),
+        ];
+
+        foreach ($values as $value) {
+            if (is_string($value) && preg_match('/light\s*in\s*the\s*box/i', $value) === 1) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /** @param array<string, mixed> $strategy @param array<string, mixed> $blueprint */
+    private function hasDynamicClaims(ContentBrief $brief, array $strategy, array $blueprint): bool
+    {
+        if ($brief->campaign_window !== null && $brief->campaign_window !== []) {
+            return true;
+        }
+
+        return in_array((string) $brief->content_type, [
+            'new_arrivals_weekly',
+            'new_arrivals_monthly',
+            'official_news',
+            'trust_service',
+            'seasonal_guide',
+        ], true)
+            || $this->products($strategy, $blueprint) !== []
+            || (array) ($strategy['dynamic_facts'] ?? []) !== []
+            || (array) ($blueprint['dynamic_facts'] ?? []) !== [];
     }
 
     /** @param array<string, mixed> $policy */

@@ -115,6 +115,49 @@ final class SeedPresetBlueprintTemplatesCommandTest extends TestCase
         );
     }
 
+    public function test_backfill_upgrades_a_stale_mandatory_module_binding_to_its_current_version(): void
+    {
+        $actor = Admin::query()->firstOrCreate(['username' => 'geoflow-system'], [
+            'password' => bcrypt(bin2hex(random_bytes(32))),
+            'role' => 'system',
+            'status' => 'active',
+        ]);
+        $this->seed(PromptCompositionSeeder::class);
+
+        $preset = $this->productionPreset(
+            'litb.geo_category_authority.en',
+            $actor,
+            bindAllMandatoryModules: true,
+        );
+        $staleSeoStructureVersionId = PromptModule::query()
+            ->where('module_key', 'seo_structure')
+            ->firstOrFail()
+            ->current_version_id;
+
+        $this->artisan('geoflow:content-strategy:seed-title-crafting-module')->assertSuccessful();
+        $currentSeoStructureVersionId = PromptModule::query()
+            ->where('module_key', 'seo_structure')
+            ->firstOrFail()
+            ->current_version_id;
+        $this->assertNotSame($staleSeoStructureVersionId, $currentSeoStructureVersionId);
+
+        $this->artisan('geoflow:content-strategy:seed-preset-blueprint-templates')->assertSuccessful();
+
+        $preset->refresh();
+        $this->assertTrue(
+            PromptPresetModuleVersion::query()
+                ->where('prompt_preset_version_id', $preset->current_version_id)
+                ->where('prompt_module_version_id', $currentSeoStructureVersionId)
+                ->exists(),
+        );
+        $this->assertFalse(
+            PromptPresetModuleVersion::query()
+                ->where('prompt_preset_version_id', $preset->current_version_id)
+                ->where('prompt_module_version_id', $staleSeoStructureVersionId)
+                ->exists(),
+        );
+    }
+
     /**
      * C4: `PromptPresetService::publish()` calls `MandatoryPromptModuleGuard::assertComplete()`,
      * which throws for ANY unbound DB-wide mandatory module — not just title_crafting.

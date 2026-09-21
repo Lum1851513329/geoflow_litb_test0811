@@ -173,6 +173,26 @@ class PromptCompilerTest extends TestCase
         $this->assertSame($sorted, $positions);
     }
 
+    public function test_empty_dynamic_context_blocks_are_omitted_from_the_compiled_prompt(): void
+    {
+        $compiled = app(PromptCompiler::class)->compile([
+            $this->module('truth', 'foundation', 'Use supported facts.', required: true, versionId: 301),
+        ], new PromptContext(
+            strategy: ['primary_intent' => 'informational'],
+            blueprint: ['working_title' => 'A concise explainer'],
+            keywords: [],
+            evidence: [],
+            products: [],
+            language: 'en',
+            market: 'US',
+            modelTokenBudget: 5000,
+        ));
+
+        $this->assertStringNotContainsString("KEYWORDS\n[]", $compiled->text);
+        $this->assertStringNotContainsString("PRODUCTS\n[]", $compiled->text);
+        $this->assertStringNotContainsString("EVIDENCE\n[]", $compiled->text);
+    }
+
     public function test_sensitive_values_are_redacted_from_audit_text_but_remain_usable_in_model_payload(): void
     {
         $module = $this->module(

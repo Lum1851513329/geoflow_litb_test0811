@@ -161,9 +161,15 @@ final class PromptCompiler
         $sections[4][] = "CONTENT BLUEPRINT\n".$this->prettyJson($effectiveBlueprint);
         $sections[6][] = 'Target language: '.$this->dataJson($variables['language'] ?? $context->language)
             ."\nTarget market: ".$this->dataJson($context->market);
-        $sections[7][] = "KEYWORDS\n".$this->prettyJson($context->keywords);
-        $sections[7][] = "PRODUCTS\n".$this->prettyJson($context->products);
-        $sections[7][] = "EVIDENCE\n".$this->prettyJson($evidence);
+        if ($context->keywords !== []) {
+            $sections[7][] = "KEYWORDS\n".$this->prettyJson($context->keywords);
+        }
+        if ($context->products !== []) {
+            $sections[7][] = "PRODUCTS\n".$this->prettyJson($context->products);
+        }
+        if ($evidence !== []) {
+            $sections[7][] = "EVIDENCE\n".$this->prettyJson($evidence);
+        }
         $sections[8][] = $this->outputConstraintText($variables);
         $sections[9][] = 'Before returning the article, verify factual support, blueprint coverage, language, links, CTA, length, and output format.';
 

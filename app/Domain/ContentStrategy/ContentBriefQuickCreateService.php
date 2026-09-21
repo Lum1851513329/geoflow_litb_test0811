@@ -8,11 +8,13 @@ use App\Models\ContentBrief;
 use App\Models\ContentStrategyVersion;
 use App\Models\PromptPreset;
 use App\Services\GeoFlow\KnowledgeGovernance\GenerationKnowledgeScopeResolver;
+use App\Services\GeoFlow\BriefQuestionPolishingService;
 use DomainException;
 use Illuminate\Support\Facades\DB;
 
 final class ContentBriefQuickCreateService
 {
+    public function __construct(private readonly BriefQuestionPolishingService $questionPolisher) {}
     /**
      * @param  array{topic: string, core_question?: ?string, category_id?: ?int, primary_keyword_id?: ?int, keyword_cluster_id?: ?int, reference_urls?: list<string>, task_id?: ?int}  $data
      */
@@ -28,8 +30,15 @@ final class ContentBriefQuickCreateService
             throw new DomainException('topic is required.');
         }
         $coreQuestion = trim((string) ($data['core_question'] ?? ''));
+        $originalQuestion = $coreQuestion;
         if ($coreQuestion === '') {
-            $coreQuestion = "What should a reader know before deciding on {$topic}?";
+            $coreQuestion = $this->defaultCoreQuestion($topic, $preset, (string) (($preset->currentVersion?->default_brief_fields ?? [])['content_type'] ?? ''));
+        }
+        if ((int) ($data['ai_model_id'] ?? 0) > 0 && $originalQuestion !== '') {
+            $model = \App\Models\AiModel::query()->find((int) $data['ai_model_id']);
+            if ($model) {
+                $coreQuestion = $this->questionPolisher->polish($model, $topic, $coreQuestion, (string) ($data['language_code'] ?? 'en')) ?: $coreQuestion;
+            }
         }
 
         $defaults = (array) ($presetVersion->default_brief_fields ?? []);
@@ -102,6 +111,28 @@ final class ContentBriefQuickCreateService
 
             return $brief;
         });
+    }
+
+    private function defaultCoreQuestion(string $topic, PromptPreset $preset, string $contentType): string
+    {
+        $text = mb_strtolower($topic.' '.(string) $preset->preset_key.' '.$contentType);
+        if (str_contains($text, 'shipping') || str_contains($text, 'return') || str_contains($text, 'payment') || str_contains($text, 'tracking')) {
+            return "What steps, timing, costs, and limitations should a shopper verify for {$topic}?";
+        }
+        if (str_contains($text, 'comparison') || str_contains($text, 'compare') || str_contains($text, ' vs ')) {
+            return "Which differences, trade-offs, and use cases matter most when comparing {$topic}?";
+        }
+        if (str_contains($text, 'trend') || str_contains($text, 'industry') || str_contains($text, 'what is') || str_contains($text, 'guide')) {
+            return "What definitions, evidence, and practical criteria help readers understand {$topic}?";
+        }
+        if (str_contains($text, 'brand') || str_contains($text, 'company') || str_contains($text, 'official')) {
+            return "Which verifiable facts and official sources explain {$topic} to a global shopper?";
+        }
+        if (str_contains($text, 'buy') || str_contains($text, 'shopping') || str_contains($text, 'clothing') || str_contains($text, 'dress')) {
+            return "How can shoppers evaluate {$topic} by fit, materials, budget, and intended use?";
+        }
+
+        return "What practical criteria and evidence should a reader use to make a confident decision about {$topic}?";
     }
 
     /**

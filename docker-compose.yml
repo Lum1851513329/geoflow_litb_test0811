@@ -71,7 +71,7 @@ services:
         COMPOSER_PACKAGIST_MIRROR: ${COMPOSER_PACKAGIST_MIRROR:-}
     container_name: geoflow-app
     working_dir: /var/www/html
-    command: ["php", "artisan", "serve", "--host=0.0.0.0", "--port=8080"]
+    command: ["php", "artisan", "serve", "--host=0.0.0.0", "--port=8080", "--no-reload"]
     ports:
       - "${APP_PORT:-18080}:8080"
     volumes:
@@ -96,6 +96,26 @@ services:
     command: ["php", "-d", "memory_limit=256M", "artisan", "queue:work", "redis", "--queue=geoflow,distribution,theme-replication,default", "--sleep=1", "--tries=1", "--timeout=660", "--memory=128", "--max-jobs=100", "--max-time=3600"]
     mem_limit: ${QUEUE_CONTAINER_MEMORY_LIMIT:-384m}
     stop_grace_period: 690s
+    volumes:
+      - ./:/var/www/html
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # Quality-gated generation is transactionally dispatched to the database,
+  # independently of the Redis task/distribution workers above.
+  content-generation-queue:
+    image: geoflow-app:latest
+    container_name: geoflow-content-generation-queue
+    working_dir: /var/www/html
+    environment:
+      COMPOSER_ON_START: "false"
+      AUTO_MIGRATE: "false"
+      AUTO_FIX_STORAGE_PERMISSIONS: "false"
+    command: ["php", "-d", "memory_limit=256M", "artisan", "queue:work", "database", "--queue=${GEOFLOW_CONTENT_GENERATION_QUEUE:-geoflow}", "--sleep=1", "--tries=3", "--backoff=60", "--timeout=900", "--memory=192", "--max-jobs=100", "--max-time=3600"]
+    mem_limit: ${CONTENT_GENERATION_QUEUE_MEMORY_LIMIT:-384m}
+    stop_grace_period: 930s
     volumes:
       - ./:/var/www/html
     depends_on:

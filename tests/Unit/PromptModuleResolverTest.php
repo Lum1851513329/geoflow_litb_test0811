@@ -138,6 +138,67 @@ class PromptModuleResolverTest extends TestCase
         $this->assertSame('buying_guide version 2', $resolved[2]->content);
     }
 
+    public function test_optional_binding_conditions_skip_modules_without_matching_runtime_context(): void
+    {
+        $this->presetVersion->forceFill(['lifecycle_status' => PromptPresetVersion::STATUS_DRAFT])->save();
+        $conditional = $this->moduleVersion('links_cta', PromptModule::TYPE_SEO, 50);
+        $this->bind($this->presetVersion, $conditional, 4, false, [
+            'conditions' => [
+                ['field' => 'store_links', 'operator' => 'not_empty'],
+            ],
+        ]);
+
+        $resolved = app(PromptModuleResolver::class)->resolve($this->presetVersion, [
+            'content_type' => 'buying_guide',
+            'language_code' => 'en',
+            'market_code' => 'US',
+            'store_links' => [],
+        ]);
+
+        $this->assertNotContains('links_cta', array_map(
+            fn (ResolvedPromptModule $item): string => $item->moduleKey,
+            $resolved,
+        ));
+    }
+
+    public function test_optional_binding_conditions_include_modules_when_runtime_context_matches(): void
+    {
+        $this->presetVersion->forceFill(['lifecycle_status' => PromptPresetVersion::STATUS_DRAFT])->save();
+        $conditional = $this->moduleVersion('links_cta', PromptModule::TYPE_SEO, 50);
+        $this->bind($this->presetVersion, $conditional, 4, false, [
+            'conditions' => [
+                ['field' => 'store_links', 'operator' => 'not_empty'],
+            ],
+        ]);
+
+        $resolved = app(PromptModuleResolver::class)->resolve($this->presetVersion, [
+            'content_type' => 'buying_guide',
+            'language_code' => 'en',
+            'market_code' => 'US',
+            'store_links' => ['https://example.test/product'],
+        ]);
+
+        $this->assertContains('links_cta', array_map(
+            fn (ResolvedPromptModule $item): string => $item->moduleKey,
+            $resolved,
+        ));
+    }
+
+    public function test_duplicate_alias_modules_resolve_to_one_canonical_module(): void
+    {
+        $this->presetVersion->forceFill(['lifecycle_status' => PromptPresetVersion::STATUS_DRAFT])->save();
+        $alias = $this->moduleVersion('seo_structure', PromptModule::TYPE_SEO, 100);
+        $canonical = $this->moduleVersion('litb.seo.structure', PromptModule::TYPE_SEO, 200);
+        $this->bind($this->presetVersion, $alias, 4, false);
+        $this->bind($this->presetVersion, $canonical, 5, false);
+
+        $resolved = app(PromptModuleResolver::class)->resolve($this->presetVersion, $this->context());
+        $keys = array_map(fn (ResolvedPromptModule $item): string => $item->moduleKey, $resolved);
+
+        $this->assertSame(1, count(array_filter($keys, fn (string $key): bool => in_array($key, ['seo_structure', 'litb.seo.structure'], true))));
+        $this->assertContains('litb.seo.structure', $keys);
+    }
+
     public function test_priority_ties_use_binding_position_then_binding_id(): void
     {
         $this->versions['foundation_truth']->module->update(['default_priority' => 100]);
@@ -323,12 +384,14 @@ class PromptModuleResolverTest extends TestCase
         PromptModuleVersion $moduleVersion,
         int $sortOrder,
         bool $required,
+        ?array $configuration = null,
     ): void {
         PromptPresetModuleVersion::query()->create([
             'prompt_preset_version_id' => $presetVersion->id,
             'prompt_module_version_id' => $moduleVersion->id,
             'sort_order' => $sortOrder,
             'is_required' => $required,
+            'configuration' => $configuration,
         ]);
     }
 

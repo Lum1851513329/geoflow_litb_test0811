@@ -28,7 +28,7 @@ final class SeedTitleCraftingPromptModuleCommandTest extends TestCase
         $this->artisan('geoflow:content-strategy:seed-title-crafting-module')->assertSuccessful();
 
         $titleCrafting = PromptModule::query()->where('module_key', 'title_crafting')->firstOrFail();
-        $this->assertTrue((bool) $titleCrafting->is_mandatory);
+        $this->assertFalse((bool) $titleCrafting->is_mandatory);
         $this->assertNull($titleCrafting->applicability);
         $version = $titleCrafting->currentVersion;
         $this->assertSame(PromptModuleVersion::STATUS_PRODUCTION, $version->lifecycle_status);

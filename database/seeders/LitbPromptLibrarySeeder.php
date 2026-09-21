@@ -14,6 +14,17 @@ use RuntimeException;
 
 final class LitbPromptLibrarySeeder extends Seeder
 {
+    /** @var list<string> */
+    private const CORE_MANDATORY = [
+        'litb.foundation.truth_evidence',
+        'litb.geo.citable_answers',
+        'litb.seo.search_intent',
+        'litb.seo.structure',
+        'litb.language.market_en_global',
+        'litb.output.markdown_article',
+        'litb.quality.preflight',
+    ];
+
     /** @var array<string, array{name:string,type:string,priority:int,content:string}> */
     private const SHARED = [
         'litb.foundation.truth_evidence' => ['name' => 'LITB truth and evidence', 'type' => 'foundation', 'priority' => 1200, 'content' => 'Use only supplied, reviewed evidence. Never invent products, prices, stock, delivery promises, policies, dates, quotations, statistics, sources, capabilities, or first-hand experience. Qualify or omit unsupported claims. Distinguish official facts from research and consumer insight.'],
@@ -65,7 +76,7 @@ final class LitbPromptLibrarySeeder extends Seeder
         DB::transaction(function (): void {
             $versions = [];
             foreach (self::SHARED as $key => $definition) {
-                $versions[$key] = $this->moduleVersion($key, $definition, true);
+                $versions[$key] = $this->moduleVersion($key, $definition, in_array($key, self::CORE_MANDATORY, true));
             }
             foreach (self::SCENARIOS as $key => $definition) {
                 $versions[$key] = $this->moduleVersion($key, ['priority' => 500, ...$definition], false);
@@ -95,6 +106,10 @@ final class LitbPromptLibrarySeeder extends Seeder
             'default_priority' => $definition['priority'],
             'is_enabled' => true,
         ]);
+        $module->forceFill([
+            'is_mandatory' => $mandatory,
+            'is_enabled' => true,
+        ])->save();
         if ($module->currentVersion !== null) {
             return $module->currentVersion;
         }
@@ -132,12 +147,29 @@ final class LitbPromptLibrarySeeder extends Seeder
             'is_system' => true,
             'is_enabled' => true,
         ]);
-        if ($preset->currentVersion !== null) {
+        $expectedBindings = [];
+        foreach ($bindings as $index => $binding) {
+            $moduleKey = (string) ($binding->module?->module_key ?? '');
+            $expectedBindings[] = [
+                'prompt_module_version_id' => (int) $binding->id,
+                'sort_order' => $index + 1,
+                'is_required' => in_array($moduleKey, self::CORE_MANDATORY, true) || $moduleKey === $definition['scenario'],
+                'configuration' => $this->bindingConfiguration($moduleKey),
+            ];
+        }
+        if ($preset->currentVersion !== null && $this->presetBindingsMatch($preset->currentVersion, $expectedBindings)) {
             return;
+        }
+        if ($preset->currentVersion !== null
+            && $preset->currentVersion->lifecycle_status === PromptPresetVersion::STATUS_PRODUCTION) {
+            $preset->currentVersion->update([
+                'lifecycle_status' => PromptPresetVersion::STATUS_DEPRECATED,
+                'change_note' => 'Superseded by conditional module selection policy.',
+            ]);
         }
         $version = PromptPresetVersion::forceCreate([
             'prompt_preset_id' => $preset->id,
-            'version' => 1,
+            'version' => (int) $preset->versions()->max('version') + 1,
             'matching_rules' => ['language_code' => ['en', 'en-US', 'en-GB'], 'content_type' => [$definition['type']]],
             'generation_policy' => ['quality_gate' => true, 'max_revision_rounds' => 1, 'target_format' => 'markdown'],
             'conflict_policy' => ['priority' => ['law', 'evidence', 'brand', 'strategy', 'style']],
@@ -145,12 +177,14 @@ final class LitbPromptLibrarySeeder extends Seeder
             'change_note' => 'Initial reviewed LITB production preset.',
         ]);
         foreach ($bindings as $index => $binding) {
+            $bindingSpec = $expectedBindings[$index];
             PromptPresetModuleVersion::query()->create([
                 'prompt_preset_version_id' => $version->id,
                 'prompt_module_version_id' => $binding->id,
                 'sort_order' => $index + 1,
-                'is_required' => true,
+                'is_required' => $bindingSpec['is_required'],
                 'selection_source' => 'system',
+                'configuration' => $bindingSpec['configuration'],
             ]);
         }
         $version->update([
@@ -158,5 +192,54 @@ final class LitbPromptLibrarySeeder extends Seeder
             'published_at' => now(),
         ]);
         $preset->forceFill(['current_version_id' => $version->id])->save();
+    }
+
+    /** @param list<array{prompt_module_version_id:int,sort_order:int,is_required:bool,configuration:array<string,mixed>|null}> $expected */
+    private function presetBindingsMatch(PromptPresetVersion $version, array $expected): bool
+    {
+        $actual = $version->moduleVersions()
+            ->orderBy('sort_order')
+            ->get()
+            ->map(fn (PromptPresetModuleVersion $binding): array => [
+                'prompt_module_version_id' => (int) $binding->prompt_module_version_id,
+                'sort_order' => (int) $binding->sort_order,
+                'is_required' => (bool) $binding->is_required,
+                'configuration' => $binding->configuration,
+            ])
+            ->all();
+
+        return $this->canonicalize($actual) === $this->canonicalize($expected);
+    }
+
+    private function canonicalize(mixed $value): mixed
+    {
+        if (! is_array($value)) {
+            return $value;
+        }
+
+        $normalized = [];
+        foreach ($value as $key => $item) {
+            $normalized[$key] = $this->canonicalize($item);
+        }
+        if (! array_is_list($normalized)) {
+            ksort($normalized);
+        }
+
+        return $normalized;
+    }
+
+    /** @return array<string,mixed>|null */
+    private function bindingConfiguration(string $moduleKey): ?array
+    {
+        $conditions = match ($moduleKey) {
+            'litb.foundation.entity_brand' => [['field' => 'brand_scope', 'operator' => 'equals', 'value' => true]],
+            'litb.foundation.eeat' => [['field' => 'evidence_available', 'operator' => 'equals', 'value' => true]],
+            'litb.seo.keyword_coverage' => [['field' => 'keywords', 'operator' => 'not_empty']],
+            'litb.seo.links_cta' => [['field' => 'store_links', 'operator' => 'not_empty']],
+            'litb.knowledge.freshness' => [['field' => 'dynamic_claims', 'operator' => 'equals', 'value' => true]],
+            default => [],
+        };
+
+        return $conditions === [] ? null : ['conditions' => $conditions];
     }
 }

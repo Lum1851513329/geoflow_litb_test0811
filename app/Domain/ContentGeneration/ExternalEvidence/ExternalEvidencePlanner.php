@@ -23,7 +23,12 @@ final class ExternalEvidencePlanner
             }
         }
         $allowedDomains = array_values(array_unique($requiresOfficial ? $officialDomains : array_merge($officialDomains, $generalDomains)));
-        if ($allowedDomains === []) {
+        // Brand facts must remain constrained to the configured official
+        // domains. General/educational claims, however, should still search
+        // the open web when no optional whitelist was supplied. An empty list
+        // is intentionally passed to the provider as "no domain filter";
+        // ExternalSourcePolicy still blocks unsafe URLs.
+        if ($requiresOfficial && $allowedDomains === []) {
             return ['evidence' => [], 'attempts' => [], 'pages_used' => 0, 'search_rounds_used' => 0];
         }
         $seenUrls = array_fill_keys(array_filter(array_map('strval', $excludedUrls)), true);

@@ -10,6 +10,16 @@ use InvalidArgumentException;
 
 final class PromptModuleResolver
 {
+    /** @var array<string, string> */
+    private const CANONICAL_ALIASES = [
+        'foundation_truth' => 'litb.foundation.truth_evidence',
+        'geo_citability' => 'litb.geo.citable_answers',
+        'seo_structure' => 'litb.seo.structure',
+        'language_market' => 'litb.language.market_en_global',
+        'output_format' => 'litb.output.markdown_article',
+        'quality_checks' => 'litb.quality.preflight',
+    ];
+
     /**
      * @param array<string, mixed> $context
      * @param array<string, int|null> $overrides Module key => exact module version ID, or null to omit an optional module.
@@ -26,6 +36,10 @@ final class PromptModuleResolver
                 $boundVersion = $binding->promptModuleVersion;
                 $module = $boundVersion->module;
                 $required = $binding->is_required || $module->is_mandatory;
+
+                if (! $this->matchesConditions($binding->configuration, $context)) {
+                    return null;
+                }
 
                 if (! $module->is_enabled || ! $this->matchesContext($module, $context)) {
                     return $this->handleUnavailableBinding($required, $module->module_key);
@@ -68,11 +82,22 @@ final class PromptModuleResolver
 
                 return $left['binding']->id <=> $right['binding']->id;
             })
-            ->map(fn (array $entry): ResolvedPromptModule => $entry['module'])
             ->values()
             ->all();
 
-        return $resolved;
+        $deduplicated = [];
+        foreach ($resolved as $entry) {
+            $module = $entry['module'];
+            $canonicalKey = self::CANONICAL_ALIASES[$module->moduleKey] ?? $module->moduleKey;
+            if (! isset($deduplicated[$canonicalKey]) || $this->shouldReplaceAlias($deduplicated[$canonicalKey], $entry, $canonicalKey)) {
+                $deduplicated[$canonicalKey] = $entry;
+            }
+        }
+
+        return array_values(array_map(
+            static fn (array $entry): ResolvedPromptModule => $entry['module'],
+            $deduplicated,
+        ));
     }
 
     /** @param array<string, mixed> $context */
@@ -90,6 +115,86 @@ final class PromptModuleResolver
         }
 
         return true;
+    }
+
+    /** @param array<string, mixed>|null $configuration @param array<string, mixed> $context */
+    private function matchesConditions(?array $configuration, array $context): bool
+    {
+        $conditions = is_array($configuration) ? ($configuration['conditions'] ?? []) : [];
+        if (! is_array($conditions) || $conditions === []) {
+            return true;
+        }
+
+        foreach ($conditions as $condition) {
+            if (! is_array($condition)) {
+                continue;
+            }
+            $field = (string) ($condition['field'] ?? '');
+            if ($field === '') {
+                continue;
+            }
+            $exists = array_key_exists($field, $context);
+            $actual = $context[$field] ?? null;
+            $operator = strtolower((string) ($condition['operator'] ?? 'truthy'));
+            $expected = $condition['value'] ?? null;
+
+            $matches = match ($operator) {
+                'exists' => $exists,
+                'not_exists' => ! $exists,
+                'empty' => ! $this->hasValue($actual),
+                'not_empty' => $this->hasValue($actual),
+                'equals', 'eq' => $exists && $actual === $expected,
+                'not_equals', 'neq' => ! $exists || $actual !== $expected,
+                'in' => $exists && in_array($actual, is_array($expected) ? $expected : [$expected], true),
+                'not_in' => ! $exists || ! in_array($actual, is_array($expected) ? $expected : [$expected], true),
+                'contains' => is_array($actual)
+                    ? in_array($expected, $actual, true)
+                    : (is_string($actual) && str_contains($actual, (string) $expected)),
+                default => $this->hasValue($actual),
+            };
+
+            if (! $matches) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private function hasValue(mixed $value): bool
+    {
+        if ($value === null) {
+            return false;
+        }
+        if (is_string($value)) {
+            return trim($value) !== '';
+        }
+        if (is_array($value)) {
+            return $value !== [];
+        }
+
+        return true;
+    }
+
+    /** @param array{binding: PromptPresetModuleVersion, module: ResolvedPromptModule} $current @param array{binding: PromptPresetModuleVersion, module: ResolvedPromptModule} $candidate */
+    private function shouldReplaceAlias(array $current, array $candidate, string $canonicalKey): bool
+    {
+        $currentModule = $current['module'];
+        $candidateModule = $candidate['module'];
+        if ($candidateModule->required !== $currentModule->required) {
+            return $candidateModule->required;
+        }
+        if ($candidateModule->priority !== $currentModule->priority) {
+            return $candidateModule->priority > $currentModule->priority;
+        }
+
+        $candidateIsCanonical = $candidateModule->moduleKey === $canonicalKey;
+        $currentIsCanonical = $currentModule->moduleKey === $canonicalKey;
+        if ($candidateIsCanonical !== $currentIsCanonical) {
+            return $candidateIsCanonical;
+        }
+
+        return $candidate['binding']->sort_order < $current['binding']->sort_order;
     }
 
     /** @param array<string, int|null> $overrides */
