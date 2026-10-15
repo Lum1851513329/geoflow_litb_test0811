@@ -43,6 +43,7 @@ final class ContentGenerationCoordinator
         ContentGenerationRun::STATUS_MANUAL_REVIEW_REQUIRED,
         ContentGenerationRun::STATUS_COMPLETED,
         ContentGenerationRun::STATUS_ADOPTED,
+        ContentGenerationRun::STATUS_AWAITING_EXTERNAL_OUTPUT,
     ];
 
     public function __construct(
@@ -117,6 +118,15 @@ final class ContentGenerationCoordinator
             return $this->finish($run, ContentGenerationRun::STATUS_NEEDS_EVIDENCE, $claim, $issue[0]['message']);
         }
 
+        // Prompt/evidence/knowledge are already compiled and persisted on $run
+        // at this point (see prepare()) — for a task routed to an external
+        // writer, stop here instead of spending a paid model call. WorkBuddy
+        // reads compiled_prompt off this run and supplies raw_output through
+        // WorkBuddyTaskController, which resumes at article adoption.
+        if ($this->isExternalGenerationRun($run)) {
+            return $this->finish($run, ContentGenerationRun::STATUS_AWAITING_EXTERNAL_OUTPUT, $claim);
+        }
+
         [$initialPrompt, $initialSecrets] = $this->modelPayload($run);
         $initial = $prepared['initial_step'] === null
             ? $this->modelInteraction(
@@ -184,6 +194,15 @@ final class ContentGenerationCoordinator
         }
 
         return $this->reviseOnce($run, $blueprint, $requirements, $initial['output'], $semantic['issues'], $claim);
+    }
+
+    private function isExternalGenerationRun(ContentGenerationRun $run): bool
+    {
+        $engine = $run->relationLoaded('contentBrief')
+            ? $run->contentBrief?->task?->generation_engine
+            : $run->contentBrief()->with('task:id,generation_engine')->first()?->task?->generation_engine;
+
+        return (string) ($engine ?? '') === 'workbuddy';
     }
 
     /** @return array{token: string, version: int}|null */
@@ -413,7 +432,7 @@ final class ContentGenerationCoordinator
             'id' => 'core-question',
             'question' => (string) ($brief?->core_question ?: $brief?->topic ?: 'What core facts must be verified?'),
             'core' => true,
-            'source_scope' => $brief?->knowledge_mode === 'brand_auto' ? 'official' : 'general',
+            'source_scope' => $this->evidenceSourceScope($brief, (string) ($brief?->core_question ?: $brief?->topic ?: '')),
         ]];
         foreach ((array) ($blueprint['sections'] ?? []) as $sectionIndex => $section) {
             if (! is_array($section)) {
@@ -427,7 +446,7 @@ final class ContentGenerationCoordinator
                     'id' => 'section-'.($section['key'] ?? $sectionIndex).'-'.$questionIndex,
                     'question' => (string) $question,
                     'core' => false,
-                    'source_scope' => $brief?->knowledge_mode === 'brand_auto' ? 'official' : 'general',
+                    'source_scope' => $this->evidenceSourceScope($brief, (string) $question),
                 ];
             }
             foreach ((array) ($section['required_fact_ids'] ?? []) as $factId) {
@@ -439,12 +458,38 @@ final class ContentGenerationCoordinator
                     'id' => $factId,
                     'question' => 'Verify the required fact identified as "'.$factId.'" for this article.',
                     'core' => true,
-                    'source_scope' => $brief?->knowledge_mode === 'brand_auto' ? 'official' : 'general',
+                    'source_scope' => $this->evidenceSourceScope($brief, $factId),
                 ];
             }
         }
 
         return $claims;
+    }
+
+    private function evidenceSourceScope(?ContentBrief $brief, string $question): string
+    {
+        $mode = (string) ($brief?->knowledge_mode ?? 'legacy_manual');
+        if ($mode === 'brand_auto') {
+            return 'official';
+        }
+        if ($mode !== 'mixed' || $brief?->knowledge_brand_id === null) {
+            return 'general';
+        }
+
+        $brand = \App\Models\KnowledgeBrand::query()->find($brief->knowledge_brand_id);
+        $brandText = mb_strtolower(trim((string) ($brand?->key ?? '').' '.(string) ($brand?->name ?? '')));
+        $questionText = mb_strtolower($question);
+        $brandTerms = array_values(array_filter(preg_split('/[^a-z0-9]+/i', $brandText, -1, PREG_SPLIT_NO_EMPTY) ?: []));
+        foreach ($brandTerms as $term) {
+            if ($term !== '' && str_contains($questionText, $term)) {
+                return 'official';
+            }
+        }
+        if (preg_match('/\b(shipping|delivery|tracking|return|refund|payment|warranty|official policy|customer service)\b/i', $question) === 1) {
+            return 'official';
+        }
+
+        return 'general';
     }
 
     /** @return array{run: ContentGenerationRun, blueprint: array<string, mixed>, requirements: array<string, mixed>, initial_step: ContentGenerationRunStep|null, manual_review: bool}|null */

@@ -15,7 +15,7 @@ final class GenerationKnowledgeScopeResolver
     public function normalize(array $data, string $defaultMode = 'legacy_manual'): array
     {
         $mode = $data['knowledge_mode'] ?? $defaultMode;
-        if (! in_array($mode, ['legacy_manual', 'brand_auto'], true)) {
+        if (! in_array($mode, ['legacy_manual', 'brand_auto', 'general', 'mixed'], true)) {
             throw ValidationException::withMessages(['knowledge_mode' => 'Unknown knowledge mode.']);
         }
         $result = ['knowledge_mode' => $mode];
@@ -23,7 +23,10 @@ final class GenerationKnowledgeScopeResolver
             $value = $data[$key] ?? null;
             $result[$key] = ($value === null || $value === '') ? null : $this->positiveId($value, $key);
         }
-        if ($mode === 'legacy_manual' && $result['knowledge_brand_id'] === null && $result['knowledge_site_id'] === null && $result['knowledge_directory_id'] === null) {
+        if (in_array($mode, ['legacy_manual', 'general'], true)
+            && $result['knowledge_brand_id'] === null
+            && $result['knowledge_site_id'] === null
+            && $result['knowledge_directory_id'] === null) {
             return $result;
         }
         $brandId = $result['knowledge_brand_id'];

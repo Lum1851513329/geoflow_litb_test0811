@@ -38,6 +38,16 @@ use Illuminate\Validation\ValidationException;
 class TaskLifecycleService
 {
     /**
+     * workbuddy reuses the exact same brief/strategy/blueprint/preset
+     * creation path as quality_gated (see WorkerExecutionService::
+     * generateQualityGatedDraft()) — it only diverges at the very last step
+     * (an external writer supplies the article instead of a paid model
+     * call), so every validation rule below that applies to quality_gated
+     * must apply identically to workbuddy.
+     */
+    private const QUALITY_GATED_LIKE_ENGINES = ['quality_gated', 'workbuddy'];
+
+    /**
      * @param  JobQueueService  $queueService  队列调度服务（负责 task_runs 入队、状态流转、重试）
      */
     public function __construct(
@@ -471,14 +481,14 @@ class TaskLifecycleService
         // 不再必填，改为要求 prompt_preset_id 指向一个已配置内容蓝图模板的预设。
         $generationEngine = (string) ($data['generation_engine'] ?? 'legacy');
         if (array_key_exists('generation_engine', $data) || ! $isUpdate) {
-            if (! in_array($generationEngine, ['legacy', 'quality_gated'], true)) {
+            if (! in_array($generationEngine, ['legacy', ...self::QUALITY_GATED_LIKE_ENGINES], true)) {
                 $fieldErrors['generation_engine'] = '生成引擎无效';
             } else {
                 $output['generation_engine'] = $generationEngine;
             }
         }
 
-        if ($generationEngine === 'quality_gated') {
+        if (in_array($generationEngine, self::QUALITY_GATED_LIKE_ENGINES, true)) {
             // 服务层是唯一保证被所有调用方（含 API TaskController，其路由未挂 EnsureGeoFlowFeatureEnabled 网关）
             // 都会经过的入口，因此这里必须独立重复控制器层已做的两项校验，而不能假设调用方已经做过：
             // 1) 三个 geoflow.* 流水线开关必须全部开启；
@@ -517,7 +527,7 @@ class TaskLifecycleService
         $effectiveExternalPolicy = array_key_exists('external_evidence_policy', $data)
             ? (string) $data['external_evidence_policy']
             : (string) ($current?->external_evidence_policy ?? 'off');
-        if ($effectiveExternalPolicy === 'on_insufficient' && $effectiveEngine !== 'quality_gated') {
+        if ($effectiveExternalPolicy === 'on_insufficient' && ! in_array($effectiveEngine, self::QUALITY_GATED_LIKE_ENGINES, true)) {
             $fieldErrors['external_evidence_policy'] = '外部证据验证仅支持质量门禁生成引擎';
         }
         if (array_key_exists('generation_engine', $data) && $generationEngine === 'legacy' && $effectiveExternalPolicy !== 'on_insufficient') {
@@ -528,7 +538,7 @@ class TaskLifecycleService
         $referenceMap = [
             'title_library_id' => ['model' => TitleLibrary::class, 'message' => '选择的标题库不存在', 'required' => ! $isUpdate],
             'image_library_id' => ['model' => ImageLibrary::class, 'message' => '选择的图片库不存在', 'required' => false],
-            'prompt_id' => ['model' => Prompt::class, 'message' => '选择的内容提示词不存在', 'required' => ! $isUpdate && $generationEngine !== 'quality_gated', 'prompt_content' => true],
+            'prompt_id' => ['model' => Prompt::class, 'message' => '选择的内容提示词不存在', 'required' => ! $isUpdate && ! in_array($generationEngine, self::QUALITY_GATED_LIKE_ENGINES, true), 'prompt_content' => true],
             'ai_model_id' => ['model' => AiModel::class, 'message' => '选择的AI模型不存在或未激活', 'required' => ! $isUpdate, 'ai_active_chat' => true],
             'author_id' => ['model' => Author::class, 'message' => '选择的作者不存在', 'required' => false],
             'knowledge_base_id' => ['model' => KnowledgeBase::class, 'message' => '选择的知识库不存在', 'required' => false],
@@ -715,7 +725,7 @@ class TaskLifecycleService
             throw new ApiException('validation_failed', '参数校验失败', 422, ['field_errors' => $exception->errors()]);
         }
         $output = array_merge($output, $scope);
-        if ($scope['knowledge_mode'] === 'brand_auto') {
+        if (in_array($scope['knowledge_mode'], ['brand_auto', 'mixed'], true)) {
             $output['knowledge_base_id'] = null;
             $output['knowledge_base_ids'] = [];
         }

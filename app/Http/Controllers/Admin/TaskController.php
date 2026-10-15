@@ -52,10 +52,17 @@ class TaskController extends Controller
      */
     public function index(Request $request): View
     {
+        // Default to hiding paused tasks so a large backlog of finished/closed
+        // batches doesn't bury the ones actually worth looking at; ?status=all
+        // (or =paused) still shows them.
+        $statusFilter = (string) $request->query('status', 'active');
+        $filters = in_array($statusFilter, ['active', 'paused'], true) ? ['status' => $statusFilter] : [];
+
         try {
             $overview = $this->taskMonitoringQueryService->buildAdminOverview(
                 max(1, $request->integer('page', 1)),
                 50,
+                $filters,
             );
             $tasks = $overview['tasks'];
             $workers = $overview['worker_overview'];
@@ -78,6 +85,7 @@ class TaskController extends Controller
             'pageTitle' => __('admin.tasks.page_title'),
             'activeMenu' => 'tasks',
             'adminSiteName' => AdminWeb::siteName(),
+            'statusFilter' => $statusFilter,
             'tasks' => $tasks,
             'workers' => $workers,
             'queueStats' => $queueStats,
@@ -589,7 +597,7 @@ class TaskController extends Controller
     private function validateTaskForm(Request $request): array
     {
         $validated = $request->validate([
-            'knowledge_mode' => ['nullable', 'in:legacy_manual,brand_auto'],
+            'knowledge_mode' => ['nullable', 'in:legacy_manual,brand_auto,general,mixed'],
             'knowledge_brand_id' => ['nullable', 'integer', 'min:1'],
             'knowledge_site_id' => ['nullable', 'integer', 'min:1'],
             'knowledge_directory_id' => ['nullable', 'integer', 'min:1'],

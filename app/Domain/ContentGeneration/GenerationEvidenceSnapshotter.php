@@ -42,7 +42,7 @@ final class GenerationEvidenceSnapshotter
         }
         $brief = ContentBrief::whereKey($run->content_brief_id)->lockForUpdate()->firstOrFail();
         $selection = null;
-        if ($brief->knowledge_mode === 'brand_auto') {
+        if (in_array($brief->knowledge_mode, ['brand_auto', 'mixed'], true)) {
             if ($explicitEvidence !== []) {
                 throw ValidationException::withMessages(['evidence' => 'Brand mode only accepts scoped knowledge chunks, not free-text evidence.']);
             }

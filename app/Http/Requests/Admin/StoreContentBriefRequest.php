@@ -25,7 +25,7 @@ final class StoreContentBriefRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'knowledge_mode' => ['nullable', 'in:legacy_manual,brand_auto'],
+            'knowledge_mode' => ['nullable', 'in:legacy_manual,brand_auto,general,mixed'],
             'knowledge_brand_id' => ['nullable', 'integer', 'min:1'],
             'knowledge_site_id' => ['nullable', 'integer', 'min:1'],
             'knowledge_directory_id' => ['nullable', 'integer', 'min:1'],

@@ -48,6 +48,22 @@ class WorkerExecutionService
     private const MAX_EVIDENCE_CHUNKS_PER_KNOWLEDGE_BASE = 6;
 
     /**
+     * `pickTitle()`'s fallback branch (below) retries a title that never
+     * produced an Article by creating a brand-new ContentBrief every time —
+     * necessary because the idempotency key is keyed to `used_count`, and a
+     * failed run's key can never be reused (see that method's comment). With
+     * no cap this retries the very same title every single scheduler tick
+     * (every minute) forever once a whole title library has been exhausted
+     * without success — e.g. a 3-week AI-quota outage turned this into an
+     * unbounded duplicate-brief generator (one task ended up with 1000+
+     * near-identical briefs for one title). These two limits turn that into
+     * a bounded, backed-off retry instead of removing the retry entirely.
+     */
+    private const MAX_TITLE_RETRY_ATTEMPTS = 3;
+
+    private const TITLE_RETRY_COOLDOWN_MINUTES = 60;
+
+    /**
      * 复用正文提示词和模型调用服务，确保任务生成与单篇生成规则一致。
      */
     public function __construct(
@@ -104,7 +120,7 @@ class WorkerExecutionService
         $titleRow = $this->pickTitle($task);
         $category = $this->pickCategory($task);
 
-        if ((string) ($task->generation_engine ?? 'legacy') === 'quality_gated') {
+        if (in_array((string) ($task->generation_engine ?? 'legacy'), ['quality_gated', 'workbuddy'], true)) {
             return $this->generateQualityGatedDraft($task, $titleRow, $category);
         }
 
@@ -112,7 +128,7 @@ class WorkerExecutionService
         $prompt = $task->prompt_id ? Prompt::query()->find((int) $task->prompt_id) : null;
 
         $keyword = (string) ($titleRow->keyword ?? '');
-        $knowledgeAudit = $task->knowledge_mode === 'brand_auto' ? $this->brandKnowledgeAudit($task, $titleRow, $taskRunId) : null;
+        $knowledgeAudit = in_array($task->knowledge_mode, ['brand_auto', 'mixed'], true) ? $this->brandKnowledgeAudit($task, $titleRow, $taskRunId) : null;
         $knowledgeContext = $knowledgeAudit === null
             ? $this->resolveKnowledgeContext($task, (string) $titleRow->title, $keyword)
             : "Use only claims supported by these scoped sources; missing coverage is not permission to invent facts.\n".implode("\n\n", array_map(static fn ($item) => '['.$item['citation_id'].'] '.$item['content'], $knowledgeAudit['evidence']));
@@ -239,7 +255,7 @@ class WorkerExecutionService
         }
         $run = TaskRun::whereKey($taskRunId)->where('task_id', $task->id)->first();
         if (isset($run?->meta['knowledge_retrieval_snapshot'])
-            && ($task->knowledge_mode !== 'brand_auto' || ($task->generation_engine ?? 'legacy') !== 'legacy')) {
+            && (! in_array($task->knowledge_mode, ['brand_auto', 'mixed'], true) || ($task->generation_engine ?? 'legacy') !== 'legacy')) {
             // These audits are written by the legacy brand engine. Check before
             // branching on current task settings so a retry cannot bypass the audit.
             throw new RuntimeException('TaskRun evidence requires the original brand knowledge mode and legacy generation engine; enqueue a new run.');
@@ -303,7 +319,8 @@ class WorkerExecutionService
             throw new RuntimeException('任务配置的内容模板没有可用版本');
         }
 
-        $brandAuto = $task->knowledge_mode === 'brand_auto';
+        $knowledgeMode = (string) ($task->knowledge_mode ?? 'legacy_manual');
+        $brandAuto = in_array($knowledgeMode, ['brand_auto', 'mixed'], true);
         $sourceMode = $this->resolveKnowledgeSourceMode($task, $titleRow, $preset);
         // General education/recommendation topics should not be polluted by
         // the brand-only knowledge tree. Keep external evidence enabled, but
@@ -323,7 +340,7 @@ class WorkerExecutionService
         // 事务，失败时这三行会被永久遗留成孤儿数据，而 Title.used_count 又只在
         // reserve() 成功后才自增，于是下一个调度周期会挑中同一个标题、再造一批
         // 孤儿数据，在配置错误的任务上每分钟重复一次。
-        [$brief, $reservation] = DB::transaction(function () use ($task, $titleRow, $category, $referenceUrls, $fetchedReferences, $knowledgeChunkIds, $preset, $presetVersion, $systemAdmin, $sourceMode): array {
+        [$brief, $reservation] = DB::transaction(function () use ($task, $titleRow, $category, $referenceUrls, $fetchedReferences, $knowledgeChunkIds, $preset, $presetVersion, $systemAdmin, $sourceMode, $knowledgeMode): array {
             $briefData = array_merge($task->only(['knowledge_mode', 'knowledge_brand_id', 'knowledge_site_id', 'knowledge_directory_id', 'external_evidence_policy', 'external_general_domains']), [
                 'topic' => (string) $titleRow->title,
                 'core_question' => $titleRow->core_question,
@@ -333,7 +350,7 @@ class WorkerExecutionService
                 'task_id' => (int) $task->id,
                 'ai_model_id' => (int) $task->ai_model_id,
             ]);
-            if ($sourceMode === 'web_first') {
+            if ($sourceMode === 'web_first' && $knowledgeMode === 'brand_auto') {
                 $briefData['knowledge_mode'] = 'legacy_manual';
                 $briefData['knowledge_brand_id'] = null;
                 $briefData['knowledge_site_id'] = null;
@@ -605,8 +622,8 @@ class WorkerExecutionService
         // PostgreSQL 不允许在 count(*) 聚合查询上追加 FOR UPDATE。
         // 这里的并发保护由任务行锁和 task_runs 的单任务串行队列保证，草稿计数不需要再单独加锁。
 
-        if ((string) ($task->generation_engine ?? 'legacy') === 'quality_gated') {
-            // 质量门禁任务在 run 被采纳前不会创建 Article，需要把进行中的 run 也计入草稿池，
+        if (in_array((string) ($task->generation_engine ?? 'legacy'), ['quality_gated', 'workbuddy'], true)) {
+            // 质量门禁任务（含 workbuddy 外部生成）在 run 被采纳前不会创建 Article，需要把进行中的 run 也计入草稿池，
             // 否则会在 run 处于 pending/generating/待审时放任任务超量生成。
             //
             // 但只统计"确实还在流转"的状态：needs_evidence / model_quality_failed /
@@ -832,12 +849,24 @@ class WorkerExecutionService
             // Bulk-import libraries contain the imported topics only as seed
             // inputs; the final headline is authored by the title_crafting
             // module during generation. A failed/blocked generation must not
-            // permanently consume that seed and prevent a retry.
+            // permanently consume that seed and prevent a retry — but it also
+            // must not retry the same title forever: walk candidates in order
+            // and take the first one that hasn't exhausted its attempt cap
+            // and isn't still cooling down from its last attempt.
             if ((int) ($task->is_loop ?? 0) !== 1) {
-                $retryable = Title::query()->where('library_id', $libraryId)
+                $candidates = Title::query()->where('library_id', $libraryId)
                     ->whereDoesntHave('articles')
-                    ->orderBy('id')->first();
-                if ($retryable) {
+                    ->orderBy('id')
+                    ->get();
+                foreach ($candidates as $retryable) {
+                    $state = $this->titleRetryState($task, $retryable);
+                    if ($state['attempts'] >= self::MAX_TITLE_RETRY_ATTEMPTS) {
+                        continue;
+                    }
+                    if ($state['last_attempted_at'] !== null
+                        && $state['last_attempted_at']->gt(now()->subMinutes(self::TITLE_RETRY_COOLDOWN_MINUTES))) {
+                        continue;
+                    }
                     // 不能重置回 0：`buildReservationIdempotencyKey()` 用的是
                     // 自增前的 used_count，这个标题原本第一次尝试时用的正是
                     // "use:0"——那次尝试失败后仍作为 content_generation_runs
@@ -846,7 +875,7 @@ class WorkerExecutionService
                     // （每次重试都会先建一条新 Brief）必然不同，直接判定为
                     // "配置冲突"拒绝——不是偶发失败，是必然重现的死循环。
                     // 必须跳到这个标题从未用过的下一个 use 序号。
-                    $nextUse = $this->nextUnusedTitleSequence($task, $retryable);
+                    $nextUse = $state['attempts'];
                     $retryable->forceFill(['used_count' => $nextUse, 'usage_count' => $nextUse])->save();
 
                     return $retryable;
@@ -859,26 +888,29 @@ class WorkerExecutionService
     }
 
     /**
-     * 找到某个标题下一个从未出现在 idempotency_key 里的 use 序号。
+     * 某个标题过去的重试次数和最近一次尝试时间，从 idempotency_key 反推
+     * （格式固定为 `buildReservationIdempotencyKey()` 生成的
+     * "v2:task:{task}:title:{title}:use:{n}"），而不是假设 n 连续——这个
+     * 标题可能已经被这个重试 fallback 命中过不止一次。
      *
-     * 键的格式固定为 `buildReservationIdempotencyKey()` 生成的
-     * "v2:task:{task}:title:{title}:use:{n}"，直接按这个前缀查已存在的
-     * n 取最大值加一，而不是假设 n 是连续的（这个标题可能已经被这个
-     * 重试 fallback 命中过不止一次）。
+     * @return array{attempts:int,last_attempted_at:?\Illuminate\Support\Carbon}
      */
-    private function nextUnusedTitleSequence(Task $task, Title $title): int
+    private function titleRetryState(Task $task, Title $title): array
     {
         $prefix = 'v2:task:'.(int) $task->id.':title:'.(int) $title->id.':use:';
 
-        $maxUsed = ContentGenerationRun::query()
+        $runs = ContentGenerationRun::query()
             ->where('idempotency_key', 'like', $prefix.'%')
-            ->get(['idempotency_key'])
-            ->map(static function (ContentGenerationRun $run) use ($prefix): int {
-                return (int) substr((string) $run->idempotency_key, strlen($prefix));
-            })
+            ->get(['idempotency_key', 'created_at']);
+
+        $maxUsed = $runs
+            ->map(static fn (ContentGenerationRun $run): int => (int) substr((string) $run->idempotency_key, strlen($prefix)))
             ->max();
 
-        return $maxUsed === null ? 0 : $maxUsed + 1;
+        return [
+            'attempts' => $maxUsed === null ? 0 : $maxUsed + 1,
+            'last_attempted_at' => $runs->max('created_at'),
+        ];
     }
 
     private function pickAuthor(Task $task): Author
