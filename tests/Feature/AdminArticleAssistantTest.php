@@ -9,7 +9,10 @@ use App\Models\Article;
 use App\Models\Author;
 use App\Models\Category;
 use App\Models\KnowledgeBase;
+use App\Models\KnowledgeBrand;
 use App\Models\KnowledgeChunk;
+use App\Models\KnowledgeDirectory;
+use App\Models\KnowledgeSite;
 use App\Models\Prompt;
 use App\Models\Title;
 use App\Models\TitleLibrary;
@@ -23,6 +26,9 @@ use Tests\TestCase;
 class AdminArticleAssistantTest extends TestCase
 {
     use RefreshDatabase;
+
+    /** @var array{brand:KnowledgeBrand,site:KnowledgeSite,directory:KnowledgeDirectory}|null */
+    private ?array $knowledgeOwnership = null;
 
     public function test_create_page_renders_title_picker_and_ai_generation_options(): void
     {
@@ -409,11 +415,7 @@ class AdminArticleAssistantTest extends TestCase
         MarkdownContentWriterAgent::fake()->preventStrayPrompts();
 
         $admin = $this->createAdmin('assistant_empty_knowledge');
-        $knowledgeBase = KnowledgeBase::query()->create([
-            'name' => '空知识库',
-            'content' => '',
-            'usage_count' => 0,
-        ]);
+        $knowledgeBase = $this->createKnowledgeBase('');
         $prompt = $this->createPrompt();
         $model = $this->createModel();
 
@@ -423,6 +425,35 @@ class AdminArticleAssistantTest extends TestCase
                 'knowledge_base_id' => $knowledgeBase->id,
                 'prompt_id' => $prompt->id,
                 'ai_model_id' => $model->id,
+            ])
+            ->assertUnprocessable()
+            ->assertJsonPath('message', __('admin.article_assistant.generate.knowledge_unavailable'));
+
+        MarkdownContentWriterAgent::assertNeverPrompted();
+    }
+
+    public function test_ai_generation_fails_closed_for_an_unowned_knowledge_base_with_content(): void
+    {
+        MarkdownContentWriterAgent::fake()->preventStrayPrompts();
+
+        $admin = $this->createAdmin('assistant_unowned_knowledge');
+        $knowledgeBase = KnowledgeBase::query()->create([
+            'name' => 'Legacy unowned knowledge',
+            'content' => 'This content must not enter generation without an ownership scope.',
+            'usage_count' => 0,
+        ]);
+        KnowledgeChunk::query()->create([
+            'knowledge_base_id' => $knowledgeBase->id,
+            'chunk_index' => 0,
+            'content' => (string) $knowledgeBase->content,
+        ]);
+
+        $this->actingAs($admin, 'admin')
+            ->postJson(route('admin.articles.editor.generate'), [
+                'title' => 'Unowned evidence must fail closed',
+                'knowledge_base_id' => $knowledgeBase->id,
+                'prompt_id' => $this->createPrompt()->id,
+                'ai_model_id' => $this->createModel()->id,
             ])
             ->assertUnprocessable()
             ->assertJsonPath('message', __('admin.article_assistant.generate.knowledge_unavailable'));
@@ -454,12 +485,21 @@ class AdminArticleAssistantTest extends TestCase
 
     private function createKnowledgeBase(string $content = 'GEOFlow 知识库提供经过审核的产品资料。'): KnowledgeBase
     {
+        $ownership = $this->knowledgeOwnership();
         $knowledgeBase = KnowledgeBase::query()->create([
             'name' => 'GEO 产品知识库',
             'content' => $content,
             'usage_count' => 0,
             'risk_level' => 'low',
             'review_status' => 'reviewed',
+            'brand_id' => $ownership['brand']->id,
+            'site_id' => $ownership['site']->id,
+            'primary_directory_id' => $ownership['directory']->id,
+            'language_code' => 'en',
+            'authority_level' => 'first_party',
+            'lifecycle_status' => 'active',
+            'generation_eligible' => true,
+            'citation_required' => true,
         ]);
         KnowledgeChunk::query()->create([
             'knowledge_base_id' => $knowledgeBase->id,
@@ -469,6 +509,35 @@ class AdminArticleAssistantTest extends TestCase
         ]);
 
         return $knowledgeBase;
+    }
+
+    /**
+     * @return array{brand:KnowledgeBrand,site:KnowledgeSite,directory:KnowledgeDirectory}
+     */
+    private function knowledgeOwnership(): array
+    {
+        if ($this->knowledgeOwnership !== null) {
+            return $this->knowledgeOwnership;
+        }
+
+        $brand = KnowledgeBrand::query()->create([
+            'key' => 'article-assistant-brand',
+            'name' => 'Article Assistant Brand',
+        ]);
+        $site = KnowledgeSite::query()->create([
+            'brand_id' => $brand->id,
+            'key' => 'article-assistant-main',
+            'canonical_host' => 'article-assistant.test',
+            'role' => 'commerce-primary',
+        ]);
+        $directory = KnowledgeDirectory::query()->create([
+            'brand_id' => $brand->id,
+            'key' => 'brand-company',
+            'path' => 'brand-company',
+            'name' => 'Brand company',
+        ]);
+
+        return $this->knowledgeOwnership = compact('brand', 'site', 'directory');
     }
 
     private function createModel(array $overrides = []): AiModel

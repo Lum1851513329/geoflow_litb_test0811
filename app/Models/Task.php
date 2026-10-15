@@ -12,11 +12,16 @@ class Task extends Model
     protected $table = 'tasks';
 
     protected $fillable = [
+        'knowledge_mode', 'knowledge_brand_id', 'knowledge_site_id', 'knowledge_directory_id',
         'name',
         'title_library_id',
         'image_library_id',
         'image_count',
         'prompt_id',
+        'generation_engine',
+        'external_evidence_policy',
+        'external_general_domains',
+        'prompt_preset_id',
         'ai_model_id',
         'author_id',
         'need_review',
@@ -52,10 +57,15 @@ class Task extends Model
     protected function casts(): array
     {
         return [
+            'knowledge_brand_id' => 'integer',
+            'knowledge_site_id' => 'integer',
+            'knowledge_directory_id' => 'integer',
+            'external_general_domains' => 'array',
             'title_library_id' => 'integer',
             'image_library_id' => 'integer',
             'image_count' => 'integer',
             'prompt_id' => 'integer',
+            'prompt_preset_id' => 'integer',
             'ai_model_id' => 'integer',
             'author_id' => 'integer',
             'need_review' => 'integer',
@@ -97,6 +107,11 @@ class Task extends Model
         return $this->belongsTo(Prompt::class, 'prompt_id');
     }
 
+    public function promptPreset(): BelongsTo
+    {
+        return $this->belongsTo(PromptPreset::class, 'prompt_preset_id');
+    }
+
     public function aiModel(): BelongsTo
     {
         return $this->belongsTo(AiModel::class, 'ai_model_id');
@@ -134,6 +149,11 @@ class Task extends Model
     public function articles(): HasMany
     {
         return $this->hasMany(Article::class, 'task_id');
+    }
+
+    public function contentBriefs(): HasMany
+    {
+        return $this->hasMany(ContentBrief::class, 'task_id');
     }
 
     public function taskSchedules(): HasMany

@@ -126,6 +126,43 @@ return [
     // 正文生成默认最大输出 token 数；当 AI 模型未单独配置 max_tokens 时使用此兜底值，
     // 避免依赖各服务商较小的默认上限（常见 4K）导致长文被截断。
     'content_max_tokens' => max(256, (int) env('GEOFLOW_CONTENT_MAX_TOKENS', 8192)),
+
+    // LITB 商品卡抓取：站点对持续抓取会限流，同一个关键词在冷启动时返回 12 个商品，
+    // 批量抓取过程中却返回 0。重试和请求间隔都是为了避免把"被限流"误判成"该主题没有商品"。
+    'litb_product_fetch_attempts' => max(1, (int) env('GEOFLOW_LITB_PRODUCT_FETCH_ATTEMPTS', 3)),
+    'litb_product_fetch_delay_ms' => max(0, (int) env('GEOFLOW_LITB_PRODUCT_FETCH_DELAY_MS', 400)),
+    // Semrush 主题标签会被裁成商品关键词。相关度 = 命中词数/关键词数，四个词时
+    // 命中三个只有 0.75，达不到 0.8 阈值，因此默认取三个词以提高完全命中的概率。
+    'litb_product_keyword_tokens' => max(1, (int) env('GEOFLOW_LITB_PRODUCT_KEYWORD_TOKENS', 3)),
+
+    // 证据来源分层：brand_required 查本地品牌知识库，web_first 走外部检索。
+    // 见 WorkerExecutionService::resolveKnowledgeSourceMode()。
+    'knowledge_source_mode_by_preset' => [
+        // 品牌自有资料
+        'litb.brand_company_explainer.en' => 'brand_required',
+        'litb.faq_knowledge_hub.en' => 'brand_required',
+        'litb.official_news.en' => 'brand_required',
+        'litb.trust_shipping_returns.en' => 'brand_required',
+        // 选品与科普内容：品牌知识库没有商品数据，必须走外部检索
+        'litb.geo_category_authority.en' => 'web_first',
+        'litb.geo_product_buying_guide.en' => 'web_first',
+        'litb.product_comparison.en' => 'web_first',
+        'litb.style_occasion.en' => 'web_first',
+        'litb.new_arrivals_monthly.en' => 'web_first',
+        'litb.new_arrivals_weekly.en' => 'web_first',
+        'litb.seasonal_commercial_guide.en' => 'web_first',
+    ],
+    // Prompt/input and completion/output budgets are distinct. The safety margin covers provider framing and tokenizer drift.
+    'content_context_window_tokens' => max(4096, (int) env('GEOFLOW_CONTENT_CONTEXT_WINDOW_TOKENS', 32768)),
+    'content_context_safety_margin_tokens' => max(0, (int) env('GEOFLOW_CONTENT_CONTEXT_SAFETY_MARGIN_TOKENS', 1024)),
+    // Content generation is durably published through the database queue on the same DB transaction.
+    'content_generation_queue_connection' => env('GEOFLOW_CONTENT_GENERATION_QUEUE_CONNECTION', 'database'),
+    'content_generation_queue' => env('GEOFLOW_CONTENT_GENERATION_QUEUE', 'geoflow'),
+    'content_generation_dispatch_stale_seconds' => max(30, (int) env('GEOFLOW_CONTENT_GENERATION_DISPATCH_STALE_SECONDS', 300)),
+    // 内容策略、模块化 Prompt 与质量门禁均为渐进式能力；生产默认关闭，旧 Task/Prompt/Worker 链路不受影响。
+    'content_strategy_enabled' => filter_var(env('GEOFLOW_CONTENT_STRATEGY_ENABLED', false), FILTER_VALIDATE_BOOLEAN),
+    'modular_prompts_enabled' => filter_var(env('GEOFLOW_MODULAR_PROMPTS_ENABLED', false), FILTER_VALIDATE_BOOLEAN),
+    'generation_quality_gate_enabled' => filter_var(env('GEOFLOW_GENERATION_QUALITY_GATE_ENABLED', false), FILTER_VALIDATE_BOOLEAN),
     // AI 可见性查询底层能力：豆包 Ark Responses、豆包 Search Custom、DeepSeek 二次分析共用。
     'ai_visibility' => [
         'http_timeout_seconds' => max(5, (int) env('GEOFLOW_AI_VISIBILITY_HTTP_TIMEOUT', 60)),

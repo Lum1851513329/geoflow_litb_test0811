@@ -51,9 +51,16 @@ final class ArticleContentPromptRenderer
             $renderedPrompt = $this->appendKnowledgeContext($renderedPrompt, $knowledgeContext);
         }
 
+        // Language is judged from the human-authored template text itself
+        // ($prompt, before knowledge injection), not the fully rendered
+        // prompt — injected knowledge-base/evidence content routinely mixes
+        // in a few incidental foreign-language characters (addresses,
+        // supplier names, source notes) that would otherwise flip this
+        // detector and silently mismatch the closing instructions' language
+        // against an otherwise all-English (or all-Chinese) document.
         $finalInstructions = array_values(array_filter([
-            $this->knowledgeAttributionInstruction($renderedPrompt, $knowledgeContext, $includeEvidenceIds),
-            $this->finalPromptInstruction($renderedPrompt),
+            $this->knowledgeAttributionInstruction($prompt, $knowledgeContext, $includeEvidenceIds),
+            $this->finalPromptInstruction($prompt),
         ], static fn (string $instruction): bool => trim($instruction) !== ''));
 
         return trim($renderedPrompt)."\n\n".implode("\n", $finalInstructions);
@@ -193,7 +200,14 @@ final class ArticleContentPromptRenderer
 
     private function isLikelyEnglishPrompt(string $prompt): bool
     {
-        preg_match_all('/\p{Han}/u', $prompt, $cjkMatches);
+        // \p{Han} matches more than actual Chinese/Japanese ideographs in
+        // this PCRE build — full-width bracket punctuation like 【 】 (a
+        // section-marker style used in both Chinese- and English-language
+        // prompts, including this codebase's own English WorkBuddy
+        // templates) matches it too, which used to misjudge an all-English
+        // prompt as Chinese purely for using that bracket style. Matching
+        // the actual CJK Unified Ideographs block directly avoids that.
+        preg_match_all('/[\x{4E00}-\x{9FFF}]/u', $prompt, $cjkMatches);
         preg_match_all('/[A-Za-z]/', $prompt, $latinMatches);
 
         return count($latinMatches[0] ?? []) > 20 && count($cjkMatches[0] ?? []) <= 3;

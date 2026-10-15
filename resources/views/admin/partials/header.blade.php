@@ -22,14 +22,28 @@
         'dashboard' => ['route' => 'admin.dashboard', 'name' => __('admin.nav.dashboard')],
         'analytics' => ['route' => 'admin.analytics', 'name' => __('admin.nav.analytics')],
         'tasks' => ['route' => 'admin.tasks.index', 'name' => __('admin.nav.tasks')],
+        'bulk_content_import' => ['route' => 'admin.bulk-content-import.index', 'name' => __('admin.nav.bulk_content_import')],
+        'workbuddy_tasks' => ['route' => 'admin.workbuddy-tasks.index', 'name' => __('admin.nav.workbuddy_tasks')],
         'distribution' => ['route' => 'admin.distribution.index', 'name' => __('admin.nav.distribution')],
         'articles' => ['route' => 'admin.articles.index', 'name' => __('admin.nav.articles')],
+        'content_strategy' => ['route' => 'admin.content-briefs.index', 'name' => __('admin.nav.content_strategy')],
         'materials' => ['route' => 'admin.materials.index', 'name' => __('admin.nav.materials')],
+        'keyword_intelligence' => ['route' => 'admin.keyword-intelligence.index', 'name' => __('admin.keyword_intelligence.nav.overview')],
         'ai_config' => ['route' => 'admin.ai.configurator', 'name' => __('admin.nav.ai_config')],
         'site_settings' => ['route' => 'admin.site-settings.index', 'name' => __('admin.nav.site_settings')],
     ];
     if (!$isSuperAdmin) {
         unset($menu['distribution']);
+    }
+    if (!(bool) config('geoflow.content_strategy_enabled', false)
+        || !(bool) config('geoflow.modular_prompts_enabled', false)
+        || !(bool) config('geoflow.generation_quality_gate_enabled', false)) {
+        unset($menu['content_strategy']);
+        // 批量导入、WorkBuddy 任务的路由都与内容策略挂同一组功能开关（workbuddy
+        // 引擎复用的是同一套 brief/strategy/blueprint 创建流水线），开关关闭时
+        // 路由不存在，菜单项也必须一起隐藏，否则 route() 会直接抛错。
+        unset($menu['bulk_content_import']);
+        unset($menu['workbuddy_tasks']);
     }
     if ($isSuperAdmin) {
         $menu['admin_users'] = ['route' => 'admin.admin-users.index', 'name' => __('admin.nav.admin_users')];
@@ -47,6 +61,9 @@
         'admin.system-updates.backup' => 'dashboard',
         'admin.tasks.create' => 'tasks',
         'admin.tasks.edit' => 'tasks',
+        'admin.bulk-content-import.index' => 'bulk_content_import',
+        'admin.bulk-content-import.store' => 'bulk_content_import',
+        'admin.bulk-content-import.template' => 'bulk_content_import',
         'admin.distribution.index' => 'distribution',
         'admin.distribution.create' => 'distribution',
         'admin.distribution.store' => 'distribution',
@@ -61,6 +78,19 @@
         'admin.distribution.rotate-secret' => 'distribution',
         'admin.articles.create' => 'articles',
         'admin.articles.edit' => 'articles',
+        'admin.content-briefs.index' => 'content_strategy',
+        'admin.content-briefs.create' => 'content_strategy',
+        'admin.content-briefs.store' => 'content_strategy',
+        'admin.content-briefs.strategy' => 'content_strategy',
+        'admin.content-briefs.strategy.confirm' => 'content_strategy',
+        'admin.content-briefs.blueprint' => 'content_strategy',
+        'admin.content-briefs.blueprint.confirm' => 'content_strategy',
+        'admin.content-briefs.generations.store' => 'content_strategy',
+        'admin.content-briefs.show' => 'content_strategy',
+        'admin.content-generations.show' => 'content_strategy',
+        'admin.content-generations.adopt' => 'content_strategy',
+        'admin.content-generations.workbuddy-submit' => 'content_strategy',
+        'admin.workbuddy-tasks.index' => 'workbuddy_tasks',
         'admin.manual-publications.index' => 'articles',
         'admin.manual-publications.create' => 'articles',
         'admin.manual-publications.show' => 'articles',
@@ -81,6 +111,20 @@
         'admin.keyword-libraries.keywords.store' => 'materials',
         'admin.keyword-libraries.keywords.delete' => 'materials',
         'admin.keyword-libraries.import' => 'materials',
+        'admin.keyword-intelligence.index' => 'keyword_intelligence',
+        'admin.keyword-intelligence.import' => 'keyword_intelligence',
+        'admin.keyword-intelligence.import.preview' => 'keyword_intelligence',
+        'admin.keyword-intelligence.import.confirm' => 'keyword_intelligence',
+        'admin.keyword-intelligence.import.status' => 'keyword_intelligence',
+        'admin.keyword-intelligence.import.revert' => 'keyword_intelligence',
+        'admin.keyword-intelligence.taxonomy' => 'keyword_intelligence',
+        'admin.keyword-intelligence.taxonomy.nodes.store' => 'keyword_intelligence',
+        'admin.keyword-intelligence.taxonomy.nodes.move' => 'keyword_intelligence',
+        'admin.keyword-intelligence.taxonomy.nodes.assign' => 'keyword_intelligence',
+        'admin.keyword-intelligence.clusters' => 'keyword_intelligence',
+        'admin.keyword-intelligence.clusters.show' => 'keyword_intelligence',
+        'admin.keyword-intelligence.clusters.confirm' => 'keyword_intelligence',
+        'admin.keyword-intelligence.clusters.score' => 'keyword_intelligence',
         'admin.title-libraries.index' => 'materials',
         'admin.title-libraries.create' => 'materials',
         'admin.title-libraries.edit' => 'materials',

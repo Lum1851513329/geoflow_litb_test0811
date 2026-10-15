@@ -232,6 +232,11 @@ class JobQueueService
      */
     public function completeJob(int $jobId, int $taskId, ?int $articleId, int $durationMs, array $meta = []): void
     {
+        $previous = $this->normalizeMeta(TaskRun::whereKey($jobId)->where('task_id', $taskId)->value('meta'));
+        $meta = array_merge($previous, $meta);
+        if (isset($previous['knowledge_retrieval_snapshot'])) {
+            $meta['knowledge_retrieval_snapshot'] = $previous['knowledge_retrieval_snapshot'];
+        }
         TaskRun::query()->whereKey($jobId)->update([
             'status' => 'completed',
             'finished_at' => now(),

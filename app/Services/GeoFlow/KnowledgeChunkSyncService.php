@@ -411,6 +411,19 @@ class KnowledgeChunkSyncService
             return [];
         }
 
+        $brand = null;
+        $site = null;
+        $directory = null;
+        if (Schema::hasTable('knowledge_brands') && (int) ($knowledgeBase->brand_id ?? 0) > 0) {
+            $brand = $knowledgeBase->brand()->first(['id', 'key', 'name']);
+        }
+        if (Schema::hasTable('knowledge_sites') && (int) ($knowledgeBase->site_id ?? 0) > 0) {
+            $site = $knowledgeBase->site()->first(['id', 'key', 'canonical_host', 'role']);
+        }
+        if (Schema::hasTable('knowledge_directories') && (int) ($knowledgeBase->primary_directory_id ?? 0) > 0) {
+            $directory = $knowledgeBase->primaryDirectory()->first(['id', 'key', 'path', 'name']);
+        }
+
         return array_filter([
             'knowledge_base_id' => (int) $knowledgeBase->id,
             'knowledge_base_name' => (string) $knowledgeBase->name,
@@ -423,6 +436,27 @@ class KnowledgeChunkSyncService
             'effective_date' => $knowledgeBase->effective_date?->toDateString(),
             'risk_level' => trim((string) ($knowledgeBase->risk_level ?? 'medium')),
             'review_status' => trim((string) ($knowledgeBase->review_status ?? 'unreviewed')),
+            'brand_id' => (int) ($knowledgeBase->brand_id ?? 0) ?: null,
+            'brand_key' => trim((string) ($brand?->key ?? '')),
+            'brand_name' => trim((string) ($brand?->name ?? '')),
+            'site_id' => (int) ($knowledgeBase->site_id ?? 0) ?: null,
+            'site_key' => trim((string) ($site?->key ?? '')),
+            'site_host' => trim((string) ($site?->canonical_host ?? '')),
+            'site_role' => trim((string) ($site?->role ?? '')),
+            'directory_id' => (int) ($knowledgeBase->primary_directory_id ?? 0) ?: null,
+            'directory_key' => trim((string) ($directory?->key ?? '')),
+            'directory_path' => trim((string) ($directory?->path ?? '')),
+            'language_code' => trim((string) ($knowledgeBase->language_code ?? '')),
+            'authority_level' => trim((string) ($knowledgeBase->authority_level ?? '')),
+            'retrieved_at' => $knowledgeBase->retrieved_at?->toIso8601String(),
+            'review_due_at' => $knowledgeBase->review_due_at?->toDateString(),
+            'version_label' => trim((string) ($knowledgeBase->version_label ?? '')),
+            'lifecycle_status' => trim((string) ($knowledgeBase->lifecycle_status ?? '')),
+            'generation_eligible' => $knowledgeBase->generation_eligible,
+            'citation_required' => $knowledgeBase->citation_required,
+            'source_file_path' => trim((string) ($knowledgeBase->source_file_path ?? '')),
+            'source_file_hash' => trim((string) ($knowledgeBase->source_file_hash ?? '')),
+            'normalized_content_hash' => trim((string) ($knowledgeBase->normalized_content_hash ?? '')),
         ], static fn ($value): bool => $value !== null && $value !== '');
     }
 
@@ -432,7 +466,29 @@ class KnowledgeChunkSyncService
     private function knowledgeBaseMetadataSelectColumns(): array
     {
         $columns = ['id', 'name', 'description', 'file_type'];
-        foreach (['source_name', 'source_url', 'source_type', 'business_line', 'effective_date', 'risk_level', 'review_status'] as $column) {
+        foreach ([
+            'source_name',
+            'source_url',
+            'source_type',
+            'business_line',
+            'effective_date',
+            'risk_level',
+            'review_status',
+            'brand_id',
+            'site_id',
+            'primary_directory_id',
+            'language_code',
+            'authority_level',
+            'retrieved_at',
+            'review_due_at',
+            'version_label',
+            'lifecycle_status',
+            'generation_eligible',
+            'citation_required',
+            'source_file_path',
+            'source_file_hash',
+            'normalized_content_hash',
+        ] as $column) {
             if (Schema::hasColumn('knowledge_bases', $column)) {
                 $columns[] = $column;
             }

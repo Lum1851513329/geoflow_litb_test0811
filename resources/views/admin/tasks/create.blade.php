@@ -138,9 +138,28 @@
                     </div>
                     <div class="px-6 py-4">
                         <div class="grid grid-cols-1 gap-6 lg:grid-cols-3">
-                            <div>
+                            @if ($formOptions['qualityGatedEngineAvailable'])
+                                @php($generationEngine = (string) old('generation_engine', (string) ($taskForm['generation_engine'] ?? 'legacy')))
+                                <div class="lg:col-span-3">
+                                    <label for="generation_engine" class="block text-sm font-medium text-gray-700">生成引擎</label>
+                                    <select name="generation_engine" id="generation_engine" class="mt-1 block w-full border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500">
+                                        <option value="legacy" @selected($generationEngine === 'legacy')>传统（固定模板，单次生成）</option>
+                                        <option value="quality_gated" @selected($generationEngine === 'quality_gated')>质量门禁（AI 结构化生成，自动质检）</option>
+                                    </select>
+                                </div>
+                                <div data-quality-gated-preset-field @class(['hidden' => $generationEngine !== 'quality_gated'])>
+                                    <label for="prompt_preset_id" class="block text-sm font-medium text-gray-700">内容模板 *</label>
+                                    <select name="prompt_preset_id" id="prompt_preset_id" class="mt-1 block w-full border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500">
+                                        <option value="">— 选择内容模板 —</option>
+                                        @foreach ($formOptions['qualityGatedPresets'] as $preset)
+                                            <option value="{{ $preset['id'] }}" @selected((string) old('prompt_preset_id', (string) ($taskForm['prompt_preset_id'] ?? '')) === (string) $preset['id'])>{{ $preset['name'] }}</option>
+                                        @endforeach
+                                    </select>
+                                </div>
+                            @endif
+                            <div data-legacy-prompt-field @class(['hidden' => $formOptions['qualityGatedEngineAvailable'] && ($generationEngine ?? 'legacy') === 'quality_gated'])>
                                 <label for="prompt_id" class="block text-sm font-medium text-gray-700">{{ $t('task_create.field.content_prompt') }} *</label>
-                                <select name="prompt_id" id="prompt_id" required class="mt-1 block w-full border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500">
+                                <select name="prompt_id" id="prompt_id" @if (! $formOptions['qualityGatedEngineAvailable']) required @endif class="mt-1 block w-full border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500">
                                     <option value="">{{ $t('task_create.option.select_prompt') }}</option>
                                     @foreach ($formOptions['prompts'] as $prompt)
                                         <option value="{{ $prompt['id'] }}" @selected((string) old('prompt_id', (string) ($taskForm['prompt_id'] ?? '')) === (string) $prompt['id'])>{{ $prompt['name'] }}</option>
@@ -164,7 +183,23 @@
                                 </select>
                                 <p class="mt-1 text-sm text-gray-500">{!! $t('task_create.help.model_selection_mode') !!}</p>
                             </div>
-                            <div class="lg:col-span-3">
+                            @include('admin.partials.knowledge-scope', ['scopeValues' => $taskForm, 'knowledgeScopeOptions' => $formOptions['knowledgeScopeOptions']])
+                            <div class="lg:col-span-3 rounded-md border border-blue-100 bg-blue-50 p-4">
+                                <label for="external_evidence_policy" class="block text-sm font-medium text-gray-800">外部证据验证</label>
+                                <select name="external_evidence_policy" id="external_evidence_policy" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500">
+                                    @php($externalPolicy = (string) old('external_evidence_policy', (string) ($taskForm['external_evidence_policy'] ?? 'off')))
+                                    <option value="off" @selected($externalPolicy === 'off')>关闭（仅使用所选品牌知识）</option>
+                                    <option value="on_insufficient" @selected($externalPolicy === 'on_insufficient')>本地证据不足时验证外部来源</option>
+                                </select>
+                                <label for="external_general_domains" class="mt-3 block text-sm font-medium text-gray-800">允许的通用来源域名（可选）</label>
+                                <input type="text" name="external_general_domains" id="external_general_domains"
+                                       value="{{ old('external_general_domains', implode(', ', (array) ($taskForm['external_general_domains'] ?? []))) }}"
+                                       placeholder="who.int, example.org"
+                                       class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500">
+                                <p class="mt-2 text-xs text-gray-600">只在本地证据不足时调用。品牌事实限定为所选知识站点的官方域名；无法验证的核心事实会阻止采纳与发布。</p>
+                                @if(!config('external_evidence.enabled'))<p class="mt-2 rounded bg-amber-100 px-3 py-2 text-xs font-medium text-amber-900">当前环境尚未启用 Wigolo 外部证据服务；可保存策略，但在运维完成配置前不会发起外部请求。</p>@endif
+                            </div>
+                            <div data-legacy-knowledge @if(old('knowledge_mode', $taskForm['knowledge_mode'] ?? 'brand_auto') === 'brand_auto') hidden @endif class="lg:col-span-3">
                                 <div class="flex flex-wrap items-center justify-between gap-2">
                                     <div>
                                         <label class="block text-sm font-medium text-gray-700">{{ $t('task_create.field.knowledge_bases') }}</label>
@@ -583,6 +618,11 @@
             const draftLimitInput = document.getElementById('draft_limit');
             const fixedCategorySection = document.getElementById('fixed-category-section');
             const fixedCategorySelect = document.getElementById('fixed_category_id');
+            const generationEngineSelect = document.getElementById('generation_engine');
+            const legacyPromptField = document.querySelector('[data-legacy-prompt-field]');
+            const qualityGatedPresetField = document.querySelector('[data-quality-gated-preset-field]');
+            const promptIdSelect = document.getElementById('prompt_id');
+            const promptPresetIdSelect = document.getElementById('prompt_preset_id');
             const categoryModeRadios = document.querySelectorAll('input[name="category_mode"]');
             const publishScopeRadios = document.querySelectorAll('[data-publish-scope-option]');
             const distributionChannelInputs = document.querySelectorAll('[data-distribution-channel-input]');
@@ -624,6 +664,28 @@
                 } else {
                     publishIntervalInput.disabled = false;
                     publishIntervalInput.parentElement.style.opacity = '1';
+                }
+            }
+
+            function handleGenerationEngineChange() {
+                if (!generationEngineSelect) {
+                    return;
+                }
+
+                const isQualityGated = generationEngineSelect.value === 'quality_gated';
+
+                if (legacyPromptField) {
+                    legacyPromptField.classList.toggle('hidden', isQualityGated);
+                }
+                if (promptIdSelect) {
+                    promptIdSelect.required = !isQualityGated;
+                }
+
+                if (qualityGatedPresetField) {
+                    qualityGatedPresetField.classList.toggle('hidden', !isQualityGated);
+                }
+                if (promptPresetIdSelect) {
+                    promptPresetIdSelect.required = isQualityGated;
                 }
             }
 
@@ -770,6 +832,9 @@
             imageLibrarySelect.addEventListener('change', toggleImageCountByLibrary);
             needReviewCheckbox.addEventListener('change', togglePublishInterval);
             articleLimitInput.addEventListener('input', syncDraftLimitMax);
+            if (generationEngineSelect) {
+                generationEngineSelect.addEventListener('change', handleGenerationEngineChange);
+            }
             categoryModeRadios.forEach((radio) => radio.addEventListener('change', handleCategoryModeChange));
             publishScopeRadios.forEach((radio) => radio.addEventListener('change', syncDistributionChannelsByScope));
             distributionChannelInputs.forEach((input) => {
@@ -838,8 +903,16 @@
                     return;
                 }
 
-                if (!document.getElementById('prompt_id').value) {
+                const isQualityGatedSubmit = generationEngineSelect && generationEngineSelect.value === 'quality_gated';
+
+                if (!isQualityGatedSubmit && !document.getElementById('prompt_id').value) {
                     alert(@json(__('admin.task_create.error.prompt_required')));
+                    event.preventDefault();
+                    return;
+                }
+
+                if (isQualityGatedSubmit && promptPresetIdSelect && !promptPresetIdSelect.value) {
+                    alert('请选择内容模板');
                     event.preventDefault();
                     return;
                 }
@@ -863,6 +936,7 @@
 
             toggleImageCountByLibrary();
             togglePublishInterval();
+            handleGenerationEngineChange();
             handleCategoryModeChange();
             syncDraftLimitMax();
             syncDistributionChannelsByScope();

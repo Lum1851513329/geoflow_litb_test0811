@@ -4,6 +4,8 @@ namespace App\Services\GeoFlow;
 
 use App\Models\KnowledgeBase;
 use App\Models\KnowledgeChunk;
+use App\Services\GeoFlow\KnowledgeGovernance\KnowledgeScope;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
@@ -24,10 +26,10 @@ class KnowledgeRetrievalService
 
     public function __construct(private readonly KnowledgeChunkSyncService $knowledgeChunkSyncService) {}
 
-    public function retrieveContext(int $knowledgeBaseId, string $query, int $limit = 5, int $maxChars = 3200): string
+    public function retrieveContext(KnowledgeScope $scope, int $knowledgeBaseId, string $query, int $limit = 5, int $maxChars = 3200): string
     {
         return $this->composeEvidenceContext(
-            $this->retrieveEvidence($knowledgeBaseId, $query, max($limit * 4, 16)),
+            $this->retrieveEvidence($scope, $knowledgeBaseId, $query, max($limit * 4, 16)),
             $limit,
             $maxChars
         );
@@ -36,10 +38,10 @@ class KnowledgeRetrievalService
     /**
      * @param  list<int>  $knowledgeBaseIds
      */
-    public function retrieveContextFromMany(array $knowledgeBaseIds, string $query, int $limit = 5, int $maxChars = 3200): string
+    public function retrieveContextFromMany(KnowledgeScope $scope, array $knowledgeBaseIds, string $query, int $limit = 5, int $maxChars = 3200): string
     {
         return $this->composeEvidenceContext(
-            $this->retrieveEvidenceFromMany($knowledgeBaseIds, $query, max($limit * 4, 16)),
+            $this->retrieveEvidenceFromMany($scope, $knowledgeBaseIds, $query, max($limit * 4, 16)),
             $limit,
             $maxChars
         );
@@ -49,7 +51,7 @@ class KnowledgeRetrievalService
      * @param  list<int>  $knowledgeBaseIds
      * @return list<array<string,mixed>>
      */
-    public function retrieveEvidenceFromMany(array $knowledgeBaseIds, string $query, int $candidateLimit = 16): array
+    public function retrieveEvidenceFromMany(KnowledgeScope $scope, array $knowledgeBaseIds, string $query, int $candidateLimit = 16): array
     {
         $knowledgeBaseIds = collect($knowledgeBaseIds)
             ->map(static fn ($id): int => (int) $id)
@@ -64,14 +66,14 @@ class KnowledgeRetrievalService
         }
 
         if (count($knowledgeBaseIds) === 1) {
-            return $this->retrieveEvidence($knowledgeBaseIds[0], $query, $candidateLimit);
+            return $this->retrieveEvidence($scope, $knowledgeBaseIds[0], $query, $candidateLimit);
         }
 
         $perBaseLimit = max(6, (int) ceil(max(1, $candidateLimit) / count($knowledgeBaseIds)) + 4);
         $merged = [];
 
         foreach ($knowledgeBaseIds as $order => $knowledgeBaseId) {
-            foreach ($this->retrieveEvidence($knowledgeBaseId, $query, $perBaseLimit) as $candidate) {
+            foreach ($this->retrieveEvidence($scope, $knowledgeBaseId, $query, $perBaseLimit) as $candidate) {
                 $candidate['knowledge_base_rank'] = $order;
                 $merged[] = $candidate;
             }
@@ -82,28 +84,20 @@ class KnowledgeRetrievalService
         }
 
         $merged = $this->resolveEvidenceConflicts($merged);
-        usort($merged, static function (array $a, array $b): int {
-            $diff = ((float) $b['score']) <=> ((float) $a['score']);
-            if ($diff !== 0) {
-                return $diff;
-            }
+        usort($merged, fn (array $left, array $right): int => $this->compareRankedEvidence($left, $right));
 
-            $rankDiff = ((int) ($a['knowledge_base_rank'] ?? 0)) <=> ((int) ($b['knowledge_base_rank'] ?? 0));
-
-            return $rankDiff !== 0 ? $rankDiff : ((int) $a['chunk_index'] <=> (int) $b['chunk_index']);
-        });
-
-        return array_slice($merged, 0, max(1, $candidateLimit));
+        return $this->withEvidenceReferences(array_slice($merged, 0, max(1, $candidateLimit)));
     }
 
     /**
      * @return list<array<string,mixed>>
      */
-    public function retrieveEvidence(int $knowledgeBaseId, string $query, int $candidateLimit = 16): array
+    public function retrieveEvidence(KnowledgeScope $scope, int $knowledgeBaseId, string $query, int $candidateLimit = 16): array
     {
         /** @var KnowledgeBase|null $knowledgeBase */
-        $knowledgeBase = KnowledgeBase::query()
+        $knowledgeBase = $this->scopedKnowledgeBaseQuery($scope)
             ->whereKey($knowledgeBaseId)
+            ->with('primaryDirectory:id,key,path')
             ->first($this->knowledgeBaseSelectColumns());
 
         if (! $knowledgeBase) {
@@ -112,15 +106,15 @@ class KnowledgeRetrievalService
 
         $queryTerms = $this->termFrequencies($query);
         $pgvectorScores = trim($query) !== ''
-            ? $this->fetchPgvectorScores($knowledgeBaseId, $query, max($candidateLimit, 16))
+            ? $this->fetchPgvectorScores($scope, $knowledgeBaseId, $query, max($candidateLimit, 16))
             : [];
 
-        $rows = $this->loadCandidateRows($knowledgeBaseId, $queryTerms, $pgvectorScores, $candidateLimit);
+        $rows = $this->loadCandidateRows($scope, $knowledgeBaseId, $queryTerms, $pgvectorScores, $candidateLimit);
         if ($rows === []) {
             return [];
         }
 
-        $hasRealEmbeddingRows = $pgvectorScores === [] && $this->knowledgeBaseHasRealEmbeddingRows($knowledgeBaseId);
+        $hasRealEmbeddingRows = $pgvectorScores === [] && $this->knowledgeBaseHasRealEmbeddingRows($scope, $knowledgeBaseId);
         $queryVector = [];
         $useRealEmbeddingScore = false;
         if ($pgvectorScores === [] && $hasRealEmbeddingRows && trim($query) !== '') {
@@ -175,13 +169,9 @@ class KnowledgeRetrievalService
         }
 
         $scored = $this->resolveEvidenceConflicts($scored);
-        usort($scored, static function (array $a, array $b): int {
-            $diff = ((float) $b['score']) <=> ((float) $a['score']);
+        usort($scored, fn (array $left, array $right): int => $this->compareRankedEvidence($left, $right));
 
-            return $diff !== 0 ? $diff : ((int) $a['chunk_index'] <=> (int) $b['chunk_index']);
-        });
-
-        return array_slice($scored, 0, max(1, $candidateLimit));
+        return $this->withEvidenceReferences(array_slice($scored, 0, max(1, $candidateLimit)));
     }
 
     /**
@@ -210,8 +200,12 @@ class KnowledgeRetrievalService
                 continue;
             }
 
-            $citation = 'K'.(count($parts) + 1);
+            $citation = trim((string) ($candidate['citation_id'] ?? ''));
+            if ($citation === '') {
+                $citation = 'K'.(count($parts) + 1);
+            }
             $metadata = is_array($candidate['metadata'] ?? null) ? $candidate['metadata'] : [];
+            $provenance = is_array($candidate['provenance'] ?? null) ? $candidate['provenance'] : [];
             $lines = ['【证据 '.$citation.'】'];
 
             $knowledgeBaseName = trim((string) ($metadata['knowledge_base_name'] ?? ''));
@@ -229,12 +223,12 @@ class KnowledgeRetrievalService
                 $lines[] = '章节：'.$sectionPath;
             }
 
-            $sourceName = trim((string) ($metadata['source_name'] ?? $metadata['knowledge_base_name'] ?? ''));
+            $sourceName = trim((string) ($provenance['source_name'] ?? $metadata['source_name'] ?? $metadata['knowledge_base_name'] ?? ''));
             if ($sourceName !== '') {
                 $lines[] = '来源：'.$sourceName;
             }
 
-            $sourceUrl = trim((string) ($metadata['source_url'] ?? ''));
+            $sourceUrl = trim((string) ($provenance['source_url'] ?? $metadata['source_url'] ?? ''));
             if ($sourceUrl !== '') {
                 $lines[] = '链接：'.$sourceUrl;
             }
@@ -289,6 +283,22 @@ class KnowledgeRetrievalService
             'effective_date' => $knowledgeBase->effective_date?->toDateString(),
             'risk_level' => trim((string) ($knowledgeBase->risk_level ?? 'medium')),
             'review_status' => trim((string) ($knowledgeBase->review_status ?? 'unreviewed')),
+            'brand_id' => (int) $knowledgeBase->brand_id,
+            'site_id' => (int) $knowledgeBase->site_id,
+            'primary_directory_id' => (int) $knowledgeBase->primary_directory_id,
+            'directory_key' => trim((string) ($knowledgeBase->primaryDirectory?->key ?? '')),
+            'directory_path' => trim((string) ($knowledgeBase->primaryDirectory?->path ?? '')),
+            'canonical_document_key' => trim((string) ($knowledgeBase->canonical_document_key ?? '')),
+            'language_code' => trim((string) ($knowledgeBase->language_code ?? '')),
+            'authority_level' => trim((string) ($knowledgeBase->authority_level ?? '')),
+            'retrieved_at' => $knowledgeBase->retrieved_at?->toAtomString(),
+            'review_due_at' => $knowledgeBase->review_due_at?->toDateString(),
+            'version_label' => trim((string) ($knowledgeBase->version_label ?? '')),
+            'lifecycle_status' => trim((string) ($knowledgeBase->lifecycle_status ?? '')),
+            'generation_eligible' => (bool) $knowledgeBase->generation_eligible,
+            'citation_required' => (bool) $knowledgeBase->citation_required,
+            'source_file_path' => trim((string) ($knowledgeBase->source_file_path ?? '')),
+            'source_file_hash' => trim((string) ($knowledgeBase->source_file_hash ?? '')),
         ], static fn ($value): bool => $value !== null && $value !== '');
     }
 
@@ -298,7 +308,29 @@ class KnowledgeRetrievalService
     private function knowledgeBaseSelectColumns(): array
     {
         $columns = ['id', 'name', 'description'];
-        foreach (['source_name', 'source_url', 'source_type', 'business_line', 'effective_date', 'risk_level', 'review_status'] as $column) {
+        foreach ([
+            'source_name',
+            'source_url',
+            'source_type',
+            'business_line',
+            'effective_date',
+            'risk_level',
+            'review_status',
+            'brand_id',
+            'site_id',
+            'primary_directory_id',
+            'canonical_document_key',
+            'language_code',
+            'authority_level',
+            'retrieved_at',
+            'review_due_at',
+            'version_label',
+            'lifecycle_status',
+            'generation_eligible',
+            'citation_required',
+            'source_file_path',
+            'source_file_hash',
+        ] as $column) {
             if (Schema::hasColumn('knowledge_bases', $column)) {
                 $columns[] = $column;
             }
@@ -324,7 +356,58 @@ class KnowledgeRetrievalService
      */
     private function mergeMetadata(array $base, array $chunk): array
     {
-        return array_replace($base, array_filter($chunk, static fn ($value): bool => $value !== null && $value !== ''));
+        $chunkSpecific = array_intersect_key(
+            array_filter($chunk, static fn ($value): bool => $value !== null && $value !== ''),
+            array_flip(['block_indexes', 'source_block_indexes']),
+        );
+
+        return array_replace($chunkSpecific, $base);
+    }
+
+    /**
+     * @return Builder<KnowledgeBase>
+     */
+    private function scopedKnowledgeBaseQuery(KnowledgeScope $scope): Builder
+    {
+        return $this->applyKnowledgeScope(KnowledgeBase::query(), $scope);
+    }
+
+    /**
+     * @param  Builder<KnowledgeBase>  $query
+     * @return Builder<KnowledgeBase>
+     */
+    private function applyKnowledgeScope(Builder $query, KnowledgeScope $scope): Builder
+    {
+        return $query
+            ->where('brand_id', $scope->brandId)
+            ->where('site_id', $scope->siteId)
+            ->where('language_code', $scope->languageCode)
+            ->where('lifecycle_status', 'active')
+            ->where('generation_eligible', true)
+            ->when(
+                $scope->directoryId !== null,
+                fn (Builder $query): Builder => $query->where('primary_directory_id', $scope->directoryId),
+            )
+            ->when(
+                $scope->keywordClusterId !== null,
+                fn (Builder $query): Builder => $query->whereHas(
+                    'keywordClusters',
+                    fn (Builder $clusterQuery): Builder => $clusterQuery->whereKey($scope->keywordClusterId),
+                ),
+            );
+    }
+
+    /**
+     * @return Builder<KnowledgeChunk>
+     */
+    private function scopedChunkQuery(KnowledgeScope $scope, int $knowledgeBaseId): Builder
+    {
+        return KnowledgeChunk::query()
+            ->where('knowledge_base_id', $knowledgeBaseId)
+            ->whereHas(
+                'knowledgeBase',
+                fn (Builder $query): Builder => $this->applyKnowledgeScope($query, $scope),
+            );
     }
 
     /**
@@ -334,26 +417,23 @@ class KnowledgeRetrievalService
      * @param  array<int,float>  $pgvectorScores
      * @return list<KnowledgeChunk>
      */
-    private function loadCandidateRows(int $knowledgeBaseId, array $queryTerms, array $pgvectorScores, int $candidateLimit): array
+    private function loadCandidateRows(KnowledgeScope $scope, int $knowledgeBaseId, array $queryTerms, array $pgvectorScores, int $candidateLimit): array
     {
-        $chunkCount = KnowledgeChunk::query()
-            ->where('knowledge_base_id', $knowledgeBaseId)
-            ->count();
+        $chunkCount = $this->scopedChunkQuery($scope, $knowledgeBaseId)->count();
 
         if ($chunkCount <= self::FULL_SCAN_CHUNK_LIMIT) {
-            return KnowledgeChunk::query()
-                ->where('knowledge_base_id', $knowledgeBaseId)
+            return $this->scopedChunkQuery($scope, $knowledgeBaseId)
                 ->orderBy('chunk_index')
                 ->get($this->knowledgeChunkSelectColumns())
                 ->all();
         }
 
         $rowsByIndex = [];
-        foreach ($this->fetchRowsByChunkIndexes($knowledgeBaseId, array_keys($pgvectorScores)) as $row) {
+        foreach ($this->fetchRowsByChunkIndexes($scope, $knowledgeBaseId, array_keys($pgvectorScores)) as $row) {
             $rowsByIndex[(int) ($row->chunk_index ?? 0)] = $row;
         }
 
-        foreach ($this->fetchKeywordCandidateRows($knowledgeBaseId, $queryTerms, $candidateLimit) as $row) {
+        foreach ($this->fetchKeywordCandidateRows($scope, $knowledgeBaseId, $queryTerms, $candidateLimit) as $row) {
             $rowsByIndex[(int) ($row->chunk_index ?? 0)] = $row;
         }
 
@@ -383,15 +463,14 @@ class KnowledgeRetrievalService
      * @param  list<int>  $chunkIndexes
      * @return list<KnowledgeChunk>
      */
-    private function fetchRowsByChunkIndexes(int $knowledgeBaseId, array $chunkIndexes): array
+    private function fetchRowsByChunkIndexes(KnowledgeScope $scope, int $knowledgeBaseId, array $chunkIndexes): array
     {
         $chunkIndexes = array_values(array_unique(array_map('intval', $chunkIndexes)));
         if ($chunkIndexes === []) {
             return [];
         }
 
-        return KnowledgeChunk::query()
-            ->where('knowledge_base_id', $knowledgeBaseId)
+        return $this->scopedChunkQuery($scope, $knowledgeBaseId)
             ->whereIn('chunk_index', $chunkIndexes)
             ->orderBy('chunk_index')
             ->get($this->knowledgeChunkSelectColumns())
@@ -402,15 +481,14 @@ class KnowledgeRetrievalService
      * @param  array<string,int>  $queryTerms
      * @return list<KnowledgeChunk>
      */
-    private function fetchKeywordCandidateRows(int $knowledgeBaseId, array $queryTerms, int $candidateLimit): array
+    private function fetchKeywordCandidateRows(KnowledgeScope $scope, int $knowledgeBaseId, array $queryTerms, int $candidateLimit): array
     {
         $terms = $this->candidateQueryTerms($queryTerms);
         if ($terms === []) {
             return [];
         }
 
-        return KnowledgeChunk::query()
-            ->where('knowledge_base_id', $knowledgeBaseId)
+        return $this->scopedChunkQuery($scope, $knowledgeBaseId)
             ->where(function ($query) use ($terms): void {
                 foreach ($terms as $term) {
                     $like = '%'.mb_strtolower($term, 'UTF-8').'%';
@@ -453,10 +531,9 @@ class KnowledgeRetrievalService
         return min(self::MAX_PREFILTER_ROWS, max(80, max(1, $candidateLimit) * 12));
     }
 
-    private function knowledgeBaseHasRealEmbeddingRows(int $knowledgeBaseId): bool
+    private function knowledgeBaseHasRealEmbeddingRows(KnowledgeScope $scope, int $knowledgeBaseId): bool
     {
-        return KnowledgeChunk::query()
-            ->where('knowledge_base_id', $knowledgeBaseId)
+        return $this->scopedChunkQuery($scope, $knowledgeBaseId)
             ->whereNotNull('embedding_model_id')
             ->where('embedding_model_id', '>', 0)
             ->where('embedding_dimensions', '>', 0)
@@ -464,7 +541,7 @@ class KnowledgeRetrievalService
     }
 
     /**
-     * 同主题证据只保留最可信版本，避免新旧资料同时进入提示词造成生成冲突。
+     * 同一规范文档只保留最可信版本，避免新旧资料同时进入提示词造成生成冲突。
      *
      * @param  list<array<string,mixed>>  $scored
      * @return list<array<string,mixed>>
@@ -473,7 +550,7 @@ class KnowledgeRetrievalService
     {
         $groups = [];
         foreach ($scored as $candidate) {
-            $groups[$this->conflictTopicKey($candidate)][] = $candidate;
+            $groups[$this->conflictDocumentKey($candidate)][] = $candidate;
         }
 
         $resolved = [];
@@ -495,103 +572,84 @@ class KnowledgeRetrievalService
                 continue;
             }
 
-            $winner = $group[0];
-            foreach (array_slice($group, 1) as $candidate) {
-                if ($this->compareEvidenceAuthority($candidate, $winner) > 0) {
-                    $winner = $candidate;
+            $documents = [];
+            foreach ($group as $candidate) {
+                $metadata = is_array($candidate['metadata'] ?? null) ? $candidate['metadata'] : [];
+                $documents[(int) ($metadata['knowledge_base_id'] ?? 0)][] = $candidate;
+            }
+
+            $winningDocumentId = array_key_first($documents);
+            $winningRepresentative = null;
+            foreach ($documents as $knowledgeBaseId => $candidates) {
+                $representative = $candidates[0];
+                foreach (array_slice($candidates, 1) as $candidate) {
+                    if ($this->compareRankedEvidence($candidate, $representative) < 0) {
+                        $representative = $candidate;
+                    }
+                }
+
+                if ($winningRepresentative === null || $this->compareRankedEvidence($representative, $winningRepresentative) < 0) {
+                    $winningDocumentId = $knowledgeBaseId;
+                    $winningRepresentative = $representative;
                 }
             }
 
-            $winner['conflict_merged_count'] = count($group) - 1;
-            $resolved[] = $winner;
+            $winningCandidates = $documents[$winningDocumentId] ?? [];
+            $mergedCount = count($group) - count($winningCandidates);
+            $seenChunks = [];
+            foreach ($winningCandidates as $candidate) {
+                $chunkIdentity = sha1(implode('|', [
+                    (string) ($candidate['chunk_title'] ?? ''),
+                    (string) ($candidate['section_path'] ?? ''),
+                    (string) ($candidate['content'] ?? ''),
+                ]));
+                if (isset($seenChunks[$chunkIdentity])) {
+                    continue;
+                }
+                $seenChunks[$chunkIdentity] = true;
+                $candidate['conflict_merged_count'] = $mergedCount;
+                $resolved[] = $candidate;
+            }
         }
 
         return $resolved;
     }
 
     /**
-     * 同标题/章节不一定冲突，可能只是同一章节被切成多段。
-     * 只有出现资料时间差异时，才把它当作同主题新旧版本来归并。
+     * 只有不同文档记录共享规范文档身份时，才把它们当作版本归并。
      *
      * @param  list<array<string,mixed>>  $group
      */
     private function hasVersionConflictSignal(array $group): bool
     {
-        $dates = [];
-        foreach ($group as $candidate) {
+        $knowledgeBaseIds = array_map(static function (array $candidate): int {
             $metadata = is_array($candidate['metadata'] ?? null) ? $candidate['metadata'] : [];
-            $dates[] = trim((string) ($metadata['effective_date'] ?? ''));
-        }
 
-        $dates = array_values(array_unique($dates));
+            return (int) ($metadata['knowledge_base_id'] ?? 0);
+        }, $group);
 
-        return count($dates) > 1 && count(array_filter($dates, static fn (string $date): bool => $date !== '')) > 0;
+        return count(array_unique(array_filter($knowledgeBaseIds))) > 1;
     }
 
     /**
      * @param  array<string,mixed>  $candidate
      */
-    private function conflictTopicKey(array $candidate): string
-    {
-        $title = $this->normalizeTopicKey((string) ($candidate['chunk_title'] ?? ''));
-        $sectionPath = $this->normalizeTopicKey((string) ($candidate['section_path'] ?? ''));
-
-        if ($title !== '' || $sectionPath !== '') {
-            return 'topic:'.sha1($sectionPath.'|'.$title);
-        }
-
-        return 'chunk:'.(string) ($candidate['chunk_index'] ?? spl_object_id((object) $candidate));
-    }
-
-    private function normalizeTopicKey(string $value): string
-    {
-        $value = mb_strtolower(trim($value), 'UTF-8');
-        $value = preg_replace('/[\s\p{P}\p{S}]+/u', '', $value);
-
-        return is_string($value) ? $value : '';
-    }
-
-    /**
-     * @param  array<string,mixed>  $left
-     * @param  array<string,mixed>  $right
-     */
-    private function compareEvidenceAuthority(array $left, array $right): int
-    {
-        $leftValues = $this->evidenceAuthorityValues($left);
-        $rightValues = $this->evidenceAuthorityValues($right);
-
-        foreach ($leftValues as $index => $leftValue) {
-            $diff = $leftValue <=> $rightValues[$index];
-            if ($diff !== 0) {
-                return $diff;
-            }
-        }
-
-        return 0;
-    }
-
-    /**
-     * @param  array<string,mixed>  $candidate
-     * @return array{int,int,int,float,int}
-     */
-    private function evidenceAuthorityValues(array $candidate): array
+    private function conflictDocumentKey(array $candidate): string
     {
         $metadata = is_array($candidate['metadata'] ?? null) ? $candidate['metadata'] : [];
+        $canonicalDocumentKey = trim((string) ($metadata['canonical_document_key'] ?? ''));
+        if ($canonicalDocumentKey === '') {
+            return 'document:'.(int) ($metadata['knowledge_base_id'] ?? 0);
+        }
 
-        return [
-            $this->reviewStatusRank((string) ($metadata['review_status'] ?? '')),
-            $this->effectiveDateTimestamp((string) ($metadata['effective_date'] ?? '')),
-            $this->riskLevelRank((string) ($metadata['risk_level'] ?? '')),
-            (float) ($candidate['score'] ?? 0.0),
-            -1 * (int) ($candidate['chunk_index'] ?? 0),
-        ];
-    }
+        $identity = implode('|', [
+            (int) ($metadata['brand_id'] ?? 0),
+            (int) ($metadata['site_id'] ?? 0),
+            (string) ($metadata['language_code'] ?? ''),
+            $canonicalDocumentKey,
+        ]);
 
-    private function reviewStatusRank(string $reviewStatus): int
-    {
-        $reviewStatus = strtolower(trim($reviewStatus));
-
-        return in_array($reviewStatus, ['reviewed', 'approved', 'verified'], true) ? 2 : 1;
+        return 'version:'.sha1($identity);
     }
 
     private function riskLevelRank(string $riskLevel): int
@@ -667,6 +725,106 @@ class KnowledgeRetrievalService
         return max(0.0, min(1.0, $score));
     }
 
+    /**
+     * @param  array<string,mixed>  $left
+     * @param  array<string,mixed>  $right
+     */
+    private function compareRankedEvidence(array $left, array $right): int
+    {
+        $governanceDiff = $this->evidenceGovernanceRank($right) <=> $this->evidenceGovernanceRank($left);
+        if ($governanceDiff !== 0) {
+            return $governanceDiff;
+        }
+
+        $freshnessDiff = $this->evidenceFreshnessTimestamp($right) <=> $this->evidenceFreshnessTimestamp($left);
+        if ($freshnessDiff !== 0) {
+            return $freshnessDiff;
+        }
+
+        $scoreDiff = ((float) ($right['score'] ?? 0.0)) <=> ((float) ($left['score'] ?? 0.0));
+        if ($scoreDiff !== 0) {
+            return $scoreDiff;
+        }
+
+        $knowledgeBaseRankDiff = ((int) ($left['knowledge_base_rank'] ?? 0)) <=> ((int) ($right['knowledge_base_rank'] ?? 0));
+
+        return $knowledgeBaseRankDiff !== 0
+            ? $knowledgeBaseRankDiff
+            : ((int) ($left['chunk_index'] ?? 0) <=> (int) ($right['chunk_index'] ?? 0));
+    }
+
+    /**
+     * @param  array<string,mixed>  $candidate
+     */
+    private function evidenceGovernanceRank(array $candidate): int
+    {
+        $metadata = is_array($candidate['metadata'] ?? null) ? $candidate['metadata'] : [];
+        $authorityLevel = strtolower(trim((string) ($metadata['authority_level'] ?? '')));
+        $directoryKey = strtolower(trim((string) ($metadata['directory_key'] ?? '')));
+        $directoryPath = strtolower(trim((string) ($metadata['directory_path'] ?? '')));
+        $reviewStatus = strtolower(trim((string) ($metadata['review_status'] ?? '')));
+
+        $rank = match ($authorityLevel) {
+            'first_party' => 40,
+            'regulatory_filing' => 30,
+            'mixed_research' => 10,
+            'third_party' => 5,
+            default => 0,
+        };
+
+        if (in_array($reviewStatus, ['reviewed', 'approved', 'verified'], true)) {
+            $rank += 20;
+        }
+
+        if ($authorityLevel === 'first_party'
+            && ($directoryKey === 'policy-compliance' || str_starts_with($directoryPath, 'policy-compliance'))) {
+            $rank += 40;
+        }
+
+        return $rank + $this->riskLevelRank((string) ($metadata['risk_level'] ?? ''));
+    }
+
+    /**
+     * @param  array<string,mixed>  $candidate
+     */
+    private function evidenceFreshnessTimestamp(array $candidate): int
+    {
+        $metadata = is_array($candidate['metadata'] ?? null) ? $candidate['metadata'] : [];
+
+        return max(
+            $this->effectiveDateTimestamp((string) ($metadata['effective_date'] ?? '')),
+            $this->effectiveDateTimestamp((string) ($metadata['retrieved_at'] ?? '')),
+        );
+    }
+
+    /**
+     * @param  list<array<string,mixed>>  $evidence
+     * @return list<array<string,mixed>>
+     */
+    private function withEvidenceReferences(array $evidence): array
+    {
+        foreach ($evidence as $index => &$candidate) {
+            $metadata = is_array($candidate['metadata'] ?? null) ? $candidate['metadata'] : [];
+            $candidate['citation_id'] = 'K'.($index + 1);
+            $candidate['provenance'] = array_filter([
+                'knowledge_base_id' => $metadata['knowledge_base_id'] ?? null,
+                'canonical_document_key' => $metadata['canonical_document_key'] ?? null,
+                'source_name' => $metadata['source_name'] ?? null,
+                'source_url' => $metadata['source_url'] ?? null,
+                'source_type' => $metadata['source_type'] ?? null,
+                'source_file_path' => $metadata['source_file_path'] ?? null,
+                'source_file_hash' => $metadata['source_file_hash'] ?? null,
+                'effective_date' => $metadata['effective_date'] ?? null,
+                'retrieved_at' => $metadata['retrieved_at'] ?? null,
+                'authority_level' => $metadata['authority_level'] ?? null,
+                'citation_required' => $metadata['citation_required'] ?? null,
+            ], static fn ($value): bool => $value !== null && $value !== '');
+        }
+        unset($candidate);
+
+        return $evidence;
+    }
+
     private function localVectorScore(object $row, array $queryVector, bool $useRealEmbeddingScore): float
     {
         $vector = $this->decodeVector((string) ($row->embedding_json ?? ''));
@@ -691,7 +849,7 @@ class KnowledgeRetrievalService
     /**
      * @return array<int,float>
      */
-    private function fetchPgvectorScores(int $knowledgeBaseId, string $query, int $candidateLimit): array
+    private function fetchPgvectorScores(KnowledgeScope $scope, int $knowledgeBaseId, string $query, int $candidateLimit): array
     {
         if (! $this->canUsePgvectorSearch()) {
             return [];
@@ -703,18 +861,14 @@ class KnowledgeRetrievalService
         }
 
         try {
-            $rows = DB::select(
-                '
-                    SELECT chunk_index,
-                           (embedding_vector <=> CAST(? AS vector)) AS vector_distance
-                    FROM knowledge_chunks
-                    WHERE knowledge_base_id = ?
-                      AND embedding_vector IS NOT NULL
-                    ORDER BY embedding_vector <=> CAST(? AS vector), chunk_index ASC
-                    LIMIT ?
-                ',
-                [$vectorLiteral, $knowledgeBaseId, $vectorLiteral, max(1, $candidateLimit)]
-            );
+            $rows = $this->scopedChunkQuery($scope, $knowledgeBaseId)
+                ->whereNotNull('embedding_vector')
+                ->select(['chunk_index'])
+                ->selectRaw('(embedding_vector <=> CAST(? AS vector)) AS vector_distance', [$vectorLiteral])
+                ->orderByRaw('embedding_vector <=> CAST(? AS vector)', [$vectorLiteral])
+                ->orderBy('chunk_index')
+                ->limit(max(1, $candidateLimit))
+                ->get();
         } catch (Throwable) {
             return [];
         }

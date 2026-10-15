@@ -43,6 +43,47 @@ class WordPressTaxonomySyncService
             return [];
         }
 
+        // Map the coarse GEOFlow category to the more granular WordPress
+        // taxonomy when the article's title/keywords provide a clear signal.
+        // The mapping is channel-local and can be overridden in
+        // channel_config.wordpress_category_mapping.
+        $text = Str::lower(trim($name.' '.(string) ($article['title'] ?? '').' '.(string) ($article['keywords'] ?? '')));
+        $mapping = $config['wordpress_category_mapping'] ?: [
+            'Style & Buying Guides' => [
+                'Women\'s Fashion' => ['women', 'dress', 'skirt', 'blouse', 'heels', 'jumpsuit'],
+                'Men\'s Fashion' => ['men', 'mens', 'shirt', 'jeans', 'suit', 'blazer'],
+                'Electronics & Accessories' => ['phone', 'electronics', 'dash cam', 'accessory', 'charger'],
+                'Kids, Sports & Lifestyle' => ['kids', 'children', 'baby', 'sports', 'activewear'],
+            ],
+            'Inspiration & Occasions' => [
+                'Weddings & Occasionwear' => ['wedding', 'bride', 'bridesmaid', 'occasionwear', 'formal'],
+                'Costumes & Cosplay' => ['costume', 'cosplay', 'halloween'],
+                'Home & Garden' => ['home', 'garden', 'bedroom', 'bathroom', 'lighting', 'decor'],
+            ],
+            'Comparisons' => [
+                'Electronics & Accessories' => ['phone', 'electronics', 'dash cam', 'accessory'],
+                'Men\'s Fashion' => ['men', 'mens'],
+                'Women\'s Fashion' => ['women', 'dress', 'skirt'],
+            ],
+            'FAQ & Help Center' => ['FAQ & Help Center'],
+            'Shipping, Payment & Returns' => ['Shipping, Payment & Returns'],
+            'About LightInTheBox' => ['About LightInTheBox'],
+        ];
+        $targets = $mapping[$name] ?? [];
+        if (is_array($targets)) {
+            if (array_is_list($targets)) {
+                $targets = [$name => $targets];
+            }
+            foreach ($targets as $target => $signals) {
+                foreach ((array) $signals as $signal) {
+                    if ($signal !== '' && str_contains($text, Str::lower((string) $signal))) {
+                        $name = (string) $target;
+                        break 2;
+                    }
+                }
+            }
+        }
+
         $slug = trim((string) ($category['slug'] ?? ''));
         $slug = $slug !== '' ? $this->slug($slug) : $this->slug($name);
         $matchedId = $this->findTermId($channel, 'categories', $slug);

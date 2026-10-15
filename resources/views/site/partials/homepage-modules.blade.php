@@ -127,7 +127,10 @@
                             <p class="geo-home-module__body">{{ $body }}</p>
                         @endif
                         @if($linkText !== '' && $linkUrl !== '')
-                            <a href="{{ $linkUrl }}" class="geo-home-module__link">{{ $linkText }}</a>
+                            @php
+                                $isExternalLink = str_starts_with($linkUrl, 'http://') || str_starts_with($linkUrl, 'https://');
+                            @endphp
+                            <a href="{{ $linkUrl }}" class="geo-home-module__link" @if($isExternalLink) target="_blank" rel="noopener" @endif>{{ $linkText }}</a>
                         @endif
                     </div>
                     @if($imageUrl !== '')

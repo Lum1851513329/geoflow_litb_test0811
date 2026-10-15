@@ -1,16 +1,84 @@
 <?php
 
 $base = require __DIR__.'/../en/admin.php';
+$featureFallback = $base;
+if (! isset($featureFallback['content_strategy']) && function_exists('lang_path')) {
+    $featureFallback = require lang_path('en/admin.php');
+}
 $manualPublicationsPath = __DIR__.'/manual_publications.php';
 if (! is_file($manualPublicationsPath) && function_exists('lang_path')) {
     $manualPublicationsPath = lang_path('pt_BR/manual_publications.php');
 }
 
 return array_replace_recursive($base, [
+    // These newly introduced administration surfaces intentionally use the
+    // established English fallback until their Portuguese copy is translated.
+    'content_center' => $featureFallback['content_center'],
+    'content_strategy' => $featureFallback['content_strategy'],
+    'prompt_modules' => $featureFallback['prompt_modules'],
+    'prompt_presets' => $featureFallback['prompt_presets'],
+    'keyword_intelligence' => [
+        'nav' => ['overview' => 'Inteligência de palavras-chave', 'import' => 'Importar planilha', 'taxonomy' => 'Taxonomia', 'clusters' => 'Clusters de tópicos'],
+        'legacy_libraries' => 'Bibliotecas de palavras-chave anteriores',
+        'overview' => [
+            'title' => 'Inteligência de palavras-chave',
+            'subtitle' => 'Gerencie palavras-chave normalizadas, importações auditáveis, taxonomias, clusters e pontuações de oportunidade.',
+            'classification' => [
+                'title' => 'Visão geral da classificação',
+                'total_keywords' => 'Total de palavras-chave',
+                'total_nodes' => 'Nós da taxonomia',
+                'total_clusters' => 'Clusters confirmados',
+                'categories_title' => 'Categorias de nível superior',
+                'categories_empty' => 'Ainda não há categorias de nível superior.',
+                'category_name' => 'Categoria',
+                'category_own' => 'Palavras-chave diretas',
+                'category_subtree_nodes' => 'Nós da subárvore',
+                'category_subtree_keywords' => 'Palavras-chave da subárvore',
+                'by_type' => 'Por tipo de palavra-chave',
+                'by_intent' => 'Por intenção de busca',
+                'by_language' => 'Por idioma (top 10)',
+            ],
+        ],
+        'filters' => ['search' => 'Buscar palavra-chave', 'type' => 'Tipo', 'intent' => 'Intenção', 'language' => 'Idioma', 'market' => 'Mercado', 'apply' => 'Aplicar filtros'],
+        'columns' => ['keyword' => 'Palavra-chave', 'type' => 'Tipo', 'intent' => 'Intenção', 'scope' => 'Localidade / mercado', 'cluster' => 'Cluster', 'primary' => 'Palavra-chave principal', 'score' => 'Pontuação de oportunidade', 'status' => 'Status'],
+        'import' => [
+            'title' => 'Importação de planilha de palavras-chave',
+            'read_only_notice' => 'A pré-visualização apenas lê a planilha. Nenhum registro de palavra-chave é gravado antes da confirmação.',
+            'preview_title' => 'Pré-visualização somente leitura',
+            'preview_counts' => ':total_rows linhas: :valid_rows válidas e :rejected_rows rejeitadas.',
+            'confirm_title' => 'Confirmar este arquivo pré-visualizado',
+            'choose_library' => 'Escolha uma biblioteca de palavras-chave',
+            'recent' => 'Importações recentes',
+            'ignore_column' => 'Ignorar coluna',
+            'failed_recovery' => 'Revise o erro, corrija a planilha ou o mapeamento e gere uma nova pré-visualização. Este lote com falha pode ser revertido com segurança.',
+        ],
+        'taxonomy' => ['title' => 'Taxonomia de palavras-chave', 'root' => 'Nível raiz', 'node_name' => 'Nome do nó', 'keyword_results' => 'Seletor de palavras-chave filtradas'],
+        'clusters' => ['title' => 'Clusters de tópicos', 'suggestions' => 'Candidatos gerados pelo servidor', 'keywords' => 'palavras-chave', 'no_suggestions' => 'Nenhum candidato elegível corresponde aos filtros atuais.'],
+        'score' => ['components' => 'Componentes da pontuação', 'penalties' => 'Penalidades'],
+        'actions' => ['preview' => 'Pré-visualizar', 'confirm_import' => 'Confirmar e colocar importação na fila', 'revert' => 'Reverter', 'create' => 'Criar nó', 'move' => 'Mover', 'assign' => 'Atribuir palavras-chave', 'recompute' => 'Recalcular pontuação', 'confirm_cluster' => 'Confirmar candidato'],
+        'status' => ['empty' => 'Ainda não há importações.', 'uploaded' => 'Na fila', 'processing' => 'Importando', 'failed' => 'Falhou', 'completed' => 'Concluída', 'reverting' => 'Revertendo', 'reverted' => 'Revertida'],
+        'empty' => ['keywords' => 'Nenhuma palavra-chave corresponde aos filtros.', 'nodes' => 'Ainda não há nós.', 'taxonomies' => 'Nenhuma taxonomia configurada.', 'clusters' => 'Ainda não há clusters confirmados.', 'scores' => 'Nenhuma pontuação de oportunidade foi calculada.'],
+        'messages' => ['import_queued' => 'A importação de palavras-chave foi colocada na fila.', 'reverted' => 'A importação foi revertida e suas linhas de auditoria foram preservadas.', 'node_created' => 'Nó da taxonomia criado.', 'node_moved' => 'Nó da taxonomia movido.', 'keywords_assigned' => 'Palavras-chave atribuídas.', 'cluster_confirmed' => 'Cluster confirmado.', 'score_updated' => 'Pontuação de oportunidade recalculada.'],
+        'validation' => [
+            'attributes' => ['workbook' => 'planilha', 'source_type' => 'tipo de origem', 'library_id' => 'biblioteca de palavras-chave', 'language_code' => 'idioma', 'market_code' => 'mercado', 'period_start' => 'início do período', 'period_end' => 'fim do período', 'preview_token' => 'sessão de pré-visualização'],
+            'duplicate_mapping' => 'Cada campo padrão pode ser mapeado apenas uma vez.',
+            'keyword_mapping_required' => 'Mapeie exatamente uma coluna da planilha como palavra-chave.',
+            'preview_token_invalid' => 'A pré-visualização expirou ou não corresponde mais à planilha controlada. Gere uma nova pré-visualização.',
+            'workbook_invalid' => 'Não foi possível pré-visualizar a planilha com segurança.',
+            'preview_failed' => 'Não foi possível armazenar a pré-visualização devido a um erro temporário do servidor.',
+            'import_failed' => 'Não foi possível criar o lote de importação devido a um erro temporário do servidor.',
+            'dispatch_failed' => 'O lote de importação foi salvo, mas não pôde ser colocado na fila. Ele foi marcado como falho para revisão e nova tentativa seguras.',
+            'revert_status' => 'Apenas importações concluídas ou com falha podem ser revertidas.',
+            'cluster_invalid' => 'A sugestão de cluster está incompleta ou entra em conflito com os limites atuais das palavras-chave.',
+            'taxonomy_invalid' => 'A operação de taxonomia entra em conflito com a hierarquia atual.',
+            'score_invalid' => 'Não foi possível calcular a pontuação para este cluster e período.',
+        ],
+    ],
     'manual_publications' => require $manualPublicationsPath,
     'nav' => [
         'dashboard' => 'Painel',
         'tasks' => 'Tarefas',
+        'bulk_content_import' => 'Importação em massa',
         'articles' => 'Artigos',
         'materials' => 'Ativos de conteúdo',
         'ai_config' => 'Configuração de IA',
@@ -24,6 +92,7 @@ return array_replace_recursive($base, [
         'api_tokens' => 'Tokens de API',
         'analytics' => 'Análise de Dados',
         'distribution' => 'Distribuição',
+        'content_strategy' => 'Estratégia de conteúdo',
     ],
     'header' => [
         'welcome' => 'Bem-vindo, :name',
@@ -2671,7 +2740,9 @@ return array_replace_recursive($base, [
         ],
         'help_variables' => 'Suporte a variáveis: {{content}}, {{title}} e {{keyword}}, além de blocos condicionais com {{#if keyword}}...{{/if}}.',
     ],
-    'knowledge_bases' => [
+    // This governed-knowledge module keeps its translated core copy below and
+    // falls back to English for any newer keys not yet translated.
+    'knowledge_bases' => array_replace_recursive($featureFallback['knowledge_bases'], [
         'page_title' => 'Gerenciamento de Base de Conhecimento',
         'heading' => 'Gerenciamento de Base de Conhecimento',
         'subtitle' => 'Gerencie documentos para referência de IA',
@@ -2850,7 +2921,7 @@ return array_replace_recursive($base, [
             'ready' => 'Fragmentos Prontos',
             'failed' => 'Falha no Processamento',
         ],
-    ],
+    ]),
     'enterprise_knowledge' => [
         'page_title' => 'Resumo de Conhecimento Empresarial',
         'index_heading' => 'Resumo de Conhecimento Empresarial',
@@ -3007,7 +3078,9 @@ return array_replace_recursive($base, [
             'generic_template_residue' => 'Foram detectados números de fonte ou resíduos de modelo genérico. Substitua por texto formal pronto para publicação.',
         ],
     ],
-    'knowledge_detail' => [
+    // Same intentional-fallback approach: keep the translated core copy below
+    // and fall back to English for any newer keys not yet translated.
+    'knowledge_detail' => array_replace_recursive($featureFallback['knowledge_detail'], [
         'page_title' => 'Detalhes da Base de Conhecimento',
         'heading' => 'Detalhes da Base de Conhecimento',
         'subtitle' => 'Visualize e edite o conteúdo da base de conhecimento',
@@ -3044,7 +3117,7 @@ return array_replace_recursive($base, [
         'chunk_strategy_structured_rule' => 'Regras Estruturadas',
         'chunk_strategy_semantic_llm' => 'Planejamento Semântico',
         'chunk_strategy_semantic_fallback' => 'Fallback Semântico',
-    ],
+    ]),
     'title_detail' => [
         'page_title_suffix' => ' - Detalhes da Biblioteca de Títulos',
         'subtitle' => 'Gerenciar detalhes da biblioteca de títulos',

@@ -9,6 +9,9 @@ use App\Models\Image;
 use App\Models\ImageLibrary;
 use App\Models\KeywordLibrary;
 use App\Models\KnowledgeBase;
+use App\Models\KnowledgeBrand;
+use App\Models\KnowledgeDirectory;
+use App\Models\KnowledgeSite;
 use App\Models\Prompt;
 use App\Models\Task;
 use App\Models\TitleLibrary;
@@ -57,6 +60,50 @@ class AdminMaterialsPagesTest extends TestCase
             'total_used' => 0,
             'status' => 'active',
         ]);
+    }
+
+    /**
+     * @param  array<string, mixed>  $overrides
+     * @return array<string, mixed>
+     */
+    private function governedKnowledgePayload(array $overrides = []): array
+    {
+        $brand = KnowledgeBrand::query()->firstOrCreate(
+            ['key' => 'materials-test-brand'],
+            ['name' => 'Materials Test Brand'],
+        );
+        $site = KnowledgeSite::query()->firstOrCreate(
+            ['brand_id' => $brand->id, 'key' => 'materials-test-site'],
+            ['canonical_host' => 'materials.test', 'role' => 'commerce-primary'],
+        );
+        $directory = KnowledgeDirectory::query()->firstOrCreate(
+            ['brand_id' => $brand->id, 'path' => 'brand-company'],
+            ['key' => 'brand-company', 'name' => 'Brand & Company'],
+        );
+
+        return array_replace([
+            'brand_id' => $brand->id,
+            'site_id' => $site->id,
+            'primary_directory_id' => $directory->id,
+            'language_code' => 'en',
+            'authority_level' => 'first_party',
+            'source_name' => 'Materials test source',
+            'source_type' => 'document',
+            'risk_level' => 'medium',
+            'review_status' => 'reviewed',
+            'lifecycle_status' => 'active',
+            'generation_eligible' => '0',
+            'citation_required' => '1',
+        ], $overrides);
+    }
+
+    /**
+     * @param  array<string, mixed>  $overrides
+     * @return array<string, mixed>
+     */
+    private function governedKnowledgeAttributes(array $overrides = []): array
+    {
+        return $this->governedKnowledgePayload($overrides);
     }
 
     public function test_guest_is_redirected_from_material_pages(): void
@@ -218,7 +265,7 @@ class AdminMaterialsPagesTest extends TestCase
         ]);
 
         $response = $this->actingAs($admin, 'admin')
-            ->post(route('admin.knowledge-bases.store'), [
+            ->post(route('admin.knowledge-bases.store'), $this->governedKnowledgePayload([
                 'name' => '测试知识库',
                 'description' => '测试描述',
                 'file_type' => 'markdown',
@@ -230,7 +277,7 @@ class AdminMaterialsPagesTest extends TestCase
                 'effective_date' => '2026-05-01',
                 'risk_level' => 'low',
                 'review_status' => 'reviewed',
-            ]);
+            ]));
 
         $response->assertRedirect(route('admin.knowledge-bases.index'));
         $this->assertDatabaseHas('knowledge_bases', [
@@ -261,7 +308,7 @@ class AdminMaterialsPagesTest extends TestCase
         ]);
 
         $this->actingAs($admin, 'admin')
-            ->post(route('admin.knowledge-bases.store'), [
+            ->post(route('admin.knowledge-bases.store'), $this->governedKnowledgePayload([
                 'name' => '批量合并知识库',
                 'description' => '多文件合并测试',
                 'file_type' => 'markdown',
@@ -270,7 +317,7 @@ class AdminMaterialsPagesTest extends TestCase
                     UploadedFile::fake()->createWithContent('alpha.md', "# Alpha\nMarkdown 内容"),
                     UploadedFile::fake()->createWithContent('beta.txt', 'Beta 文本内容'),
                 ],
-            ])
+            ]))
             ->assertRedirect(route('admin.knowledge-bases.index'));
 
         $knowledgeBase = KnowledgeBase::query()->where('name', '批量合并知识库')->firstOrFail();
@@ -301,12 +348,12 @@ class AdminMaterialsPagesTest extends TestCase
         ]);
 
         $this->actingAs($admin, 'admin')
-            ->post(route('admin.knowledge-bases.store'), [
+            ->post(route('admin.knowledge-bases.store'), $this->governedKnowledgePayload([
                 'name' => '',
                 'description' => '',
                 'file_type' => 'markdown',
                 'content' => "# GEO 白皮书\n\n这是一段直接粘贴的知识库内容。",
-            ])
+            ]))
             ->assertRedirect(route('admin.knowledge-bases.index'));
 
         $this->assertDatabaseHas('knowledge_bases', [
@@ -333,13 +380,13 @@ class AdminMaterialsPagesTest extends TestCase
         });
 
         $this->actingAs($admin, 'admin')
-            ->post(route('admin.knowledge-bases.store'), [
+            ->post(route('admin.knowledge-bases.store'), $this->governedKnowledgePayload([
                 'name' => '仅提交知识库',
                 'description' => '',
                 'file_type' => 'markdown',
                 'content' => "# 仅保存\n\n稍后再生成切片。",
                 'import_action' => 'save',
-            ])
+            ]))
             ->assertRedirect(route('admin.knowledge-bases.index'))
             ->assertSessionHas('message', __('admin.knowledge_bases.message.create_saved'));
 
@@ -365,18 +412,18 @@ class AdminMaterialsPagesTest extends TestCase
         });
 
         $this->actingAs($admin, 'admin')
-            ->post(route('admin.knowledge-bases.store'), [
+            ->post(route('admin.knowledge-bases.store'), $this->governedKnowledgePayload([
                 'name' => '已保存但切片失败',
                 'description' => '',
                 'file_type' => 'markdown',
                 'content' => "第一段内容。\n\n第二段内容。",
-            ])
+            ]))
             ->assertRedirect(route('admin.knowledge-bases.index'))
             ->assertSessionHas('message', __('admin.knowledge_bases.message.chunk_sync_queued'));
 
         $this->assertDatabaseHas('knowledge_bases', [
             'name' => '已保存但切片失败',
-            'content' => "第一段内容。\n\n第二段内容。",
+            'content' => "第一段内容。\n\n第二段内容。\n",
         ]);
         $this->assertSame(0, KnowledgeBase::query()->where('name', '已保存但切片失败')->firstOrFail()->chunks()->count());
     }
@@ -400,7 +447,7 @@ class AdminMaterialsPagesTest extends TestCase
         });
 
         $this->actingAs($admin, 'admin')
-            ->post(route('admin.knowledge-bases.store'), [
+            ->post(route('admin.knowledge-bases.store'), $this->governedKnowledgePayload([
                 'name' => '队列故障知识库',
                 'description' => '',
                 'file_type' => 'markdown',
@@ -408,7 +455,7 @@ class AdminMaterialsPagesTest extends TestCase
                     'retry.md',
                     "# 可重试正文\n\n源文件必须保留。",
                 ),
-            ])
+            ]))
             ->assertRedirect(route('admin.knowledge-bases.index'))
             ->assertSessionHasErrors('chunk_sync');
 
@@ -429,14 +476,15 @@ class AdminMaterialsPagesTest extends TestCase
             'status' => 'active',
         ]);
 
-        $knowledgeBase = KnowledgeBase::query()->create([
+        $knowledgeBase = KnowledgeBase::query()->create($this->governedKnowledgeAttributes([
             'name' => '原始知识库',
             'description' => '',
             'content' => '原始内容',
             'character_count' => 4,
             'file_type' => 'markdown',
             'word_count' => 4,
-        ]);
+            'normalized_content_hash' => hash('sha256', '原始内容'),
+        ]));
 
         $this->mock(KnowledgeChunkSyncCoordinator::class, function ($mock): void {
             $mock->shouldReceive('request')->once()->andReturnTrue();
@@ -456,7 +504,8 @@ class AdminMaterialsPagesTest extends TestCase
             'id' => (int) $knowledgeBase->id,
             'name' => '更新后的知识库',
             'description' => '更新说明',
-            'content' => '更新后的正文内容',
+            'content' => "更新后的正文内容\n",
+            'normalized_content_hash' => hash('sha256', "更新后的正文内容\n"),
         ]);
     }
 
@@ -470,14 +519,14 @@ class AdminMaterialsPagesTest extends TestCase
             'role' => 'admin',
             'status' => 'active',
         ]);
-        $knowledgeBase = KnowledgeBase::query()->create([
+        $knowledgeBase = KnowledgeBase::query()->create($this->governedKnowledgeAttributes([
             'name' => '等待更新的知识库',
             'description' => '',
             'content' => '原始内容',
             'character_count' => 4,
             'file_type' => 'markdown',
             'word_count' => 4,
-        ]);
+        ]));
         $this->mock(KnowledgeChunkSyncCoordinator::class, function ($mock): void {
             $mock->shouldReceive('request')
                 ->once()
@@ -497,7 +546,7 @@ class AdminMaterialsPagesTest extends TestCase
         $this->assertDatabaseHas('knowledge_bases', [
             'id' => (int) $knowledgeBase->id,
             'name' => '队列故障后已保存',
-            'content' => '新正文已经入库',
+            'content' => "新正文已经入库\n",
         ]);
     }
 
@@ -521,13 +570,13 @@ class AdminMaterialsPagesTest extends TestCase
 
         $this->actingAs($admin, 'admin')
             ->from(route('admin.knowledge-bases.create'))
-            ->post(route('admin.knowledge-bases.store'), [
+            ->post(route('admin.knowledge-bases.store'), $this->governedKnowledgePayload([
                 'name' => '超量知识库',
                 'description' => '',
                 'file_type' => 'markdown',
                 'content' => '',
                 'knowledge_files' => $files,
-            ])
+            ]))
             ->assertRedirect(route('admin.knowledge-bases.create'))
             ->assertSessionHasErrors('knowledge_files');
 
@@ -551,7 +600,7 @@ class AdminMaterialsPagesTest extends TestCase
 
         $this->actingAs($admin, 'admin')
             ->from(route('admin.knowledge-bases.create'))
-            ->post(route('admin.knowledge-bases.store'), [
+            ->post(route('admin.knowledge-bases.store'), $this->governedKnowledgePayload([
                 'name' => '超大知识库',
                 'description' => '',
                 'file_type' => 'markdown',
@@ -559,7 +608,7 @@ class AdminMaterialsPagesTest extends TestCase
                 'knowledge_files' => [
                     UploadedFile::fake()->create('large.md', 8 * 1024 + 1, 'text/markdown'),
                 ],
-            ])
+            ]))
             ->assertRedirect(route('admin.knowledge-bases.create'))
             ->assertSessionHasErrors('knowledge_files.0');
 
@@ -581,12 +630,12 @@ class AdminMaterialsPagesTest extends TestCase
 
         $this->actingAs($admin, 'admin')
             ->from(route('admin.knowledge-bases.create'))
-            ->post(route('admin.knowledge-bases.store'), [
+            ->post(route('admin.knowledge-bases.store'), $this->governedKnowledgePayload([
                 'name' => '正文超大知识库',
                 'description' => '',
                 'file_type' => 'markdown',
                 'content' => str_repeat('a', (8 * 1024 * 1024) + 1),
-            ])
+            ]))
             ->assertRedirect(route('admin.knowledge-bases.create'))
             ->assertSessionHasErrors('content');
 
@@ -1586,11 +1635,11 @@ class AdminMaterialsPagesTest extends TestCase
         Storage::disk('public')->assertExists(str_replace('storage/', '', (string) $storedImage->file_path));
 
         $knowledgeFile = UploadedFile::fake()->createWithContent('manual.md', "# 标题\n内容段落");
-        $this->actingAs($admin, 'admin')->post(route('admin.knowledge-bases.upload'), [
+        $this->actingAs($admin, 'admin')->post(route('admin.knowledge-bases.upload'), $this->governedKnowledgePayload([
             'name' => '上传知识库',
             'description' => '测试上传',
             'knowledge_file' => $knowledgeFile,
-        ])->assertRedirect(route('admin.knowledge-bases.index'));
+        ]))->assertRedirect(route('admin.knowledge-bases.index'));
 
         $this->assertDatabaseHas('knowledge_bases', [
             'name' => '上传知识库',

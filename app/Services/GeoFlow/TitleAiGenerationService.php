@@ -42,7 +42,8 @@ class TitleAiGenerationService
         array $keywords,
         int $count,
         string $style,
-        string $customPrompt = ''
+        string $customPrompt = '',
+        string $outputLanguage = 'en',
     ): array {
         $reservation = null;
 
@@ -52,9 +53,9 @@ class TitleAiGenerationService
                 throw new \RuntimeException('ai_daily_limit_reached');
             }
 
-            $content = $this->requestTitlesFromModel($aiModel, $keywords, $count, $style, $customPrompt);
-            $titles = $this->parseGeneratedTitles($content);
-            if ($titles !== []) {
+            $content = $this->requestTitlesFromModel($aiModel, $keywords, $count, $style, $customPrompt, $outputLanguage);
+            $items = array_slice($this->parseGeneratedItems($content, $keywords, $outputLanguage), 0, $count);
+            if ($items !== []) {
                 try {
                     $this->usageQuota->recordModelSuccess($reservation);
                 } catch (Throwable $exception) {
@@ -62,7 +63,8 @@ class TitleAiGenerationService
                 }
 
                 return [
-                    'titles' => $titles,
+                    'titles' => array_column($items, 'title'),
+                    'items' => $items,
                     'fallback_used' => false,
                     'fallback_reason' => null,
                 ];
@@ -73,7 +75,8 @@ class TitleAiGenerationService
             }
 
             return [
-                'titles' => $this->generateMockTitles($keywords, $count, $style),
+                'titles' => array_column($items = $this->generateMockTitleItems($keywords, $count, $style), 'title'),
+                'items' => $items,
                 'fallback_used' => true,
                 'fallback_reason' => $exception->getMessage(),
             ];
@@ -84,7 +87,8 @@ class TitleAiGenerationService
         }
 
         return [
-            'titles' => $this->generateMockTitles($keywords, $count, $style),
+            'titles' => array_column($items = $this->generateMockTitleItems($keywords, $count, $style), 'title'),
+            'items' => $items,
             'fallback_used' => true,
             'fallback_reason' => 'empty_result',
         ];
@@ -100,7 +104,8 @@ class TitleAiGenerationService
         array $keywords,
         int $count,
         string $style,
-        string $customPrompt
+        string $customPrompt,
+        string $outputLanguage,
     ): string {
         $providerUrl = OpenAiRuntimeProvider::resolveChatBaseUrl((string) ($aiModel->api_url ?? ''));
         if ($providerUrl === '') {
@@ -116,21 +121,23 @@ class TitleAiGenerationService
         $providerName = OpenAiRuntimeProvider::registerProvider('title_ai', $driver, $providerUrl, $apiKey);
 
         $styleMap = [
-            'professional' => '专业严谨的',
-            'attractive' => '吸引眼球的',
-            'seo' => 'SEO优化的',
-            'creative' => '创意新颖的',
-            'question' => '疑问式的',
+            'professional' => 'professional and authoritative',
+            'attractive' => 'engaging without clickbait',
+            'seo' => 'search-optimized',
+            'creative' => 'creative and specific',
+            'question' => 'question-led',
         ];
-        $styleDescription = $styleMap[$style] ?? '专业严谨的';
-        $keywordsText = implode('、', $keywords);
+        $styleDescription = $styleMap[$style] ?? 'professional and authoritative';
+        $languageNames = ['en' => 'English', 'de' => 'German', 'fr' => 'French', 'es' => 'Spanish', 'it' => 'Italian', 'pt' => 'Portuguese'];
+        $languageName = $languageNames[$outputLanguage] ?? 'English';
+        $keywordsText = implode("\n", array_map(static fn (string $keyword): string => '- '.$keyword, $keywords));
 
-        $systemPrompt = "你是一个专业的内容标题生成专家。请根据提供的关键词生成{$styleDescription}文章标题。";
-        $userPrompt = "请基于以下关键词生成 {$count} 个{$styleDescription}文章标题：\n\n关键词：{$keywordsText}\n\n";
+        $systemPrompt = "You are an expert SEO and GEO editorial title strategist. Write only in {$languageName}.";
+        $userPrompt = "Generate {$count} {$styleDescription} article titles from the approved keyword scope below.\n\nKeywords:\n{$keywordsText}\n\n";
         if ($customPrompt !== '') {
-            $userPrompt .= "额外要求：{$customPrompt}\n\n";
+            $userPrompt .= "Additional requirements: {$customPrompt}\n\n";
         }
-        $userPrompt .= "要求：\n1. 每个标题独占一行\n2. 标题要有吸引力和可读性\n3. 适合搜索引擎优化\n4. 不要添加序号或其他标记\n5. 直接输出标题内容";
+        $userPrompt .= "Requirements:\n1. Write every title in {$languageName}.\n2. Each title must focus on exactly one listed keyword.\n3. Never combine unrelated products or topics.\n4. Return strict JSON only in this shape: {\"titles\":[{\"title\":\"...\",\"keyword\":\"exact listed keyword\"}]}.\n5. The keyword value must exactly match one item from the approved list.\n6. Do not add markdown, commentary, or headings.";
 
         try {
             $response = agent($systemPrompt)->prompt(
@@ -178,6 +185,45 @@ class TitleAiGenerationService
     }
 
     /**
+     * @param  list<string>  $keywords
+     * @return list<array{title:string,keyword:string}>
+     */
+    private function parseGeneratedItems(string $content, array $keywords, string $outputLanguage): array
+    {
+        $normalized = trim($content);
+        $normalized = preg_replace('/^```(?:json)?\s*|\s*```$/iu', '', $normalized) ?? $normalized;
+        $payload = json_decode($normalized, true);
+        $items = [];
+        if (is_array($payload) && is_array($payload['titles'] ?? null)) {
+            foreach ($payload['titles'] as $item) {
+                $title = trim((string) ($item['title'] ?? ''));
+                $keyword = trim((string) ($item['keyword'] ?? ''));
+                if ($title === '' || ! in_array($keyword, $keywords, true) || ! $this->isLanguageCompatible($title, $outputLanguage)) {
+                    continue;
+                }
+                $items[$title] = ['title' => $title, 'keyword' => $keyword];
+            }
+
+            return array_values($items);
+        }
+
+        if (count($keywords) === 1) {
+            foreach ($this->parseGeneratedTitles($content) as $title) {
+                if ($this->isLanguageCompatible($title, $outputLanguage)) {
+                    $items[$title] = ['title' => $title, 'keyword' => $keywords[0]];
+                }
+            }
+        }
+
+        return array_values($items);
+    }
+
+    private function isLanguageCompatible(string $title, string $outputLanguage): bool
+    {
+        return $outputLanguage !== 'en' || preg_match('/\p{Han}/u', $title) !== 1;
+    }
+
+    /**
      * 解密 ai_models 中的 API Key（兼容旧系统 enc:v1 格式）。
      */
     private function decryptApiKey(string $storedApiKey): string
@@ -188,33 +234,33 @@ class TitleAiGenerationService
     /**
      * @return list<string>
      */
-    private function generateMockTitles(array $keywords, int $count, string $style): array
+    private function generateMockTitleItems(array $keywords, int $count, string $style): array
     {
         $styleTemplates = [
             'professional' => [
-                '{keyword}的深度分析与研究',
-                '关于{keyword}的专业见解',
-                '{keyword}行业发展趋势报告',
+                '{keyword}: An In-Depth Guide',
+                'What to Know About {keyword}',
+                'A Practical Guide to {keyword}',
             ],
             'attractive' => [
-                '你绝对不知道的{keyword}秘密',
-                '揭秘{keyword}背后的故事',
-                '{keyword}让人意想不到的用途',
+                '{keyword}: Key Details Worth Knowing',
+                'How to Get More from {keyword}',
+                '{keyword}: A Smarter Way to Choose',
             ],
             'seo' => [
-                '{keyword}完整指南：从入门到精通',
-                '{keyword}常见问题解答大全',
-                '如何选择最适合的{keyword}方案',
+                '{keyword}: The Complete Guide',
+                '{keyword}: Frequently Asked Questions',
+                'How to Choose the Right {keyword}',
             ],
             'creative' => [
-                '重新定义{keyword}的可能性',
-                '如果{keyword}会说话，它会告诉你什么？',
-                '当{keyword}遇上创新思维',
+                'A Fresh Look at {keyword}',
+                '{keyword}, Reconsidered',
+                'New Ways to Think About {keyword}',
             ],
             'question' => [
-                '{keyword}真的有用吗？',
-                '为什么{keyword}如此重要？',
-                '{keyword}的未来在哪里？',
+                'Is {keyword} Right for You?',
+                'What Makes {keyword} Worth Considering?',
+                'How Should You Choose {keyword}?',
             ],
         ];
 
@@ -223,7 +269,7 @@ class TitleAiGenerationService
         for ($index = 0; $index < $count; $index++) {
             $keyword = $keywords[array_rand($keywords)];
             $template = $templates[array_rand($templates)];
-            $titles[] = str_replace('{keyword}', $keyword, $template);
+            $titles[] = ['title' => str_replace('{keyword}', $keyword, $template), 'keyword' => $keyword];
         }
 
         return $titles;

@@ -1,0 +1,50 @@
+[
+  {
+    "name": "nfc_crlf_internal_spaces_terminal_newline",
+    "raw": "# Café  title\r\n\r\nLine  with internal spaces.\r\n\r\n\r\n",
+    "canonical": "# Café  title\n\nLine  with internal spaces.\n",
+    "sha256": "b693f0530c088ef18d1570b04dc1185b3478feb5d9c0c779813b58d652381462"
+  },
+  {
+    "name": "valid_http_wrapper_nested_parentheses",
+    "raw": "【Guide】（https://example.com/a_(b)）\r\n",
+    "canonical": "[Guide](https://example.com/a_(b))\n",
+    "sha256": "7ae3ab9a7c8eb7ce5f9aa858a5755c45b39303f6b9f91dd72f3d25b70ee77434"
+  },
+  {
+    "name": "invalid_scheme_preserved",
+    "raw": "【Run】(javascript:alert(1))\n",
+    "canonical": "【Run】(javascript:alert(1))\n",
+    "sha256": "8415321d6cd16ae1c2855cc37a82104db432d862fc322183db4f503bb95a7053"
+  },
+  {
+    "name": "malformed_port_preserved",
+    "raw": "【Broken port】(https://example.com:bad/a)\r\n",
+    "canonical": "【Broken port】(https://example.com:bad/a)\n",
+    "sha256": "058594d51bec86b06e1e91211c07440f651d84a97d43043fad83836215f73e23"
+  },
+  {
+    "name": "userinfo_preserved",
+    "raw": "【Credentials】(https://user:pass@example.com/a)\n",
+    "canonical": "【Credentials】(https://user:pass@example.com/a)\n",
+    "sha256": "aea9c2068d9e9afefc50089cd176039eabeb77c59621cf5e269a160e60adb9a8"
+  },
+  {
+    "name": "invalid_host_preserved",
+    "raw": "【Bad host】(https://-bad.example/a)\n",
+    "canonical": "【Bad host】(https://-bad.example/a)\n",
+    "sha256": "69c38c107dc418ae17087860b9b8143ca78200747f94635614b4c0adf78edd19"
+  },
+  {
+    "name": "ipv6_host_wrapper",
+    "raw": "【IPv6】(https://[2001:db8::1]:8443/a)\n",
+    "canonical": "[IPv6](https://[2001:db8::1]:8443/a)\n",
+    "sha256": "2b0f27b174825b6c59ad6d002e131b2e5c52c0c999de2617d83ac093736008f5"
+  },
+  {
+    "name": "missing_host_preserved",
+    "raw": "【No host】(https:///a)\n",
+    "canonical": "【No host】(https:///a)\n",
+    "sha256": "41971299d8a71a5824fe24063913826922db4a8198387582676560d570f3aad3"
+  }
+]

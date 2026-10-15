@@ -12,7 +12,7 @@ use Laravel\Ai\Responses\StreamableAgentResponse;
 use RuntimeException;
 use Throwable;
 
-final class ArticleContentGenerationService
+class ArticleContentGenerationService
 {
     public function __construct(
         private readonly ApiKeyCrypto $apiKeyCrypto,

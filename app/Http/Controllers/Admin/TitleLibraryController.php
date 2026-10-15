@@ -5,12 +5,15 @@ namespace App\Http\Controllers\Admin;
 use App\Http\Controllers\Controller;
 use App\Models\AiModel;
 use App\Models\Keyword;
+use App\Models\KeywordCluster;
 use App\Models\KeywordLibrary;
+use App\Models\KeywordNode;
 use App\Models\Task;
 use App\Models\Title;
 use App\Models\TitleLibrary;
 use App\Services\GeoFlow\TitleAiGenerationService;
 use App\Support\AdminWeb;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Pagination\LengthAwarePaginator;
@@ -93,6 +96,51 @@ class TitleLibraryController extends Controller
         ]);
     }
 
+    public function aiGenerateScopes(Request $request, int $libraryId): JsonResponse
+    {
+        TitleLibrary::query()->whereKey($libraryId)->firstOrFail();
+        $payload = $request->validate([
+            'keyword_library_id' => ['required', 'integer', Rule::exists('keyword_libraries', 'id')],
+            'parent_id' => ['nullable', 'integer', Rule::exists('keyword_nodes', 'id')],
+            'selected_node_id' => ['nullable', 'integer', Rule::exists('keyword_nodes', 'id')],
+        ]);
+        $assignedPaths = KeywordNode::query()
+            ->whereHas('keywords', static fn ($query) => $query
+                ->where('library_id', (int) $payload['keyword_library_id'])
+                ->where('status', 'active'))
+            ->pluck('path');
+        $allowedPaths = [];
+        foreach ($assignedPaths as $path) {
+            $segments = explode('/', (string) $path);
+            $prefix = '';
+            foreach ($segments as $segment) {
+                $prefix = $prefix === '' ? $segment : $prefix.'/'.$segment;
+                $allowedPaths[$prefix] = true;
+            }
+        }
+        $nodes = KeywordNode::query()
+            ->when(empty($payload['parent_id']), fn ($query) => $query->whereNull('parent_id'))
+            ->when(! empty($payload['parent_id']), fn ($query) => $query->where('parent_id', (int) $payload['parent_id']))
+            ->orderBy('sort_order')->orderBy('name')->get(['id', 'parent_id', 'name', 'path', 'depth'])
+            ->filter(static fn (KeywordNode $node): bool => isset($allowedPaths[$node->path]))
+            ->values();
+        $clusters = collect();
+        if (! empty($payload['selected_node_id'])) {
+            $clusters = KeywordCluster::query()
+                ->where('taxonomy_node_id', (int) $payload['selected_node_id'])
+                ->where('status', 'active')
+                ->whereHas('keywords', static fn ($query) => $query
+                    ->where('library_id', (int) $payload['keyword_library_id'])
+                    ->where('status', 'active'))
+                ->withCount(['keywords' => static fn ($query) => $query
+                    ->where('library_id', (int) $payload['keyword_library_id'])
+                    ->where('status', 'active')])
+                ->orderBy('name')->get(['id', 'name', 'taxonomy_node_id', 'language_code', 'market_scope']);
+        }
+
+        return response()->json(['nodes' => $nodes, 'clusters' => $clusters]);
+    }
+
     /**
      * 执行 AI 标题生成（当前使用可控模板生成，保证流程稳定）。
      */
@@ -102,6 +150,9 @@ class TitleLibraryController extends Controller
 
         $payload = $request->validate([
             'keyword_library_id' => ['required', 'integer'],
+            'taxonomy_node_id' => ['required', 'integer', Rule::exists('keyword_nodes', 'id')],
+            'keyword_cluster_id' => ['nullable', 'integer', Rule::exists('keyword_clusters', 'id')],
+            'output_language' => ['required', Rule::in(['en', 'de', 'fr', 'es', 'it', 'pt'])],
             'ai_model_id' => [
                 'required',
                 'integer',
@@ -129,9 +180,32 @@ class TitleLibraryController extends Controller
             ->whereRaw("COALESCE(NULLIF(model_type, ''), 'chat') = 'chat'")
             ->firstOrFail();
 
-        /** @var Collection<int, string> $keywords */
-        $keywords = Keyword::query()
+        $taxonomyNode = KeywordNode::query()->findOrFail((int) $payload['taxonomy_node_id']);
+        $subtreeNodeIds = KeywordNode::query()
+            ->where('taxonomy_id', $taxonomyNode->taxonomy_id)
+            ->where(static function ($query) use ($taxonomyNode): void {
+                $query->whereKey($taxonomyNode->id)
+                    ->orWhere('path', 'like', $taxonomyNode->path.'/%');
+            })
+            ->pluck('id');
+
+        $keywordQuery = Keyword::query()
             ->where('library_id', (int) $payload['keyword_library_id'])
+            ->where('status', 'active')
+            ->where('language_code', (string) $payload['output_language']);
+        if (! empty($payload['keyword_cluster_id'])) {
+            $cluster = KeywordCluster::query()
+                ->whereKey((int) $payload['keyword_cluster_id'])
+                ->where('status', 'active')
+                ->whereIn('taxonomy_node_id', $subtreeNodeIds)
+                ->firstOrFail();
+            $keywordQuery->whereHas('clusters', static fn ($query) => $query->whereKey($cluster->id));
+        } else {
+            $keywordQuery->whereHas('taxonomyNodes', static fn ($query) => $query->whereIn('keyword_nodes.id', $subtreeNodeIds));
+        }
+
+        /** @var Collection<int, string> $keywords */
+        $keywords = $keywordQuery
             ->inRandomOrder()
             ->limit((int) config('geoflow.title_ai_keyword_sample_limit', 10))
             ->pluck('keyword')
@@ -147,15 +221,17 @@ class TitleLibraryController extends Controller
             $keywords->all(),
             (int) $payload['title_count'],
             (string) $payload['title_style'],
-            trim((string) ($payload['custom_prompt'] ?? ''))
+            trim((string) ($payload['custom_prompt'] ?? '')),
+            (string) $payload['output_language'],
         );
-        $generatedTitles = $generationResult['titles'];
+        $generatedItems = $generationResult['items'] ?? [];
 
         $savedCount = 0;
         $duplicateCount = 0;
-        DB::transaction(function () use ($generatedTitles, $keywords, $libraryId, &$savedCount, &$duplicateCount): void {
-            foreach ($generatedTitles as $titleText) {
-                $title = $this->normalizeGeneratedTitle($titleText);
+        DB::transaction(function () use ($generatedItems, $libraryId, &$savedCount, &$duplicateCount): void {
+            foreach ($generatedItems as $item) {
+                $title = $this->normalizeGeneratedTitle((string) ($item['title'] ?? ''));
+                $keyword = trim((string) ($item['keyword'] ?? ''));
                 if ($title === '' || mb_strlen($title, 'UTF-8') > 500) {
                     continue;
                 }
@@ -173,7 +249,7 @@ class TitleLibraryController extends Controller
                 Title::query()->create([
                     'library_id' => $libraryId,
                     'title' => $title,
-                    'keyword' => $keywords->random(),
+                    'keyword' => $keyword,
                     'is_ai_generated' => true,
                     'used_count' => 0,
                     'usage_count' => 0,

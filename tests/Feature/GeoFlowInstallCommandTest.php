@@ -116,7 +116,10 @@ HTML;
         $this->artisan('geoflow:install')
             ->assertExitCode(0);
 
-        $this->assertSame(0, Admin::query()->count());
+        // The 2026_08_15_000400 migration permanently seeds a `geoflow-system`
+        // admin row; only assert that install did not additionally create an
+        // operator-facing admin account.
+        $this->assertSame(0, Admin::query()->where('username', '!=', 'geoflow-system')->count());
         $this->assertSame(0, Category::query()->count());
         $this->assertSame('用户线上站点', SiteSetting::query()->where('setting_key', 'site_name')->value('setting_value'));
         $this->assertSame('user-owned-theme', SiteSetting::query()->where('setting_key', 'active_theme')->value('setting_value'));
@@ -158,7 +161,10 @@ HTML;
 
         $this->artisan('geoflow:install')->assertSuccessful();
 
-        $this->assertSame(0, Admin::query()->count());
+        // The 2026_08_15_000400 migration permanently seeds a `geoflow-system`
+        // admin row; only assert that install did not additionally create an
+        // operator-facing admin account.
+        $this->assertSame(0, Admin::query()->where('username', '!=', 'geoflow-system')->count());
         $this->assertSame(0, Category::query()->count());
         $this->assertSame(0, Article::query()->count());
         $this->assertSame(
@@ -188,7 +194,10 @@ HTML;
 
         $this->artisan('geoflow:install')->assertFailed();
 
-        $this->assertSame(0, Admin::query()->count());
+        // The 2026_08_15_000400 migration permanently seeds a `geoflow-system`
+        // admin row; only assert that install did not additionally create an
+        // operator-facing admin account.
+        $this->assertSame(0, Admin::query()->where('username', '!=', 'geoflow-system')->count());
         $this->assertSame(0, Category::query()->count());
         $this->assertSame(0, Article::query()->count());
         $this->assertFalse(SiteSetting::query()->where('setting_key', 'analytics_code')->exists());

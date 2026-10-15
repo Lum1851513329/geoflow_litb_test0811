@@ -11,6 +11,7 @@ return array_replace_recursive($base, [
     'nav' => [
         'dashboard' => 'ダッシュボード',
         'tasks' => 'タスク',
+        'bulk_content_import' => '一括インポート',
         'articles' => '記事',
         'materials' => 'コンテンツ資産',
         'ai_config' => 'AI設定',

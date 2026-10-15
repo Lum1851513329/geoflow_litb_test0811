@@ -4,6 +4,7 @@ namespace App\Support;
 
 use App\Models\Admin;
 use App\Models\AdminActivityLog;
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Http\Request;
 use Throwable;
 
@@ -97,7 +98,9 @@ final class AdminActivityLogger
         $result = [];
         foreach ($payload as $key => $value) {
             $field = (string) $key;
-            if (in_array($field, $sensitiveKeys, true)) {
+            if (in_array($field, $sensitiveKeys, true)
+                || preg_match('/(?:^|[_-])(?:token|secret|key)$/i', $field) === 1
+                || preg_match('/(?:Token|Secret|Key|TOKEN|SECRET|KEY)$/', $field) === 1) {
                 $result[$field] = '[redacted]';
 
                 continue;
@@ -150,6 +153,9 @@ final class AdminActivityLogger
         }
 
         foreach ((array) $route->parameters() as $name => $value) {
+            if ($value instanceof Model) {
+                return [(string) $name, is_numeric($value->getKey()) ? (int) $value->getKey() : null];
+            }
             if (! str_ends_with((string) $name, 'Id')) {
                 continue;
             }

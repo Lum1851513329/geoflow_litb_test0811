@@ -4,6 +4,7 @@
  * Artisan 自定义命令注册（闭包命令或后续类命令）。
  */
 
+use App\Services\GeoFlow\Keywords\KeywordImportPreviewSession;
 use App\Services\GeoFlow\KnowledgeChunkSyncCoordinator;
 use Illuminate\Foundation\Inspiring;
 use Illuminate\Support\Facades\Artisan;
@@ -52,6 +53,12 @@ Artisan::command('geoflow:prune-expired-cache {--limit=5000}', function (): int 
     return 0;
 })->purpose('Delete expired database cache rows used by rate limiters');
 
+Artisan::command('geoflow:prune-keyword-import-previews', function (KeywordImportPreviewSession $sessions): int {
+    $this->info(sprintf('Pruned keyword import previews: %d', $sessions->pruneExpired()));
+
+    return 0;
+})->purpose('Delete expired private keyword workbook previews');
+
 /**
  * Horizon 监控快照：用于沉淀队列吞吐、等待等时序指标。
  */
@@ -73,7 +80,33 @@ Schedule::command('geoflow:recover-knowledge-syncs')
     ->onOneServer()
     ->withoutOverlapping(10);
 
+/**
+ * 将已发布但未挂载 Task 的文章（如 LITB 批量生成内容）同步到活跃的
+ * WordPress REST 分发渠道。
+ */
+Schedule::command('geoflow:distribution:sync-channel')
+    ->everyFiveMinutes()
+    ->onOneServer()
+    ->withoutOverlapping(10);
+
+Schedule::command('geoflow:recover-content-generation-dispatches', [
+    '--stale' => (int) config('geoflow.content_generation_dispatch_stale_seconds', 300),
+])
+    ->everyMinute()
+    ->onOneServer()
+    ->withoutOverlapping(10);
+
+Schedule::command('geoflow:content-strategy:adopt-task-driven-runs')
+    ->everyMinute()
+    ->onOneServer()
+    ->withoutOverlapping(10);
+
 Schedule::command('geoflow:prune-expired-cache')
+    ->hourly()
+    ->onOneServer()
+    ->withoutOverlapping(10);
+
+Schedule::command('geoflow:prune-keyword-import-previews')
     ->hourly()
     ->onOneServer()
     ->withoutOverlapping(10);
@@ -83,5 +116,15 @@ Schedule::command('geoflow:prune-expired-cache')
  */
 Schedule::command('geoflow:telemetry:heartbeat')
     ->dailyAt('03:17')
+    ->onOneServer()
+    ->withoutOverlapping(10);
+
+/**
+ * litbstyle.com 内链补全：每天一次，给当天新发布（及历史遗留）文章插入
+ * "Related reading" 内链区块。幂等（按内容里的标记跳过已处理过的文章），
+ * 默认按 channel=3（litbstyle.com）、每篇最多 3 条链接。
+ */
+Schedule::command('geoflow:litb:attach-internal-links', ['--apply'])
+    ->dailyAt('04:10')
     ->onOneServer()
     ->withoutOverlapping(10);

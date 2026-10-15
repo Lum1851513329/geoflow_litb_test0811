@@ -1,0 +1,451 @@
+<?php
+
+namespace Tests\Unit;
+
+use App\Services\GeoFlow\Keywords\KeywordImportPreview;
+use App\Services\GeoFlow\Keywords\KeywordWorkbookReader;
+use Illuminate\Support\Facades\Bus;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Queue;
+use InvalidArgumentException;
+use PhpOffice\PhpSpreadsheet\Spreadsheet;
+use PhpOffice\PhpSpreadsheet\Writer\Xlsx;
+use Tests\TestCase;
+use ZipArchive;
+
+class KeywordWorkbookReaderTest extends TestCase
+{
+    public function test_it_reads_the_synthetic_category_search_fixture(): void
+    {
+        $inspection = (new KeywordWorkbookReader)->inspect(base_path('tests/Fixtures/keywords/category-search-sample.xlsx'));
+
+        $this->assertSame(['query', 'clicks', 'impressions', 'ctr', 'position', 'country', 'language', 'date_range'], $inspection['sheets'][0]['headers']);
+        $this->assertSame(5, $inspection['sheets'][0]['row_estimate']);
+        $this->assertSame(2, $inspection['sheets'][0]['sample_rows'][0]['row_number']);
+        $this->assertSame('mother of the bride dresses', $inspection['sheets'][0]['sample_rows'][0]['values']['query']);
+    }
+
+    public function test_it_inspects_xlsx_headers_samples_and_row_estimates_without_calculating_formulas(): void
+    {
+        $path = $this->makeWorkbook([
+            [' Query ', 'Average Position', 'Formula'],
+            ['mother of the bride dresses', 4.2, '=2+2'],
+            ['prom dresses', 5.4, '=3+3'],
+        ]);
+
+        $inspection = (new KeywordWorkbookReader)->inspect($path);
+
+        $this->assertSame(['Keywords'], array_column($inspection['sheets'], 'name'));
+        $this->assertSame(['query', 'average_position', 'formula'], $inspection['sheets'][0]['headers']);
+        $this->assertSame(2, $inspection['sheets'][0]['row_estimate']);
+        $this->assertSame(2, $inspection['sheets'][0]['sample_rows'][0]['row_number']);
+        $this->assertSame('=2+2', $inspection['sheets'][0]['sample_rows'][0]['values']['formula']);
+    }
+
+    public function test_it_detects_a_header_after_metadata_and_preserves_physical_row_numbers(): void
+    {
+        $path = $this->makeWorkbook([
+            ['Google Ads keyword report'],
+            ['Generated for an authorized account'],
+            ['Keyword status', 'Keyword', 'Impr.', 'Clicks'],
+            ['Enabled', 'formal dresses', 1200, 42],
+        ]);
+
+        $inspection = (new KeywordWorkbookReader)->inspect($path);
+
+        $this->assertSame(['keyword_status', 'keyword', 'impr', 'clicks'], $inspection['sheets'][0]['headers']);
+        $this->assertSame(1, $inspection['sheets'][0]['row_estimate']);
+        $this->assertArrayNotHasKey('rows', $inspection['sheets'][0]);
+        $this->assertSame(4, $inspection['sheets'][0]['sample_rows'][0]['row_number']);
+        $this->assertSame('formal dresses', $inspection['sheets'][0]['sample_rows'][0]['values']['keyword']);
+    }
+
+    public function test_chunked_reads_preserve_physical_rows_across_chunk_boundaries(): void
+    {
+        $path = $this->makeWorkbook([
+            ['Report metadata'],
+            ['More metadata'],
+            ['Keyword', 'Clicks'],
+            ['formal dresses', 42],
+            ['prom dresses', 21],
+        ]);
+
+        $reader = new KeywordWorkbookReader(chunkRows: 1);
+        $inspection = $reader->inspect($path);
+        $chunks = iterator_to_array($reader->chunks($path, $inspection), false);
+
+        $this->assertSame([4, 5], array_column(array_merge(...array_column($chunks, 'rows')), 'row_number'));
+    }
+
+    public function test_it_rejects_a_low_confidence_keyword_candidate_after_the_first_row(): void
+    {
+        $path = $this->makeWorkbook([
+            ['Report metadata'],
+            ['Keyword'],
+            ['formal dresses'],
+        ]);
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('recognizable header');
+        (new KeywordWorkbookReader)->inspect($path);
+    }
+
+    public function test_it_keeps_first_row_keyword_only_workbooks_compatible(): void
+    {
+        $path = $this->makeWorkbook([
+            ['Keyword'],
+            ['formal dresses'],
+        ]);
+
+        $inspection = (new KeywordWorkbookReader)->inspect($path);
+
+        $this->assertSame(['keyword'], $inspection['sheets'][0]['headers']);
+        $this->assertSame(2, $inspection['sheets'][0]['sample_rows'][0]['row_number']);
+    }
+
+    public function test_inspection_and_streaming_state_are_bounded_by_samples_and_chunk_size(): void
+    {
+        $rows = [['Keyword', 'Clicks']];
+        for ($index = 1; $index <= 17; $index++) {
+            $rows[] = ["dress {$index}", $index];
+        }
+        $path = $this->makeWorkbook($rows);
+        $reader = new KeywordWorkbookReader(maxSampleRows: 2, chunkRows: 3);
+
+        $inspection = $reader->inspect($path);
+        $retainedRows = count($inspection['sheets'][0]['sample_rows']);
+        $chunkSizes = [];
+        $physicalRows = [];
+        foreach ($reader->chunks($path, $inspection) as $chunk) {
+            $chunkSizes[] = count($chunk['rows']);
+            $physicalRows = array_merge($physicalRows, array_column($chunk['rows'], 'row_number'));
+        }
+
+        $this->assertArrayNotHasKey('rows', $inspection['sheets'][0], 'Inspection must not retain a workbook-sized rows array.');
+        $this->assertSame(2, $retainedRows);
+        $this->assertSame([3, 3, 3, 3, 3, 2], $chunkSizes);
+        $this->assertSame(range(2, 18), $physicalRows);
+    }
+
+    public function test_streaming_rejects_tampered_inspection_metadata_that_exceeds_reader_budgets(): void
+    {
+        $path = $this->makeWorkbook([['Keyword'], ['formal dresses']]);
+        $reader = new KeywordWorkbookReader(maxRowsPerSheet: 10);
+        $inspection = $reader->inspect($path);
+        $inspection['sheets'][0]['total_rows'] = 50_000;
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('row limit');
+        iterator_to_array($reader->chunks($path, $inspection));
+    }
+
+    public function test_it_enforces_a_cumulative_workbook_data_cell_budget(): void
+    {
+        $path = $this->makeWorkbook([
+            ['Keyword', 'Clicks'],
+            ['formal dresses', 42],
+            ['prom dresses', 21],
+        ], sheetCount: 2);
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('data cell budget');
+        (new KeywordWorkbookReader(maxDataCells: 7))->inspect($path);
+    }
+
+    public function test_it_rejects_a_near_fifty_thousand_by_ten_dimension_before_data_chunks_are_loaded(): void
+    {
+        $path = $this->makeWorkbook([['Keyword', 'Clicks']]);
+        $this->replaceWorksheetDimension($path, 'A1:J50001');
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('data cell budget');
+        (new KeywordWorkbookReader(maxDataCells: 499_999))->inspect($path);
+    }
+
+    public function test_it_rejects_ambiguous_or_missing_headers_with_clear_errors(): void
+    {
+        $ambiguous = $this->makeWorkbook([
+            ['Keyword', 'Clicks'],
+            ['Keyword', 'Clicks'],
+            ['formal dresses', 42],
+        ]);
+
+        try {
+            (new KeywordWorkbookReader)->inspect($ambiguous);
+            $this->fail('Expected ambiguous headers to be rejected.');
+        } catch (InvalidArgumentException $exception) {
+            $this->assertStringContainsString('ambiguous header', $exception->getMessage());
+        }
+
+        $missing = $this->makeWorkbook([
+            ['Google Ads report'],
+            ['Generated yesterday'],
+            ['formal dresses'],
+        ]);
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('recognizable header');
+        (new KeywordWorkbookReader)->inspect($missing);
+    }
+
+    public function test_default_limits_are_bounded_but_cover_the_observed_litb_export_size(): void
+    {
+        $this->assertGreaterThanOrEqual(35_000, config('keyword_intelligence.workbook.max_rows_per_sheet'));
+        $this->assertLessThanOrEqual(100_000, config('keyword_intelligence.workbook.max_rows_per_sheet'));
+        $this->assertLessThanOrEqual(20, config('keyword_intelligence.workbook.header_scan_rows'));
+        $this->assertSame(500_000, config('keyword_intelligence.workbook.max_data_cells'));
+        $this->assertGreaterThan(0, config('keyword_intelligence.workbook.chunk_rows'));
+        $this->assertLessThan(
+            config('keyword_intelligence.workbook.max_rows_per_sheet'),
+            config('keyword_intelligence.workbook.max_sample_rows'),
+        );
+    }
+
+    public function test_it_rejects_zip_bombs_before_invoking_the_spreadsheet_reader(): void
+    {
+        $highCompression = $this->makeZipWorkbook(['xl/worksheets/sheet1.xml' => str_repeat('A', 4_096)]);
+        try {
+            (new KeywordWorkbookReader(maxCompressionRatio: 2))->inspect($highCompression);
+            $this->fail('Expected a high-compression XLSX entry to be rejected.');
+        } catch (InvalidArgumentException $exception) {
+            $this->assertStringContainsString('compression ratio', $exception->getMessage());
+        }
+
+        $oversizedTotal = $this->makeZipWorkbook(['xl/sharedStrings.xml' => str_repeat('uncompressed', 32)]);
+        try {
+            (new KeywordWorkbookReader(maxUncompressedBytes: 128))->inspect($oversizedTotal);
+            $this->fail('Expected an XLSX archive exceeding the total uncompressed limit to be rejected.');
+        } catch (InvalidArgumentException $exception) {
+            $this->assertStringContainsString('total uncompressed', $exception->getMessage());
+        }
+
+        $oversizedEntry = $this->makeZipWorkbook(['xl/sharedStrings.xml' => str_repeat('uncompressed', 32)]);
+        try {
+            (new KeywordWorkbookReader(maxEntryUncompressedBytes: 128))->inspect($oversizedEntry);
+            $this->fail('Expected an XLSX archive entry exceeding its uncompressed limit to be rejected.');
+        } catch (InvalidArgumentException $exception) {
+            $this->assertStringContainsString('entry size', $exception->getMessage());
+        }
+
+        $tooManySheets = $this->makeZipWorkbook([
+            'xl/worksheets/sheet1.xml' => '<worksheet/>',
+            'xl/worksheets/sheet2.xml' => '<worksheet/>',
+        ]);
+        try {
+            (new KeywordWorkbookReader(maxSheets: 1))->inspect($tooManySheets);
+            $this->fail('Expected an XLSX archive with too many worksheets to be rejected.');
+        } catch (InvalidArgumentException $exception) {
+            $this->assertStringContainsString('sheet limit', $exception->getMessage());
+        }
+
+        $tooManyEntries = $this->makeZipWorkbook([
+            'docProps/core.xml' => '<properties/>',
+            'docProps/app.xml' => '<properties/>',
+        ]);
+        try {
+            (new KeywordWorkbookReader(maxZipEntries: 1))->inspect($tooManyEntries);
+            $this->fail('Expected an XLSX archive with too many ZIP entries to be rejected.');
+        } catch (InvalidArgumentException $exception) {
+            $this->assertStringContainsString('ZIP entry limit', $exception->getMessage());
+        }
+    }
+
+    public function test_it_rejects_non_xlsx_non_regular_and_oversized_inputs(): void
+    {
+        $reader = new KeywordWorkbookReader(maxFileSizeBytes: 100);
+        $textFile = tempnam(sys_get_temp_dir(), 'keyword-workbook-');
+        file_put_contents($textFile, 'not an XLSX workbook');
+
+        try {
+            $reader->inspect($textFile.'.csv');
+            $this->fail('Expected a non-XLSX file to be rejected.');
+        } catch (InvalidArgumentException $exception) {
+            $this->assertStringContainsString('.xlsx', $exception->getMessage());
+        }
+
+        $directory = sys_get_temp_dir().'/keyword-directory-'.uniqid('', true).'.xlsx';
+        mkdir($directory);
+
+        try {
+            $reader->inspect($directory);
+            $this->fail('Expected a directory to be rejected.');
+        } catch (InvalidArgumentException $exception) {
+            $this->assertStringContainsString('regular readable file', $exception->getMessage());
+        }
+
+        $workbook = $this->makeWorkbook([['Query'], ['prom dresses']]);
+
+        $this->expectException(InvalidArgumentException::class);
+        $reader->inspect($workbook);
+    }
+
+    public function test_it_rejects_workbooks_that_exceed_sheet_row_or_column_limits(): void
+    {
+        $tooManySheets = $this->makeWorkbook([['Query'], ['prom dresses']], sheetCount: 2);
+        $reader = new KeywordWorkbookReader(maxSheets: 1, maxRowsPerSheet: 10, maxColumnsPerSheet: 10);
+
+        try {
+            $reader->inspect($tooManySheets);
+            $this->fail('Expected a workbook with too many sheets to be rejected.');
+        } catch (InvalidArgumentException $exception) {
+            $this->assertStringContainsString('sheet limit', $exception->getMessage());
+        }
+
+        $tooManyRows = $this->makeWorkbook([['Query'], ['a'], ['b']]);
+        try {
+            (new KeywordWorkbookReader(maxRowsPerSheet: 1))->inspect($tooManyRows);
+            $this->fail('Expected a workbook with too many rows to be rejected.');
+        } catch (InvalidArgumentException $exception) {
+            $this->assertStringContainsString('row limit', $exception->getMessage());
+        }
+
+        $tooManyColumns = $this->makeWorkbook([['Query', 'Clicks'], ['prom dresses', 12]]);
+        $this->expectException(InvalidArgumentException::class);
+        (new KeywordWorkbookReader(maxColumnsPerSheet: 1))->inspect($tooManyColumns);
+    }
+
+    public function test_preview_builds_valid_and_rejected_samples_without_database_writes(): void
+    {
+        $path = $this->makeWorkbook([
+            ['Query', 'Clicks', 'Country', 'Language', 'Unmapped Notes'],
+            ['lightinthebox coupon', 265, 'us', 'en', 'paid campaign'],
+            ['   ', 0, 'US', 'en', 'blank query'],
+        ]);
+        Bus::fake();
+        Queue::fake();
+        $writes = [];
+        DB::listen(static function ($query) use (&$writes): void {
+            if (preg_match('/^\s*(insert|update|delete)\b/i', $query->sql) === 1) {
+                $writes[] = $query->sql;
+            }
+        });
+
+        $preview = (new KeywordImportPreview)->build($path, 'google_search_console', [
+            'query' => 'keyword',
+            'clicks' => 'clicks',
+            'country' => 'country',
+            'language' => 'language',
+        ]);
+
+        $this->assertSame(['total_rows' => 2, 'valid_rows' => 1, 'rejected_rows' => 1], $preview['counts']);
+        $this->assertSame('lightinthebox coupon', $preview['valid_samples'][0]['keyword']['normalized']);
+        $this->assertSame('brand', $preview['valid_samples'][0]['classification']['keyword_type']);
+        $this->assertSame('paid campaign', $preview['valid_samples'][0]['source_payload']['unmapped_notes']);
+        $this->assertSame('The keyword cannot be blank.', $preview['rejected_samples'][0]['reason']);
+        $this->assertSame([], $writes);
+        Bus::assertNothingDispatched();
+        Queue::assertNothingPushed();
+    }
+
+    public function test_preview_sample_output_cannot_exceed_the_configured_retention_budget(): void
+    {
+        config()->set('keyword_intelligence.workbook.max_preview_samples', 2);
+        $path = $this->makeWorkbook([
+            ['Keyword'],
+            ['dress one'],
+            ['dress two'],
+            ['dress three'],
+            ['dress four'],
+        ]);
+
+        $preview = (new KeywordImportPreview(maxSamples: 1000))->build($path, 'google_search_console', []);
+
+        $this->assertSame(4, $preview['counts']['valid_rows']);
+        $this->assertCount(2, $preview['valid_samples']);
+    }
+
+    public function test_preview_uses_raw_excel_row_numbers_after_ignoring_an_empty_row(): void
+    {
+        $path = $this->makeWorkbook([
+            ['Query'],
+            ['lightinthebox coupon'],
+            [null],
+            [' '],
+        ]);
+
+        $preview = (new KeywordImportPreview)->build($path, 'google_search_console', ['query' => 'keyword']);
+
+        $this->assertSame(2, $preview['valid_samples'][0]['row_number']);
+        $this->assertSame(4, $preview['rejected_samples'][0]['row_number']);
+    }
+
+    public function test_php_images_install_and_enable_gd_for_phpspreadsheet(): void
+    {
+        $dockerfiles = [
+            'docker/Dockerfile' => (string) file_get_contents(base_path('docker/Dockerfile')),
+            'docker/Dockerfile.prod' => (string) file_get_contents(base_path('docker/Dockerfile.prod')),
+        ];
+
+        foreach ($dockerfiles as $path => $dockerfile) {
+            foreach (['libfreetype6-dev', 'libjpeg62-turbo-dev', 'libpng-dev'] as $package) {
+                $this->assertStringContainsString($package, $dockerfile, $path);
+            }
+
+            $this->assertStringContainsString('docker-php-ext-configure gd --with-freetype --with-jpeg', $dockerfile, $path);
+            $this->assertMatchesRegularExpression('/docker-php-ext-install\s+\\\\\s*gd\b/', $dockerfile, $path);
+        }
+
+        $productionDockerfile = $dockerfiles['docker/Dockerfile.prod'];
+        $this->assertStringContainsString('--ignore-platform-req=ext-gd', $productionDockerfile);
+
+        $runtimeStageStart = strrpos($productionDockerfile, 'FROM ${PHP_FPM_IMAGE}');
+        $this->assertNotFalse($runtimeStageStart);
+        $runtimeStage = substr($productionDockerfile, $runtimeStageStart);
+        foreach (['libfreetype6-dev', 'libjpeg62-turbo-dev', 'libpng-dev', 'docker-php-ext-configure gd --with-freetype --with-jpeg'] as $requirement) {
+            $this->assertStringContainsString($requirement, $runtimeStage);
+        }
+        $this->assertMatchesRegularExpression('/docker-php-ext-install\s+\\\\\s*gd\b/', $runtimeStage);
+    }
+
+    /** @param array<int,array<int,string|int|float>> $rows */
+    private function makeWorkbook(array $rows, int $sheetCount = 1): string
+    {
+        $path = tempnam(sys_get_temp_dir(), 'keyword-workbook-').'.xlsx';
+        $spreadsheet = new Spreadsheet;
+
+        for ($sheetNumber = 0; $sheetNumber < $sheetCount; $sheetNumber++) {
+            $sheet = $sheetNumber === 0 ? $spreadsheet->getActiveSheet() : $spreadsheet->createSheet();
+            $sheet->setTitle($sheetNumber === 0 ? 'Keywords' : 'Keywords '.$sheetNumber);
+            $sheet->fromArray($rows, null, 'A1');
+        }
+
+        (new Xlsx($spreadsheet))->save($path);
+        $spreadsheet->disconnectWorksheets();
+
+        return $path;
+    }
+
+    /** @param array<string,string> $entries */
+    private function makeZipWorkbook(array $entries): string
+    {
+        $path = tempnam(sys_get_temp_dir(), 'keyword-workbook-').'.xlsx';
+        $archive = new ZipArchive;
+        $this->assertTrue($archive->open($path, ZipArchive::CREATE | ZipArchive::OVERWRITE));
+
+        foreach ($entries as $name => $contents) {
+            $this->assertTrue($archive->addFromString($name, $contents));
+        }
+
+        $this->assertTrue($archive->close());
+
+        return $path;
+    }
+
+    private function replaceWorksheetDimension(string $path, string $dimension): void
+    {
+        $archive = new ZipArchive;
+        $this->assertTrue($archive->open($path));
+        $xml = $archive->getFromName('xl/worksheets/sheet1.xml');
+        $this->assertIsString($xml);
+        $updated = preg_replace('/<dimension ref="[^"]+"\/>/', '<dimension ref="'.$dimension.'"/>', $xml, 1, $count);
+        $this->assertSame(1, $count);
+        $this->assertIsString($updated);
+        $updated = str_replace(
+            '</sheetData>',
+            '<row r="50001"><c r="J50001" t="inlineStr"><is><t>boundary</t></is></c></row></sheetData>',
+            $updated,
+        );
+        $this->assertTrue($archive->addFromString('xl/worksheets/sheet1.xml', $updated));
+        $this->assertTrue($archive->close());
+    }
+}

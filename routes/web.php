@@ -19,13 +19,19 @@ use App\Http\Controllers\Admin\ArticleController;
 use App\Http\Controllers\Admin\ArticleEditorAssetController;
 use App\Http\Controllers\Admin\ArticleEditorAssistantController;
 use App\Http\Controllers\Admin\AuthorController;
+use App\Http\Controllers\Admin\BulkContentImportController;
+use App\Http\Controllers\Admin\SemrushImportController;
+use App\Http\Controllers\Admin\WorkBuddyTaskController;
 use App\Http\Controllers\Admin\CategoryController;
 use App\Http\Controllers\Admin\ContentAnalyticsController;
+use App\Http\Controllers\Admin\ContentBriefController;
+use App\Http\Controllers\Admin\ContentGenerationController;
 use App\Http\Controllers\Admin\DashboardController;
 use App\Http\Controllers\Admin\DistributionAnalyticsController;
 use App\Http\Controllers\Admin\DistributionController;
 use App\Http\Controllers\Admin\EnterpriseKnowledgeController;
 use App\Http\Controllers\Admin\ImageLibraryController;
+use App\Http\Controllers\Admin\KeywordIntelligenceController;
 use App\Http\Controllers\Admin\KeywordLibraryController;
 use App\Http\Controllers\Admin\KnowledgeBaseController;
 use App\Http\Controllers\Admin\LeadAnalyticsController;
@@ -35,6 +41,8 @@ use App\Http\Controllers\Admin\LegacyController;
 use App\Http\Controllers\Admin\ManualPublicationController;
 use App\Http\Controllers\Admin\ManualPublicationSettingsController;
 use App\Http\Controllers\Admin\MaterialsController;
+use App\Http\Controllers\Admin\PromptModuleController;
+use App\Http\Controllers\Admin\PromptPresetController;
 use App\Http\Controllers\Admin\SecuritySettingsController;
 use App\Http\Controllers\Admin\SiteSettingsController;
 use App\Http\Controllers\Admin\SiteThemeReplicationController;
@@ -49,6 +57,7 @@ use App\Http\Controllers\Site\ArticleController as SiteArticleController;
 use App\Http\Controllers\Site\CategoryController as SiteCategoryController;
 use App\Http\Controllers\Site\HomeController;
 use App\Http\Controllers\Site\LeadFormController as SiteLeadFormController;
+use App\Http\Controllers\Site\SitemapController;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Route;
 
@@ -59,6 +68,7 @@ Route::middleware(['site.locale', 'site.view_log'])->group(function (): void {
     Route::get('/archive/{year}/{month}', [ArchiveController::class, 'month'])
         ->name('site.archive.month')
         ->where(['year' => '[0-9]{4}', 'month' => '[0-9]{2}']);
+    Route::get('/sitemap.xml', [SitemapController::class, 'index'])->name('site.sitemap');
     Route::get('/category/{slug}', [SiteCategoryController::class, 'show'])->name('site.category');
     Route::get('/article/{slug}', [SiteArticleController::class, 'show'])->name('site.article');
     Route::get('/forms/{slug}', [SiteLeadFormController::class, 'show'])->name('site.lead-forms.show');
@@ -85,6 +95,75 @@ Route::prefix($adminPrefix)->name('admin.')->middleware(['admin.locale'])->group
         Route::post('login', [AdminAuthController::class, 'login'])
             ->middleware('throttle:admin-login')
             ->name('login.attempt');
+    });
+
+    // Feature middleware intentionally runs before authentication so disabled modules stay undiscoverable.
+    Route::middleware([
+        'geoflow.feature:modular_prompts_enabled',
+        'admin.auth',
+    ])->scopeBindings()->group(function (): void {
+        Route::prefix('prompt-modules')->name('prompt-modules.')->group(function (): void {
+            Route::get('/', [PromptModuleController::class, 'index'])->name('index');
+            Route::post('/', [PromptModuleController::class, 'store'])->name('store');
+            Route::get('{module}', [PromptModuleController::class, 'show'])->name('show');
+            Route::patch('{module}', [PromptModuleController::class, 'update'])->name('update');
+            Route::post('{module}/versions', [PromptModuleController::class, 'storeVersion'])->name('versions.store');
+            Route::post('{module}/versions/{version}/publish', [PromptModuleController::class, 'publish'])->name('versions.publish');
+            Route::post('{module}/versions/{version}/deprecate', [PromptModuleController::class, 'deprecate'])->name('versions.deprecate');
+            Route::post('{module}/versions/{version}/archive', [PromptModuleController::class, 'archive'])->name('versions.archive');
+            Route::delete('{module}/versions/{version}', [PromptModuleController::class, 'destroyVersion'])->name('versions.destroy');
+        });
+        Route::prefix('prompt-presets')->name('prompt-presets.')->group(function (): void {
+            Route::get('/', [PromptPresetController::class, 'index'])->name('index');
+            Route::post('/', [PromptPresetController::class, 'store'])->name('store');
+            Route::get('{preset}/edit', [PromptPresetController::class, 'edit'])->name('edit');
+            Route::post('{preset}/versions', [PromptPresetController::class, 'storeVersion'])->name('versions.store');
+            Route::post('{preset}/versions/{version}/publish', [PromptPresetController::class, 'publish'])->name('versions.publish');
+            Route::post('{preset}/versions/{version}/deprecate', [PromptPresetController::class, 'deprecate'])->name('versions.deprecate');
+            Route::post('{preset}/versions/{version}/archive', [PromptPresetController::class, 'archive'])->name('versions.archive');
+        });
+        Route::get('prompt-module-version-options', [PromptPresetController::class, 'moduleVersionOptions'])
+            ->name('prompt-module-version-options');
+    });
+
+    // Feature checks intentionally precede authentication so the incremental content pipeline stays undiscoverable.
+    Route::middleware([
+        'geoflow.feature:content_strategy_enabled',
+        'geoflow.feature:modular_prompts_enabled',
+        'geoflow.feature:generation_quality_gate_enabled',
+        'admin.auth',
+        'admin.activity',
+    ])->scopeBindings()->group(function (): void {
+        Route::prefix('content-briefs')->name('content-briefs.')->group(function (): void {
+            Route::get('/', [ContentBriefController::class, 'index'])->name('index');
+            Route::get('create', [ContentBriefController::class, 'create'])->name('create');
+            Route::post('/', [ContentBriefController::class, 'store'])->name('store');
+            Route::get('{brief}/strategy', [ContentBriefController::class, 'strategy'])->can('view', 'brief')->name('strategy');
+            Route::post('{brief}/strategy', [ContentBriefController::class, 'confirmStrategy'])->can('update', 'brief')->name('strategy.confirm');
+            Route::get('{brief}/blueprint', [ContentBriefController::class, 'blueprint'])->can('view', 'brief')->name('blueprint');
+            Route::post('{brief}/blueprint', [ContentBriefController::class, 'confirmBlueprint'])->can('update', 'brief')->name('blueprint.confirm');
+            Route::post('{brief}/generations', [ContentGenerationController::class, 'store'])->can('update', 'brief')->name('generations.store');
+            Route::post('{brief}/knowledge-preview', [ContentBriefController::class, 'knowledgePreview'])->can('view', 'brief')->name('knowledge-preview');
+            Route::get('{brief}', [ContentBriefController::class, 'show'])->can('view', 'brief')->name('show');
+        });
+        Route::prefix('content-generations')->name('content-generations.')->group(function (): void {
+            Route::get('{run}', [ContentGenerationController::class, 'show'])->can('view', 'run')->name('show');
+            Route::post('{run}/adopt', [ContentGenerationController::class, 'adopt'])->can('adopt', 'run')->name('adopt');
+            Route::post('{run}/workbuddy-submit', [ContentGenerationController::class, 'workbuddySubmit'])->can('adopt', 'run')->name('workbuddy-submit');
+        });
+        // 批量导入：上传表格按 站点/内容模板/分类 分组创建任务。
+        // 它无条件创建 generation_engine=quality_gated 的任务，因此必须和质量门禁
+        // 流水线的其余部分挂同一组开关：三个开关默认关闭时若不拦截，上传表格会在
+        // `TaskLifecycleService` 里抛出未捕获的 ApiException（裸 500），而不是给出
+        // 一个干净的"功能未启用"响应。
+        Route::prefix('bulk-content-import')->name('bulk-content-import.')->group(function (): void {
+            Route::get('/', [BulkContentImportController::class, 'index'])->name('index');
+            Route::post('/', [BulkContentImportController::class, 'store'])->name('store');
+            Route::get('template', [BulkContentImportController::class, 'template'])->name('template');
+            Route::post('semrush/preview', [SemrushImportController::class, 'preview'])->name('semrush.preview');
+            Route::post('semrush/confirm', [SemrushImportController::class, 'confirm'])->name('semrush.confirm');
+        });
+        Route::get('workbuddy-tasks', [WorkBuddyTaskController::class, 'index'])->name('workbuddy-tasks.index');
     });
 
     // 后台受保护路由
@@ -259,6 +338,23 @@ Route::prefix($adminPrefix)->name('admin.')->middleware(['admin.locale'])->group
             Route::post('{libraryId}/delete', [KeywordLibraryController::class, 'destroy'])->name('delete');
         });
 
+        Route::prefix('keyword-intelligence')->name('keyword-intelligence.')->group(function () {
+            Route::get('/', [KeywordIntelligenceController::class, 'index'])->name('index');
+            Route::get('import', [KeywordIntelligenceController::class, 'import'])->name('import');
+            Route::post('import/preview', [KeywordIntelligenceController::class, 'preview'])->name('import.preview');
+            Route::post('import/confirm', [KeywordIntelligenceController::class, 'confirm'])->name('import.confirm');
+            Route::get('imports/{batch}/status', [KeywordIntelligenceController::class, 'status'])->name('import.status')->whereNumber('batch');
+            Route::post('imports/{batch}/revert', [KeywordIntelligenceController::class, 'revert'])->name('import.revert')->whereNumber('batch');
+            Route::get('taxonomy', [KeywordIntelligenceController::class, 'taxonomy'])->name('taxonomy');
+            Route::post('taxonomy/nodes', [KeywordIntelligenceController::class, 'storeNode'])->name('taxonomy.nodes.store');
+            Route::post('taxonomy/nodes/move', [KeywordIntelligenceController::class, 'moveNode'])->name('taxonomy.nodes.move');
+            Route::post('taxonomy/nodes/{node}/assign', [KeywordIntelligenceController::class, 'assign'])->name('taxonomy.nodes.assign')->whereNumber('node');
+            Route::get('clusters', [KeywordIntelligenceController::class, 'clusters'])->name('clusters');
+            Route::post('clusters/confirm', [KeywordIntelligenceController::class, 'confirmCluster'])->name('clusters.confirm');
+            Route::get('clusters/{cluster}', [KeywordIntelligenceController::class, 'showCluster'])->name('clusters.show')->whereNumber('cluster');
+            Route::post('clusters/{cluster}/score', [KeywordIntelligenceController::class, 'score'])->name('clusters.score')->whereNumber('cluster');
+        });
+
         // 素材管理：标题库管理
         Route::prefix('title-libraries')->name('title-libraries.')->group(function () {
             Route::get('/', [TitleLibraryController::class, 'index'])->name('index');
@@ -270,6 +366,7 @@ Route::prefix($adminPrefix)->name('admin.')->middleware(['admin.locale'])->group
             Route::post('{libraryId}/titles/delete', [TitleLibraryController::class, 'destroyTitles'])->name('titles.delete');
             Route::post('{libraryId}/import', [TitleLibraryController::class, 'importTitles'])->name('import');
             Route::get('{libraryId}/ai-generate', [TitleLibraryController::class, 'aiGenerate'])->name('ai-generate');
+            Route::get('{libraryId}/ai-generate/scopes', [TitleLibraryController::class, 'aiGenerateScopes'])->name('ai-generate.scopes');
             Route::post('{libraryId}/ai-generate', [TitleLibraryController::class, 'generateWithAi'])->name('ai-generate.submit');
             Route::put('{libraryId}', [TitleLibraryController::class, 'update'])->name('update');
             Route::post('{libraryId}/delete', [TitleLibraryController::class, 'destroy'])->name('delete');
@@ -294,6 +391,7 @@ Route::prefix($adminPrefix)->name('admin.')->middleware(['admin.locale'])->group
             Route::get('/', [KnowledgeBaseController::class, 'index'])->name('index');
             Route::get('create', [KnowledgeBaseController::class, 'create'])->name('create');
             Route::post('create', [KnowledgeBaseController::class, 'store'])->name('store');
+            Route::get('retrieval-preview', [KnowledgeBaseController::class, 'retrievalPreview'])->name('retrieval-preview');
             Route::get('{knowledgeBaseId}/edit', [KnowledgeBaseController::class, 'edit'])->name('edit');
             Route::get('{knowledgeBaseId}/detail', [KnowledgeBaseController::class, 'detail'])->name('detail');
             Route::post('upload', [KnowledgeBaseController::class, 'uploadFile'])->name('upload');

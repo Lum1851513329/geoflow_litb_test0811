@@ -1,0 +1,59 @@
+<?php
+
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+
+class KnowledgeImportRow extends Model
+{
+    protected $fillable = [
+        'brand_id',
+        'site_id',
+        'batch_id',
+        'row_number',
+        'staged_payload',
+        'outcome',
+        'canonical_document_id',
+        'duplicate_kind',
+        'duplicate_score',
+        'duplicate_reason',
+        'error_message',
+        'dispatch_claim_token',
+        'dispatch_claimed_at',
+        'dispatch_attempt_count',
+        'rollback_metadata',
+    ];
+
+    protected function casts(): array
+    {
+        return [
+            'brand_id' => 'integer',
+            'site_id' => 'integer',
+            'batch_id' => 'integer',
+            'row_number' => 'integer',
+            'staged_payload' => 'array',
+            'canonical_document_id' => 'integer',
+            'duplicate_score' => 'decimal:4',
+            'dispatch_claimed_at' => 'datetime',
+            'dispatch_attempt_count' => 'integer',
+            'rollback_metadata' => 'array',
+        ];
+    }
+
+    public function batch(): BelongsTo
+    {
+        return $this->belongsTo(KnowledgeImportBatch::class, 'batch_id');
+    }
+
+    public function canonicalDocument(): BelongsTo
+    {
+        return $this->belongsTo(KnowledgeBase::class, 'canonical_document_id');
+    }
+
+    public function duplicateAudits(): HasMany
+    {
+        return $this->hasMany(KnowledgeDuplicate::class, 'import_row_id');
+    }
+}

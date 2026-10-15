@@ -9,6 +9,8 @@ use Tests\TestCase;
 
 class AdminPtBrLocaleCoverageTest extends TestCase
 {
+    private const KEYWORD_INTELLIGENCE_NATURAL_COGNATES = ['columns.cluster', 'columns.status'];
+
     public function test_pt_br_covers_all_current_admin_translation_keys(): void
     {
         $english = require lang_path('en/admin.php');
@@ -67,6 +69,26 @@ class AdminPtBrLocaleCoverageTest extends TestCase
                     "pt_BR override [{$key}] must not fall back to the English copy."
                 );
             }
+        }
+    }
+
+    public function test_keyword_intelligence_portuguese_copy_is_localized_and_preserves_placeholders(): void
+    {
+        $english = require lang_path('en/admin.php');
+        $overlay = $this->loadLocaleOverlay('pt_BR');
+
+        foreach (Arr::dot($english['keyword_intelligence']) as $key => $englishValue) {
+            $portugueseValue = data_get($overlay, 'keyword_intelligence.'.$key);
+            $this->assertIsString($portugueseValue, "pt_BR keyword intelligence key [{$key}] must be a string.");
+            if (! in_array($key, self::KEYWORD_INTELLIGENCE_NATURAL_COGNATES, true)) {
+                $this->assertNotSame($englishValue, $portugueseValue, "pt_BR keyword intelligence key [{$key}] must be translated.");
+            }
+
+            preg_match_all('/:[A-Za-z_][A-Za-z0-9_]*/', $englishValue, $englishPlaceholders);
+            preg_match_all('/:[A-Za-z_][A-Za-z0-9_]*/', $portugueseValue, $portuguesePlaceholders);
+            sort($englishPlaceholders[0]);
+            sort($portuguesePlaceholders[0]);
+            $this->assertSame($englishPlaceholders[0], $portuguesePlaceholders[0], "pt_BR keyword intelligence key [{$key}] must preserve placeholders.");
         }
     }
 

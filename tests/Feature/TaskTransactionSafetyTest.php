@@ -283,7 +283,7 @@ class TaskTransactionSafetyTest extends TestCase
         $worker = Mockery::mock(WorkerExecutionService::class);
         $worker->shouldReceive('executeTask')
             ->once()
-            ->with((int) $task->id)
+            ->with((int) $task->id, (int) $run->id)
             ->andReturn([
                 'article_id' => null,
                 'meta' => [],

@@ -37,18 +37,18 @@ class TitleAiGenerationServiceTest extends TestCase
 
     public function test_successful_title_generation_records_daily_and_total_usage(): void
     {
-        AnonymousAgent::fake(["GEO 标题一\nGEO 标题二"])->preventStrayPrompts();
+        AnonymousAgent::fake(["GEO Title One\nGEO Title Two"])->preventStrayPrompts();
         $model = $this->createModel();
 
         $result = app(TitleAiGenerationService::class)->generateTitles(
             $model,
-            ['GEO 内容工程'],
+            ['GEO content engineering'],
             2,
             'professional',
         );
 
         $this->assertFalse($result['fallback_used']);
-        $this->assertSame(['GEO 标题一', 'GEO 标题二'], $result['titles']);
+        $this->assertSame(['GEO Title One', 'GEO Title Two'], $result['titles']);
         $this->assertSame(now()->toDateString(), $model->fresh()->usage_date?->toDateString());
         $this->assertSame(1, (int) $model->fresh()->used_today);
         $this->assertSame(1, (int) $model->fresh()->total_used);
@@ -69,6 +69,28 @@ class TitleAiGenerationServiceTest extends TestCase
         $this->assertTrue($result['fallback_used']);
         $this->assertSame(0, (int) $model->fresh()->used_today);
         $this->assertSame(0, (int) $model->fresh()->total_used);
+    }
+
+    public function test_title_generation_preserves_the_keyword_returned_for_each_title(): void
+    {
+        AnonymousAgent::fake(['{"titles":[{"title":"Green Formal Wedding Dresses: A Fit and Fabric Guide","keyword":"green formal dress for wedding"}]}'])
+            ->preventStrayPrompts();
+        $model = $this->createModel();
+
+        $result = app(TitleAiGenerationService::class)->generateTitles(
+            $model,
+            ['green formal dress for wedding', 'artificial christmas tree'],
+            1,
+            'professional',
+            '',
+            'en',
+        );
+
+        $this->assertArrayHasKey('items', $result);
+        $this->assertSame([[
+            'title' => 'Green Formal Wedding Dresses: A Fit and Fabric Guide',
+            'keyword' => 'green formal dress for wedding',
+        ]], $result['items']);
     }
 
     private function createModel(array $overrides = []): AiModel

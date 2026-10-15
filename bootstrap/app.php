@@ -12,6 +12,7 @@ use App\Http\Middleware\AssignApiRequestId;
 use App\Http\Middleware\AuthenticateAdminWeb;
 use App\Http\Middleware\AuthenticateApiToken;
 use App\Http\Middleware\EnsureApiScope;
+use App\Http\Middleware\EnsureGeoFlowFeatureEnabled;
 use App\Http\Middleware\EnsureSuperAdmin;
 use App\Http\Middleware\LogAdminActivity;
 use App\Http\Middleware\RecordSiteViewLog;
@@ -56,6 +57,8 @@ return Application::configure(basePath: dirname(__DIR__))
             'admin.super' => EnsureSuperAdmin::class,
             // Blade 后台：写操作日志
             'admin.activity' => LogAdminActivity::class,
+            // 增量内容策略功能：关闭时将对应路由隐藏为 404。
+            'geoflow.feature' => EnsureGeoFlowFeatureEnabled::class,
         ]);
 
         // 已登录的管理员访问登录页(guest:admin)时，重定向到后台仪表盘，而不是 Laravel 默认的 "/"。

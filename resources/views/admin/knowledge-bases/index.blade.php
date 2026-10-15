@@ -13,6 +13,10 @@
                 </div>
             </div>
             <div class="flex items-center gap-3">
+                <a href="{{ route('admin.knowledge-bases.retrieval-preview') }}" class="inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50">
+                    <i data-lucide="search" class="w-4 h-4 mr-2"></i>
+                    {{ __('admin.knowledge_bases.retrieval_preview_link') }}
+                </a>
                 <a href="{{ route('admin.knowledge-bases.create') }}" class="inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50">
                     <i data-lucide="plus" class="w-4 h-4 mr-2"></i>
                     {{ __('admin.knowledge_bases.create_first') }}
@@ -87,11 +91,126 @@
             </div>
         </div>
 
+        <div class="mb-8 grid grid-cols-1 gap-6 xl:grid-cols-[280px_minmax(0,1fr)]">
+            <aside class="bg-white shadow rounded-lg" data-knowledge-directory-tree>
+                <div class="border-b border-gray-200 px-5 py-4">
+                    <h2 class="text-base font-semibold text-gray-900">{{ __('admin.knowledge_bases.directory_navigation_title') }}</h2>
+                    <p class="mt-1 text-xs leading-5 text-gray-500">{{ __('admin.knowledge_bases.directory_navigation_desc') }}</p>
+                </div>
+                <div class="space-y-1 px-3 py-4">
+                    @if ((int) ($filters['brand_id'] ?? 0) < 1)
+                        <p class="px-2 py-3 text-sm text-gray-500">{{ __('admin.knowledge_bases.directory_select_brand') }}</p>
+                    @elseif (empty($directoryRows))
+                        <p class="px-2 py-3 text-sm text-gray-500">{{ __('admin.knowledge_bases.directory_empty') }}</p>
+                    @else
+                        @foreach ($directoryRows as $row)
+                            @php
+                                $directory = $row['directory'];
+                                $treeQuery = array_filter($filters, static fn ($value) => $value !== null && $value !== '');
+                                $treeQuery['brand_id'] = (int) $directory->brand_id;
+                                $treeQuery['directory_id'] = (int) $directory->id;
+                                $isSelectedDirectory = (int) ($filters['directory_id'] ?? 0) === (int) $directory->id;
+                            @endphp
+                            <a
+                                href="{{ route('admin.knowledge-bases.index', $treeQuery) }}"
+                                class="flex items-start gap-2 rounded-lg px-2 py-2 text-sm {{ $isSelectedDirectory ? 'bg-orange-50 font-semibold text-orange-700' : 'text-gray-700 hover:bg-gray-50' }}"
+                                style="padding-left: {{ 0.5 + ((int) $row['depth'] * 1.15) }}rem"
+                            >
+                                <i data-lucide="folder-tree" class="mt-0.5 h-4 w-4 shrink-0"></i>
+                                <span class="min-w-0">
+                                    <span class="block truncate">{{ $directory->name }}</span>
+                                    <span class="block truncate text-[11px] font-normal text-gray-400">{{ $directory->path }}</span>
+                                </span>
+                            </a>
+                        @endforeach
+                    @endif
+                </div>
+            </aside>
+
+            <section class="bg-white shadow rounded-lg">
+                <div class="border-b border-gray-200 px-6 py-4">
+                    <h2 class="text-base font-semibold text-gray-900">{{ __('admin.knowledge_bases.governance_filters_title') }}</h2>
+                </div>
+                <form method="GET" action="{{ route('admin.knowledge-bases.index') }}" class="grid grid-cols-1 gap-4 px-6 py-5 sm:grid-cols-2 lg:grid-cols-4">
+                    <div>
+                        <label class="mb-1 block text-xs font-medium text-gray-600">{{ __('admin.knowledge_bases.field_brand') }}</label>
+                        <select name="brand_id" class="w-full rounded-md border-gray-300 text-sm focus:border-orange-500 focus:ring-orange-500">
+                            <option value="">{{ __('admin.knowledge_bases.filter_all_brands') }}</option>
+                            @foreach ($brandOptions as $brand)
+                                <option value="{{ (int) $brand->id }}" @selected((int) ($filters['brand_id'] ?? 0) === (int) $brand->id)>{{ $brand->name }}</option>
+                            @endforeach
+                        </select>
+                    </div>
+                    <div>
+                        <label class="mb-1 block text-xs font-medium text-gray-600">{{ __('admin.knowledge_bases.field_site') }}</label>
+                        <select name="site_id" class="w-full rounded-md border-gray-300 text-sm focus:border-orange-500 focus:ring-orange-500">
+                            <option value="">{{ __('admin.knowledge_bases.filter_all_sites') }}</option>
+                            @foreach ($siteOptions as $site)
+                                <option value="{{ (int) $site->id }}" @selected((int) ($filters['site_id'] ?? 0) === (int) $site->id)>{{ $site->canonical_host }}</option>
+                            @endforeach
+                        </select>
+                    </div>
+                    <div>
+                        <label class="mb-1 block text-xs font-medium text-gray-600">{{ __('admin.knowledge_bases.field_language') }}</label>
+                        <select name="language_code" class="w-full rounded-md border-gray-300 text-sm focus:border-orange-500 focus:ring-orange-500">
+                            <option value="">{{ __('admin.knowledge_bases.filter_all_languages') }}</option>
+                            @foreach ($languageOptions as $language)
+                                <option value="{{ $language }}" @selected(($filters['language_code'] ?? null) === $language)>{{ $language }}</option>
+                            @endforeach
+                        </select>
+                    </div>
+                    <div>
+                        <label class="mb-1 block text-xs font-medium text-gray-600">{{ __('admin.knowledge_bases.field_authority') }}</label>
+                        <select name="authority_level" class="w-full rounded-md border-gray-300 text-sm focus:border-orange-500 focus:ring-orange-500">
+                            <option value="">{{ __('admin.knowledge_bases.filter_all_authorities') }}</option>
+                            @foreach (['first_party', 'regulatory_filing', 'mixed_research', 'third_party'] as $authority)
+                                <option value="{{ $authority }}" @selected(($filters['authority_level'] ?? null) === $authority)>{{ __('admin.knowledge_bases.authority_'.$authority) }}</option>
+                            @endforeach
+                        </select>
+                    </div>
+                    <div>
+                        <label class="mb-1 block text-xs font-medium text-gray-600">{{ __('admin.knowledge_bases.field_risk_level') }}</label>
+                        <select name="risk_level" class="w-full rounded-md border-gray-300 text-sm focus:border-orange-500 focus:ring-orange-500">
+                            <option value="">{{ __('admin.knowledge_bases.filter_all_risks') }}</option>
+                            @foreach (['low', 'medium', 'high'] as $risk)
+                                <option value="{{ $risk }}" @selected(($filters['risk_level'] ?? null) === $risk)>{{ __('admin.knowledge_bases.risk_level_'.$risk) }}</option>
+                            @endforeach
+                        </select>
+                    </div>
+                    <div>
+                        <label class="mb-1 block text-xs font-medium text-gray-600">{{ __('admin.knowledge_bases.field_review_status') }}</label>
+                        <select name="review_status" class="w-full rounded-md border-gray-300 text-sm focus:border-orange-500 focus:ring-orange-500">
+                            <option value="">{{ __('admin.knowledge_bases.filter_all_reviews') }}</option>
+                            @foreach (['unreviewed', 'reviewed'] as $review)
+                                <option value="{{ $review }}" @selected(($filters['review_status'] ?? null) === $review)>{{ __('admin.knowledge_bases.review_status_'.$review) }}</option>
+                            @endforeach
+                        </select>
+                    </div>
+                    <div>
+                        <label class="mb-1 block text-xs font-medium text-gray-600">{{ __('admin.knowledge_bases.field_lifecycle') }}</label>
+                        <select name="lifecycle_status" class="w-full rounded-md border-gray-300 text-sm focus:border-orange-500 focus:ring-orange-500">
+                            <option value="">{{ __('admin.knowledge_bases.filter_all_lifecycles') }}</option>
+                            @foreach (['active', 'superseded'] as $lifecycle)
+                                <option value="{{ $lifecycle }}" @selected(($filters['lifecycle_status'] ?? null) === $lifecycle)>{{ __('admin.knowledge_bases.lifecycle_'.$lifecycle) }}</option>
+                            @endforeach
+                        </select>
+                    </div>
+                    <div class="flex items-end gap-2">
+                        @if ((int) ($filters['directory_id'] ?? 0) > 0)
+                            <input type="hidden" name="directory_id" value="{{ (int) $filters['directory_id'] }}">
+                        @endif
+                        <button type="submit" class="inline-flex flex-1 items-center justify-center rounded-md bg-orange-600 px-3 py-2 text-sm font-medium text-white hover:bg-orange-700">{{ __('admin.button.filter') }}</button>
+                        <a href="{{ route('admin.knowledge-bases.index') }}" class="inline-flex items-center justify-center rounded-md border border-gray-300 px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50">{{ __('admin.button.reset') }}</a>
+                    </div>
+                </form>
+            </section>
+        </div>
+
         <div class="bg-white shadow rounded-lg">
             <div class="px-6 py-4 border-b border-gray-200">
                 <h3 class="text-lg font-medium text-gray-900">{{ __('admin.knowledge_bases.list_title') }}</h3>
             </div>
-            @if (empty($knowledgeBases))
+            @if ($knowledgeBases->isEmpty())
                 <div class="px-6 py-8 text-center">
                     <i data-lucide="brain" class="w-12 h-12 mx-auto text-gray-400 mb-4"></i>
                     <h3 class="text-lg font-medium text-gray-900 mb-2">{{ __('admin.knowledge_bases.empty') }}</h3>
@@ -138,6 +257,31 @@
                                         <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-orange-100 text-orange-800">
                                             {{ __('admin.knowledge_bases.text_unit', ['count' => number_format((int) $item['word_count'])]) }}
                                         </span>
+                                        @if (($item['version_label'] ?? '') !== '')
+                                            <span class="inline-flex items-center rounded bg-indigo-50 px-2 py-0.5 text-xs font-medium text-indigo-700">
+                                                {{ __('admin.knowledge_bases.badge_version', ['version' => $item['version_label']]) }}
+                                            </span>
+                                        @endif
+                                        @if ((int) ($item['version_count'] ?? 0) > 1)
+                                            <span class="inline-flex items-center rounded bg-indigo-100 px-2 py-0.5 text-xs font-medium text-indigo-800">
+                                                {{ __('admin.knowledge_bases.badge_version_count', ['count' => (int) $item['version_count']]) }}
+                                            </span>
+                                        @endif
+                                        @foreach (($item['duplicate_kinds'] ?? []) as $duplicateKind)
+                                            <span class="inline-flex items-center rounded bg-rose-50 px-2 py-0.5 text-xs font-medium text-rose-700">
+                                                {{ __('admin.knowledge_bases.badge_duplicate_'.$duplicateKind) }}
+                                            </span>
+                                        @endforeach
+                                        @if ($item['freshness_stale'] ?? false)
+                                            <span class="inline-flex items-center rounded bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800">
+                                                {{ __('admin.knowledge_bases.badge_freshness_stale') }}
+                                            </span>
+                                        @endif
+                                        @if ($item['review_overdue'] ?? false)
+                                            <span class="inline-flex items-center rounded bg-red-100 px-2 py-0.5 text-xs font-medium text-red-800">
+                                                {{ __('admin.knowledge_bases.badge_review_overdue') }}
+                                            </span>
+                                        @endif
                                         @php
                                             $syncStatus = (string) ($item['chunk_sync_status'] ?? 'idle');
                                             $syncStatusClass = match ($syncStatus) {
@@ -164,6 +308,16 @@
                                     @endif
                                     @if ($syncStatus === 'failed' && ($item['chunk_sync_error'] ?? '') !== '')
                                         <p class="mt-1 text-sm text-red-600">{{ $item['chunk_sync_error'] }}</p>
+                                    @endif
+                                    @if (($item['brand_name'] ?? '') !== '')
+                                        <div class="mt-3 flex flex-wrap items-center gap-2 text-xs text-gray-600">
+                                            <span class="rounded-full bg-slate-100 px-2.5 py-1">{{ $item['brand_name'] }}</span>
+                                            <span class="rounded-full bg-slate-100 px-2.5 py-1">{{ $item['site_host'] ?: $item['site_key'] }}</span>
+                                            <span class="rounded-full bg-slate-100 px-2.5 py-1">{{ $item['directory_name'] }} · {{ $item['directory_path'] }}</span>
+                                            <span class="rounded-full bg-slate-100 px-2.5 py-1">{{ $item['language_code'] }}</span>
+                                            <span class="rounded-full bg-slate-100 px-2.5 py-1">{{ $item['authority_level'] }}</span>
+                                            <span class="rounded-full bg-slate-100 px-2.5 py-1">{{ $item['risk_level'] }} · {{ $item['review_status'] }} · {{ $item['lifecycle_status'] }}</span>
+                                        </div>
                                     @endif
                                     <div class="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-gray-500">
                                         <span>
@@ -235,6 +389,11 @@
                         </div>
                     @endforeach
                 </div>
+                @if ($knowledgeBases->hasPages())
+                    <div class="border-t border-gray-200 px-6 py-4">
+                        {{ $knowledgeBases->links() }}
+                    </div>
+                @endif
             @endif
         </div>
     </div>

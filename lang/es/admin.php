@@ -11,6 +11,7 @@ return array_replace_recursive($base, [
     'nav' => [
         'dashboard' => 'Panel',
         'tasks' => 'Tareas',
+        'bulk_content_import' => 'Importación masiva',
         'articles' => 'Artículos',
         'materials' => 'Activos de contenido',
         'ai_config' => 'Configuración IA',

@@ -78,7 +78,7 @@ class ProcessGeoFlowTaskJob implements ShouldQueue
 
         $startedAt = microtime(true);
         try {
-            $result = $workerExecutionService->executeTask($taskId);
+            $result = $workerExecutionService->executeTask($taskId, $this->taskRunId);
             $durationMs = (int) round((microtime(true) - $startedAt) * 1000);
 
             $queueService->completeJob(

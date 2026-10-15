@@ -4,6 +4,13 @@ namespace App\Providers;
 
 use App\Contracts\Outbound\HostResolver;
 use App\Contracts\Outbound\OutboundTransport;
+use App\Domain\ContentGeneration\ExternalEvidence\EvidenceCoverageAssessor;
+use App\Domain\ContentGeneration\ExternalEvidence\ExternalEvidenceProvider;
+use App\Domain\ContentGeneration\ExternalEvidence\ModelEvidenceCoverageAssessor;
+use App\Domain\ContentGeneration\ExternalEvidence\WigoloRestClient;
+use App\Events\ContentGenerationCompleted;
+use App\Events\ContentGenerationFailed;
+use App\Listeners\ArchiveLitbContentGeneration;
 use App\Models\Admin;
 use App\Services\Admin\AdminUpdateMetadataService;
 use App\Services\Admin\AdminWelcomeModalService;
@@ -25,6 +32,7 @@ use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Http\Client\Factory as HttpFactory;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\Facades\View;
 use Illuminate\Support\ServiceProvider;
@@ -39,6 +47,7 @@ class AppServiceProvider extends ServiceProvider
         $fixedContextCapability = new \stdClass;
         $trustedTerminal = Closure::fromCallable(Utils::chooseHandler());
 
+        $this->app->singleton(\App\Services\GeoFlow\LitbAssets\LitbAssetConfig::class, fn () => \App\Services\GeoFlow\LitbAssets\LitbAssetConfig::fromConfig());
         $this->app->bind(HostResolver::class, SystemHostResolver::class);
         $this->app->singleton(FinalOutboundSecurityPolicy::class);
         $this->app->bind(OutboundTransport::class, function () use ($fixedContextCapability): LaravelPinnedOutboundTransport {
@@ -62,6 +71,11 @@ class AppServiceProvider extends ServiceProvider
         $this->app->singleton(TaskMonitoringQueryService::class);
         $this->app->singleton(TaskLifecycleService::class);
         $this->app->singleton(ArticleGeoFlowService::class);
+        $this->app->bind(
+            ExternalEvidenceProvider::class,
+            WigoloRestClient::class,
+        );
+        $this->app->bind(EvidenceCoverageAssessor::class, ModelEvidenceCoverageAssessor::class);
     }
 
     /**
@@ -69,6 +83,9 @@ class AppServiceProvider extends ServiceProvider
      */
     public function boot(): void
     {
+        Event::listen(ContentGenerationCompleted::class, [ArchiveLitbContentGeneration::class, 'handleCompleted']);
+        Event::listen(ContentGenerationFailed::class, [ArchiveLitbContentGeneration::class, 'handleFailed']);
+
         RateLimiter::for('admin-login', function (Request $request): Limit {
             return Limit::perMinute(30)->by('admin-login-ip:'.$request->ip());
         });

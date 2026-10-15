@@ -2,6 +2,18 @@
 
 This document tracks user-facing updates in the public repository. For future GitHub pushes, update this file together with the Chinese version in `CHANGELOG.md`.
 
+## 2026-08-11
+
+- Added a traceable content-strategy and generation workflow:
+  - Content briefs now progress through versioned strategy confirmation and structured blueprints before queuing generation with an exact Prompt preset, module versions, and AI model.
+  - Generation runs retain immutable strategy, blueprint, module, evidence, model, quality-report, and targeted-revision lineage, and reviewed output can be adopted once as an Article draft pending review.
+- Added modular Prompt administration:
+  - Supports system and custom modules, immutable versions, lifecycle promotion, exact-version presets, conflict decisions, variable contracts, fixed-section compilation, token-budget protection, and usage history.
+  - Fresh installs idempotently seed truth and evidence, GEO citability, SEO structure, language and market, Markdown output, and quality-check modules. The existing English and Chinese trust/ranking Prompts are copied into four compatible presets without changing legacy Prompt IDs or content.
+- Hardened the content pipeline and gradual rollout boundary:
+  - External references enter Prompts only as escaped quoted data, sensitive variables are redacted from persisted snapshots, and only super admins can view the full compiled Prompt.
+  - Generation lineage and input snapshots reject mass assignment, reference URLs continue through the central outbound safety policy, and disabling the feature flags preserves the existing Prompt, Article Assistant, Task, and Worker paths.
+
 ## 2026-08-09
 
 ### v2.3.0

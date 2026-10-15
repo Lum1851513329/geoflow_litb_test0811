@@ -1,6 +1,7 @@
 *.log
 .DS_Store
 /bak
+/backups
 /docker-data
 /logs
 /uploads
@@ -17,6 +18,8 @@
 /.phpunit.cache
 /.vscode
 /.zed
+/.worktrees
+/content/litb-quarterly-2026-q3
 /auth.json
 /node_modules
 /public/build
@@ -28,3 +31,4 @@
 Homestead.json
 Homestead.yaml
 Thumbs.db
+.superpowers/

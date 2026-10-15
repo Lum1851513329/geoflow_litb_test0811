@@ -10,13 +10,17 @@ use App\Models\Category;
 use App\Models\ImageLibrary;
 use App\Models\KnowledgeBase;
 use App\Models\Prompt;
+use App\Models\PromptPreset;
+use App\Models\PromptPresetVersion;
 use App\Models\Task;
 use App\Models\TaskRun;
 use App\Models\TaskSchedule;
 use App\Models\TitleLibrary;
+use App\Services\GeoFlow\KnowledgeGovernance\GenerationKnowledgeScopeResolver;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Validation\ValidationException;
 
 /**
  * 任务生命周期服务。
@@ -33,6 +37,16 @@ use Illuminate\Support\Facades\Schema;
  */
 class TaskLifecycleService
 {
+    /**
+     * workbuddy reuses the exact same brief/strategy/blueprint/preset
+     * creation path as quality_gated (see WorkerExecutionService::
+     * generateQualityGatedDraft()) — it only diverges at the very last step
+     * (an external writer supplies the article instead of a paid model
+     * call), so every validation rule below that applies to quality_gated
+     * must apply identically to workbuddy.
+     */
+    private const QUALITY_GATED_LIKE_ENGINES = ['quality_gated', 'workbuddy'];
+
     /**
      * @param  JobQueueService  $queueService  队列调度服务（负责 task_runs 入队、状态流转、重试）
      */
@@ -98,6 +112,14 @@ class TaskLifecycleService
                 'knowledge_base_id' => $normalized['knowledge_base_id'],
                 'category_mode' => $normalized['category_mode'],
                 'fixed_category_id' => $normalized['fixed_category_id'],
+                'generation_engine' => $normalized['generation_engine'] ?? 'legacy',
+                'prompt_preset_id' => $normalized['prompt_preset_id'] ?? null,
+                'knowledge_mode' => $normalized['knowledge_mode'],
+                'knowledge_brand_id' => $normalized['knowledge_brand_id'],
+                'knowledge_site_id' => $normalized['knowledge_site_id'],
+                'knowledge_directory_id' => $normalized['knowledge_directory_id'],
+                'external_evidence_policy' => $normalized['external_evidence_policy'],
+                'external_general_domains' => $normalized['external_general_domains'],
             ]);
 
             $taskId = (int) $task->id;
@@ -155,18 +177,23 @@ class TaskLifecycleService
     public function updateTask(int $taskId, array $data): array
     {
         $this->ensureTaskExists($taskId);
-        $normalized = $this->normalizeTaskInput($data, true);
-        if (empty($normalized)) {
-            throw new ApiException('validation_failed', '没有可更新的字段', 422);
-        }
 
-        $status = $normalized['status'] ?? null;
-        unset($normalized['status']);
-        $knowledgeBaseIdsProvided = array_key_exists('knowledge_base_ids', $normalized);
-        $knowledgeBaseIds = $knowledgeBaseIdsProvided ? $normalized['knowledge_base_ids'] : [];
-        unset($normalized['knowledge_base_ids']);
+        DB::transaction(function () use ($data, $taskId): void {
+            $current = Task::whereKey($taskId)->lockForUpdate()->first();
+            if ($current === null) {
+                throw new ApiException('task_not_found', '任务不存在', 404);
+            }
+            $normalized = $this->normalizeTaskInput($data, true, $current);
+            if (empty($normalized)) {
+                throw new ApiException('validation_failed', '没有可更新的字段', 422);
+            }
 
-        DB::transaction(function () use ($normalized, $knowledgeBaseIdsProvided, $knowledgeBaseIds, $status, $taskId): void {
+            $status = $normalized['status'] ?? null;
+            unset($normalized['status']);
+            $knowledgeBaseIdsProvided = array_key_exists('knowledge_base_ids', $normalized);
+            $knowledgeBaseIds = $knowledgeBaseIdsProvided ? $normalized['knowledge_base_ids'] : [];
+            unset($normalized['knowledge_base_ids']);
+
             if (! empty($normalized)) {
                 Task::query()->whereKey($taskId)->update($normalized);
             }
@@ -414,10 +441,30 @@ class TaskLifecycleService
      *
      * @throws ApiException 字段校验失败时抛 422，并附带 field_errors
      */
-    private function normalizeTaskInput(array $data, bool $isUpdate): array
+    private function normalizeTaskInput(array $data, bool $isUpdate, ?Task $current = null): array
     {
         $output = [];
         $fieldErrors = [];
+
+        if (array_key_exists('external_evidence_policy', $data) || ! $isUpdate) {
+            $policy = (string) ($data['external_evidence_policy'] ?? 'off');
+            if (! in_array($policy, ['off', 'on_insufficient'], true)) {
+                $fieldErrors['external_evidence_policy'] = '外部证据策略无效';
+            } else {
+                $output['external_evidence_policy'] = $policy;
+            }
+        }
+        if (array_key_exists('external_general_domains', $data) || ! $isUpdate) {
+            $domains = array_values(array_unique(array_filter(array_map(
+                static fn ($domain): string => strtolower(trim((string) $domain, " .\t\n\r\0\x0B")),
+                (array) ($data['external_general_domains'] ?? []),
+            ))));
+            if (count($domains) > 20 || collect($domains)->contains(static fn (string $domain): bool => preg_match('/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/', $domain) !== 1)) {
+                $fieldErrors['external_general_domains'] = '外部来源域名格式无效';
+            } else {
+                $output['external_general_domains'] = $domains;
+            }
+        }
 
         if (array_key_exists('name', $data)) {
             $name = trim((string) $data['name']);
@@ -430,10 +477,68 @@ class TaskLifecycleService
             $fieldErrors['name'] = '任务名称不能为空';
         }
 
+        // generation_engine 是普通枚举字符串（非外键引用），单独处理；quality_gated 引擎下 prompt_id
+        // 不再必填，改为要求 prompt_preset_id 指向一个已配置内容蓝图模板的预设。
+        $generationEngine = (string) ($data['generation_engine'] ?? 'legacy');
+        if (array_key_exists('generation_engine', $data) || ! $isUpdate) {
+            if (! in_array($generationEngine, ['legacy', ...self::QUALITY_GATED_LIKE_ENGINES], true)) {
+                $fieldErrors['generation_engine'] = '生成引擎无效';
+            } else {
+                $output['generation_engine'] = $generationEngine;
+            }
+        }
+
+        if (in_array($generationEngine, self::QUALITY_GATED_LIKE_ENGINES, true)) {
+            // 服务层是唯一保证被所有调用方（含 API TaskController，其路由未挂 EnsureGeoFlowFeatureEnabled 网关）
+            // 都会经过的入口，因此这里必须独立重复控制器层已做的两项校验，而不能假设调用方已经做过：
+            // 1) 三个 geoflow.* 流水线开关必须全部开启；
+            // 2) 预设必须有一个 lifecycle_status=production 且已配置 blueprint_template 的当前版本。
+            $pipelineEnabled = (bool) config('geoflow.content_strategy_enabled', false)
+                && (bool) config('geoflow.modular_prompts_enabled', false)
+                && (bool) config('geoflow.generation_quality_gate_enabled', false);
+            $presetId = (int) ($data['prompt_preset_id'] ?? 0);
+            $hasTemplate = $presetId > 0 && PromptPreset::query()
+                ->whereKey($presetId)
+                ->whereHas('currentVersion', fn ($q) => $q->where('lifecycle_status', PromptPresetVersion::STATUS_PRODUCTION)->whereNotNull('blueprint_template'))
+                ->exists();
+
+            if (! $pipelineEnabled) {
+                $fieldErrors['generation_engine'] = '质量门禁生成流水线当前未启用';
+            } elseif (! $hasTemplate) {
+                $fieldErrors['prompt_preset_id'] = '请选择一个已配置内容蓝图模板的预设';
+            } else {
+                $output['prompt_preset_id'] = $presetId;
+            }
+        } elseif (array_key_exists('generation_engine', $data) || ! $isUpdate) {
+            // 只要本次请求确实切换/设置了 generation_engine（创建场景视为总是"设置"），且结果不是
+            // quality_gated，就无条件清空 prompt_preset_id——不能只在调用方恰好也重发了 prompt_preset_id
+            // 时才清空，否则局部更新（只提交 generation_engine=legacy、不重发 prompt_preset_id）会
+            // 在库里留下过期的预设引用。
+            //
+            // 但如果本次更新压根没有提交 generation_engine 字段（纯粹的局部更新，例如只改 task_name），
+            // 则不应触碰 prompt_preset_id——那属于"未提及即不变"的常规局部更新语义，与上面
+            // generation_engine 自身的 array_key_exists 判断保持一致。
+            $output['prompt_preset_id'] = null;
+        }
+
+        $effectiveEngine = array_key_exists('generation_engine', $data)
+            ? $generationEngine
+            : (string) ($current?->generation_engine ?? $generationEngine);
+        $effectiveExternalPolicy = array_key_exists('external_evidence_policy', $data)
+            ? (string) $data['external_evidence_policy']
+            : (string) ($current?->external_evidence_policy ?? 'off');
+        if ($effectiveExternalPolicy === 'on_insufficient' && ! in_array($effectiveEngine, self::QUALITY_GATED_LIKE_ENGINES, true)) {
+            $fieldErrors['external_evidence_policy'] = '外部证据验证仅支持质量门禁生成引擎';
+        }
+        if (array_key_exists('generation_engine', $data) && $generationEngine === 'legacy' && $effectiveExternalPolicy !== 'on_insufficient') {
+            $output['external_evidence_policy'] = 'off';
+            $output['external_general_domains'] = [];
+        }
+
         $referenceMap = [
             'title_library_id' => ['model' => TitleLibrary::class, 'message' => '选择的标题库不存在', 'required' => ! $isUpdate],
             'image_library_id' => ['model' => ImageLibrary::class, 'message' => '选择的图片库不存在', 'required' => false],
-            'prompt_id' => ['model' => Prompt::class, 'message' => '选择的内容提示词不存在', 'required' => ! $isUpdate, 'prompt_content' => true],
+            'prompt_id' => ['model' => Prompt::class, 'message' => '选择的内容提示词不存在', 'required' => ! $isUpdate && ! in_array($generationEngine, self::QUALITY_GATED_LIKE_ENGINES, true), 'prompt_content' => true],
             'ai_model_id' => ['model' => AiModel::class, 'message' => '选择的AI模型不存在或未激活', 'required' => ! $isUpdate, 'ai_active_chat' => true],
             'author_id' => ['model' => Author::class, 'message' => '选择的作者不存在', 'required' => false],
             'knowledge_base_id' => ['model' => KnowledgeBase::class, 'message' => '选择的知识库不存在', 'required' => false],
@@ -608,6 +713,21 @@ class TaskLifecycleService
             throw new ApiException('validation_failed', '参数校验失败', 422, [
                 'field_errors' => $fieldErrors,
             ]);
+        }
+
+        $scopeData = array_merge($current?->only(['knowledge_mode', 'knowledge_brand_id', 'knowledge_site_id', 'knowledge_directory_id']) ?? [], $data);
+        if (($scopeData['knowledge_mode'] ?? 'legacy_manual') === 'legacy_manual') {
+            $scopeData = ['knowledge_mode' => 'legacy_manual'];
+        }
+        try {
+            $scope = app(GenerationKnowledgeScopeResolver::class)->normalize($scopeData);
+        } catch (ValidationException $exception) {
+            throw new ApiException('validation_failed', '参数校验失败', 422, ['field_errors' => $exception->errors()]);
+        }
+        $output = array_merge($output, $scope);
+        if (in_array($scope['knowledge_mode'], ['brand_auto', 'mixed'], true)) {
+            $output['knowledge_base_id'] = null;
+            $output['knowledge_base_ids'] = [];
         }
 
         return $output;

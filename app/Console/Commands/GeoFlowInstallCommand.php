@@ -168,6 +168,13 @@ class GeoFlowInstallCommand extends Command
                 });
         }
 
+        if ($table === 'admins') {
+            // The `geoflow-system` row is a permanent, code-only actor seeded by every
+            // migration run (not user/operator data) — ignore it so a genuinely fresh
+            // database is still detected as pristine and gets first-install seeding.
+            return DB::table($table)->where('username', '!=', 'geoflow-system')->limit(1)->exists();
+        }
+
         return DB::table($table)->limit(1)->exists();
     }
 

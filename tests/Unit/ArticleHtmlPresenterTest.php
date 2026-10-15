@@ -39,6 +39,18 @@ MD);
         $this->assertStringNotContainsString('javascript:', $html);
     }
 
+    public function test_strip_leading_title_heading_matches_the_title_even_with_a_seo_suffix(): void
+    {
+        $content = "# Is LightInTheBox an Official Online Store?\nBody content.";
+
+        $stripped = ArticleHtmlPresenter::stripLeadingTitleHeading(
+            $content,
+            'Is LightInTheBox an Official Online Store? | LightInTheBox',
+        );
+
+        $this->assertSame('Body content.', $stripped);
+    }
+
     public function test_card_summary_omits_a_leading_markdown_section_heading(): void
     {
         $article = new Article([

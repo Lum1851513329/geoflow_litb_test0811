@@ -101,6 +101,11 @@ class Article extends Model
         return $this->hasMany(ArticleDistribution::class, 'article_id');
     }
 
+    public function generationRuns(): HasMany
+    {
+        return $this->hasMany(ContentGenerationRun::class, 'article_id');
+    }
+
     public function syncedRemoteDistributions(): HasMany
     {
         return $this->hasMany(ArticleDistribution::class, 'article_id')
@@ -113,6 +118,20 @@ class Article extends Model
                     ->orWhereRaw('LOWER(TRIM(remote_url)) LIKE ?', ['https://%']);
             })
             ->orderByDesc('updated_at');
+    }
+
+    /**
+     * The public URL of this article's synced WordPress copy, if one exists.
+     * Used to point GEOFlow's own article page at the WordPress copy as the
+     * canonical URL, avoiding duplicate-content across the two public sites.
+     */
+    public function wordpressCanonicalUrl(): ?string
+    {
+        $remoteUrl = $this->syncedRemoteDistributions()
+            ->whereHas('channel', fn ($query) => $query->where('channel_type', 'wordpress_rest'))
+            ->value('remote_url');
+
+        return $remoteUrl !== null ? (string) $remoteUrl : null;
     }
 
     /**

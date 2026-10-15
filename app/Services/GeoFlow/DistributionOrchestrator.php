@@ -186,50 +186,88 @@ class DistributionOrchestrator
             $payloadHash = hash('sha256', json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?: '');
 
             foreach ($channels as $channel) {
-                DB::transaction(function () use ($channel, $articleModel, $action, $payloadHash): void {
-                    $lockedChannel = DistributionChannel::query()
-                        ->whereKey((int) $channel->id)
-                        ->lockForUpdate()
-                        ->first();
-                    if (! $lockedChannel || (string) $lockedChannel->status !== DistributionChannel::STATUS_ACTIVE) {
-                        return;
-                    }
-
-                    $distribution = ArticleDistribution::query()
-                        ->where('article_id', (int) $articleModel->id)
-                        ->where('distribution_channel_id', (int) $lockedChannel->id)
-                        ->where('action', $action)
-                        ->lockForUpdate()
-                        ->first();
-                    if ($distribution && (string) $distribution->status === 'sending') {
-                        return;
-                    }
-                    $distribution ??= new ArticleDistribution([
-                        'article_id' => (int) $articleModel->id,
-                        'distribution_channel_id' => (int) $lockedChannel->id,
-                        'action' => $action,
-                    ]);
-                    $distribution->forceFill([
-                        'status' => 'queued',
-                        'next_retry_at' => now(),
-                        'payload_hash' => $payloadHash,
-                        'idempotency_key' => $this->idempotencyKey((int) $articleModel->id, (int) $lockedChannel->id, $action),
-                    ])->save();
-
-                    $this->log('info', '文章已进入分发队列', $lockedChannel->id, $distribution->id, $articleModel->id, [
-                        'event' => 'distribution.queued',
-                        'strategy' => (string) ($articleModel->task?->distribution_strategy ?? TaskDistributionChannelSelector::STRATEGY_BROADCAST),
-                    ]);
-                    ProcessArticleDistributionJob::dispatch((int) $distribution->id)
-                        ->onQueue('distribution')
-                        ->afterCommit();
-                });
+                $this->distributeToChannel($articleModel, $channel, $action, $payloadHash);
             }
         } catch (Throwable $e) {
             $this->log('error', '文章分发入队失败：'.$e->getMessage(), null, null, $article instanceof Article ? (int) $article->id : $article, [
                 'event' => 'distribution.enqueue_failed',
             ]);
         }
+    }
+
+    /**
+     * Enqueues a single article to a single channel without requiring the
+     * article to belong to a `Task`. Used by content pipelines (e.g. LITB)
+     * that publish articles outside the Task-based generation flow.
+     */
+    public function enqueueForArticleToChannel(int|Article $article, DistributionChannel $channel, string $action = 'publish'): void
+    {
+        try {
+            $articleModel = $article instanceof Article
+                ? $article
+                : Article::query()->whereKey($article)->first();
+
+            if (! $articleModel || (string) $articleModel->status !== 'published') {
+                return;
+            }
+
+            if ((string) $channel->status !== DistributionChannel::STATUS_ACTIVE) {
+                return;
+            }
+
+            $payload = $action === 'delete'
+                ? $this->payloadBuilder->build($articleModel)
+                : $this->buildVerifiedPayload($articleModel, 'distribution_enqueue');
+            $payloadHash = hash('sha256', json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?: '');
+
+            $this->distributeToChannel($articleModel, $channel, $action, $payloadHash);
+        } catch (Throwable $e) {
+            $this->log('error', '文章分发入队失败：'.$e->getMessage(), null, null, $article instanceof Article ? (int) $article->id : $article, [
+                'event' => 'distribution.enqueue_failed',
+            ]);
+        }
+    }
+
+    private function distributeToChannel(Article $articleModel, DistributionChannel $channel, string $action, string $payloadHash): void
+    {
+        DB::transaction(function () use ($channel, $articleModel, $action, $payloadHash): void {
+            $lockedChannel = DistributionChannel::query()
+                ->whereKey((int) $channel->id)
+                ->lockForUpdate()
+                ->first();
+            if (! $lockedChannel || (string) $lockedChannel->status !== DistributionChannel::STATUS_ACTIVE) {
+                return;
+            }
+
+            $distribution = ArticleDistribution::query()
+                ->where('article_id', (int) $articleModel->id)
+                ->where('distribution_channel_id', (int) $lockedChannel->id)
+                ->where('action', $action)
+                ->lockForUpdate()
+                ->first();
+            if ($distribution && (string) $distribution->status === 'sending') {
+                return;
+            }
+            $distribution ??= new ArticleDistribution([
+                'article_id' => (int) $articleModel->id,
+                'distribution_channel_id' => (int) $lockedChannel->id,
+                'action' => $action,
+            ]);
+            $distribution->forceFill([
+                'status' => 'queued',
+                'next_retry_at' => now(),
+                'payload_hash' => $payloadHash,
+                'idempotency_key' => $this->idempotencyKey((int) $articleModel->id, (int) $lockedChannel->id, $action),
+            ])->save();
+
+            $this->log('info', '文章已进入分发队列', $lockedChannel->id, $distribution->id, $articleModel->id, [
+                'event' => 'distribution.queued',
+                'strategy' => (string) ($articleModel->task?->distribution_strategy ?? TaskDistributionChannelSelector::STRATEGY_BROADCAST),
+            ]);
+            ProcessArticleDistributionJob::dispatch((int) $distribution->id)
+                ->onQueue('distribution')
+                ->afterCommit();
+        });
     }
 
     /**
