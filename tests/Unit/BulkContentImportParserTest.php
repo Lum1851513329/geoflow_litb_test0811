@@ -190,6 +190,27 @@ final class BulkContentImportParserTest extends TestCase
         $this->assertSame('legacy_manual', $result['rows'][2]->knowledgeMode);
     }
 
+    public function test_general_semrush_rows_preserve_external_evidence_settings_without_local_brand_retrieval(): void
+    {
+        $this->brandFixtures();
+        $path = $this->buildFixture([
+            ['site', 'preset', 'category', 'topic', 'brand', 'directory', 'knowledge_site', 'knowledge_base', 'knowledge_mode', 'content_type', 'external_evidence_policy', 'external_general_domains'],
+            ['instructions'],
+            ['Publish (publish.example)', 'Preset (preset)', 'Category', 'How to choose running shoes', '', '', '', '', 'general', 'educational', 'on_insufficient', 'wikipedia.org, who.int'],
+        ]);
+
+        $result = $this->app->make(BulkContentImportParser::class)->parse($path);
+
+        $this->assertSame([], $result['errors']);
+        $row = $result['rows'][0];
+        $this->assertSame('general', $row->knowledgeMode);
+        $this->assertSame('educational', $row->contentType);
+        $this->assertSame('on_insufficient', $row->externalEvidencePolicy);
+        $this->assertSame(['wikipedia.org', 'who.int'], $row->externalGeneralDomains);
+        $this->assertNull($row->knowledgeBrandId);
+        $this->assertNull($row->knowledgeBaseId);
+    }
+
     public function test_reference_labels_colliding_with_literal_names_are_rejected(): void
     {
         [$brand] = $this->brandFixtures();

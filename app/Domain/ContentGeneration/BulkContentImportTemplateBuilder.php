@@ -16,7 +16,7 @@ use PhpOffice\PhpSpreadsheet\Worksheet\Worksheet;
 
 final class BulkContentImportTemplateBuilder
 {
-    private const HEADERS = ['site', 'preset', 'category', 'topic', 'brand', 'directory', 'knowledge_site', 'core_question', 'primary_keyword', 'reference_urls'];
+    private const HEADERS = ['site', 'preset', 'category', 'topic', 'brand', 'directory', 'knowledge_site', 'core_question', 'primary_keyword', 'reference_urls', 'knowledge_mode', 'content_type', 'external_evidence_policy', 'external_general_domains', 'brand_profile_snapshot_hash'];
 
     private const INSTRUCTIONS = [
         'site' => '【必填】发布到哪个站点，从"可选值参考"表中选，不要手打。',
@@ -29,6 +29,11 @@ final class BulkContentImportTemplateBuilder
         'core_question' => '【选填】文章需要重点回答的具体问题，不填则由选题方向自动推导。',
         'primary_keyword' => '【选填】核心关键词。',
         'reference_urls' => '【选填】参考链接，每行一个；品牌自动检索模式仅保存链接，本期不抓取外部链接。',
+        'knowledge_mode' => '【选填】knowledge_mode：brand_auto（品牌资料）、general（仅外部/通用证据）、mixed（品牌与外部证据）；留空时按 brand 自动判断，旧版行保持 legacy_manual。',
+        'content_type' => '【选填】内容类型，例如 educational、shopping_advice、comparison、industry、brand_policy；用于路由 Prompt 和证据策略。',
+        'external_evidence_policy' => '【选填】off 或 on_insufficient。泛科普、购物建议、行业话题建议使用 on_insufficient。',
+        'external_general_domains' => '【选填】允许的通用来源域名，逗号或空格分隔，例如 wikipedia.org, who.int。',
+        'brand_profile_snapshot_hash' => '【选填】Semrush 预览生成的品牌配置快照，用于确认时防止品牌配置已变更；手工导入可留空。',
     ];
 
     /**
@@ -42,8 +47,8 @@ final class BulkContentImportTemplateBuilder
      * 的模板往返用例（build() → parse() 必须 0 行 + 至少 1 条错误）。
      */
     private const EXAMPLE_ROWS = [
-        ['示例——请删除后再填真实数据 (示例-请勿使用)', 'Category Authority Guide (litb.geo_category_authority.en)', 'Style & Buying Guides', 'How to Choose Running Shoes', 'LITB (litb)', '', '', 'What should a first-time buyer check?', 'running shoes', ''],
-        ['示例——请删除后再填真实数据 (示例-请勿使用)', 'Category Authority Guide (litb.geo_category_authority.en)', 'Style & Buying Guides', 'Choosing the Right Duvet Cover', 'LITB (litb)', '', '', '', 'duvet cover', 'https://example.com/care-guide'],
+        ['示例——请删除后再填真实数据 (示例-请勿使用)', 'Category Authority Guide (litb.geo_category_authority.en)', 'Style & Buying Guides', 'How to Choose Running Shoes', 'LITB (litb)', '', '', 'What should a first-time buyer check?', 'running shoes', '', 'brand_auto', 'shopping_advice', 'on_insufficient', 'wikipedia.org', ''],
+        ['示例——请删除后再填真实数据 (示例-请勿使用)', 'Category Authority Guide (litb.geo_category_authority.en)', 'Style & Buying Guides', 'Choosing the Right Duvet Cover', 'LITB (litb)', '', '', '', 'duvet cover', 'https://example.com/care-guide', 'brand_auto', 'educational', 'on_insufficient', '', ''],
     ];
 
     public function build(): Spreadsheet

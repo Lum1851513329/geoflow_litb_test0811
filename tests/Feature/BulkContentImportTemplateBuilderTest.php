@@ -29,7 +29,7 @@ final class BulkContentImportTemplateBuilderTest extends TestCase
         KnowledgeDirectory::create(['brand_id' => $brand->id, 'key' => 'leaf', 'name' => '=Leaf', 'path' => '/root/leaf']);
         $workbook = $this->app->make(BulkContentImportTemplateBuilder::class)->build();
         $main = $workbook->getSheet(0);
-        $this->assertSame(['site', 'preset', 'category', 'topic', 'brand', 'directory', 'knowledge_site', 'core_question', 'primary_keyword', 'reference_urls'], $main->rangeToArray('A1:J1')[0]);
+        $this->assertSame(['site', 'preset', 'category', 'topic', 'brand', 'directory', 'knowledge_site', 'core_question', 'primary_keyword', 'reference_urls', 'knowledge_mode', 'content_type', 'external_evidence_policy', 'external_general_domains', 'brand_profile_snapshot_hash'], $main->rangeToArray('A1:O1')[0]);
         $this->assertStringContainsString('必填', $main->getCell('E2')->getValue());
         $reference = $workbook->getSheetByName('可选值参考');
         $this->assertSame('=1+1 (brand)', $reference->getCell('D2')->getValue());

@@ -21,12 +21,19 @@ final readonly class BulkContentImportRow
         public ?int $knowledgeBrandId = null,
         public ?int $knowledgeSiteId = null,
         public ?int $knowledgeDirectoryId = null,
+        public ?string $contentType = null,
+        public ?string $externalEvidencePolicy = null,
+        /** @var list<string> */
+        public array $externalGeneralDomains = [],
+        public ?string $brandProfileSnapshotHash = null,
     ) {}
 
     public function groupKey(): string
     {
         return implode(':', [$this->distributionChannelId, $this->promptPresetId, $this->categoryId,
             $this->knowledgeMode, $this->knowledgeBrandId, $this->knowledgeSiteId,
-            $this->knowledgeDirectoryId, $this->knowledgeBaseId]);
+            $this->knowledgeDirectoryId, $this->knowledgeBaseId,
+            $this->contentType, $this->externalEvidencePolicy,
+            hash('sha256', implode('|', $this->externalGeneralDomains))]);
     }
 }

@@ -23,7 +23,7 @@ final class BulkContentImportService
     /**
      * @return array{tasks_created: int, rows_imported: int}
      */
-    public function import(string $filePath, int $aiModelId, bool $needReview, Admin $actor, string $externalEvidencePolicy = 'off', array $externalGeneralDomains = []): array
+    public function import(string $filePath, int $aiModelId, bool $needReview, Admin $actor, string $externalEvidencePolicy = 'off', array $externalGeneralDomains = [], string $generationEngine = 'quality_gated', ?int $promptId = null): array
     {
         $parsed = $this->parser->parse($filePath);
         if ($parsed['errors'] !== []) {
@@ -46,10 +46,10 @@ final class BulkContentImportService
         // would leave groups 1..N-1 committed as real Tasks while import() still throws out to the
         // controller. Laravel nests DB::transaction() calls as savepoints, so createTaskForGroup()'s own
         // transaction continues to work unchanged inside this one.
-        $tasksCreated = DB::transaction(function () use ($groups, $aiModelId, $needReview, $actor, $externalEvidencePolicy, $externalGeneralDomains): int {
+        $tasksCreated = DB::transaction(function () use ($groups, $aiModelId, $needReview, $actor, $externalEvidencePolicy, $externalGeneralDomains, $generationEngine, $promptId): int {
             $tasksCreated = 0;
             foreach ($groups as $rowsInGroup) {
-                $this->createTaskForGroup($rowsInGroup, $aiModelId, $needReview, $actor, $externalEvidencePolicy, $externalGeneralDomains);
+                $this->createTaskForGroup($rowsInGroup, $aiModelId, $needReview, $actor, $externalEvidencePolicy, $externalGeneralDomains, $generationEngine, $promptId);
                 $tasksCreated++;
             }
 
@@ -60,11 +60,13 @@ final class BulkContentImportService
     }
 
     /** @param list<BulkContentImportRow> $rows */
-    private function createTaskForGroup(array $rows, int $aiModelId, bool $needReview, Admin $actor, string $externalEvidencePolicy, array $externalGeneralDomains): void
+    private function createTaskForGroup(array $rows, int $aiModelId, bool $needReview, Admin $actor, string $externalEvidencePolicy, array $externalGeneralDomains, string $generationEngine = 'quality_gated', ?int $promptId = null): void
     {
         $first = $rows[0];
+        $rowEvidencePolicy = $first->externalEvidencePolicy ?? $externalEvidencePolicy;
+        $rowGeneralDomains = $first->externalGeneralDomains !== [] ? $first->externalGeneralDomains : $externalGeneralDomains;
 
-        DB::transaction(function () use ($rows, $first, $aiModelId, $needReview, $actor, $externalEvidencePolicy, $externalGeneralDomains): void {
+        DB::transaction(function () use ($rows, $first, $aiModelId, $needReview, $actor, $rowEvidencePolicy, $rowGeneralDomains, $generationEngine, $promptId): void {
             $library = TitleLibrary::query()->create([
                 'name' => 'Bulk import '.now()->format('Y-m-d H:i').' — '.Str::limit($first->topic, 40),
                 'generation_type' => 'manual',
@@ -100,9 +102,10 @@ final class BulkContentImportService
                 'auto_description' => 0,
                 'category_mode' => 'fixed',
                 'fixed_category_id' => $first->categoryId,
-                'generation_engine' => 'quality_gated',
-                'external_evidence_policy' => $externalEvidencePolicy,
-                'external_general_domains' => $externalGeneralDomains,
+                'generation_engine' => $generationEngine,
+                'prompt_id' => $promptId,
+                'external_evidence_policy' => $rowEvidencePolicy,
+                'external_general_domains' => $rowGeneralDomains,
                 'prompt_preset_id' => $first->promptPresetId,
                 'knowledge_mode' => $first->knowledgeMode,
                 'knowledge_brand_id' => $first->knowledgeBrandId,

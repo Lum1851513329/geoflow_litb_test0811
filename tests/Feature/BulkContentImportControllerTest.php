@@ -82,6 +82,44 @@ final class BulkContentImportControllerTest extends TestCase
         }
     }
 
+    public function test_rows_with_general_and_brand_evidence_settings_are_not_merged(): void
+    {
+        config(['geoflow.content_strategy_enabled' => true, 'geoflow.modular_prompts_enabled' => true, 'geoflow.generation_quality_gate_enabled' => true]);
+        $admin = Admin::create(['username' => 'mode-import', 'password' => bcrypt('test'), 'role' => 'super_admin', 'status' => 'active']);
+        $model = AiModel::create(['name' => 'Test', 'status' => 'active', 'model_type' => 'chat', 'api_url' => 'https://example.invalid', 'api_key' => 'x', 'model_id' => 'x']);
+        DistributionChannel::create(['name' => 'Publish', 'domain' => 'publish.example', 'endpoint_url' => 'https://publish.example', 'channel_type' => 'wordpress', 'status' => 'active']);
+        $preset = PromptPreset::create(['preset_key' => 'preset', 'display_name' => 'Preset', 'is_enabled' => true]);
+        $version = PromptPresetVersion::forceCreate(['prompt_preset_id' => $preset->id, 'version' => 1, 'matching_rules' => [], 'generation_policy' => [], 'blueprint_template' => ['sections' => []], 'lifecycle_status' => PromptPresetVersion::STATUS_PRODUCTION]);
+        $preset->forceFill(['current_version_id' => $version->id])->save();
+        Category::create(['name' => 'Category', 'slug' => 'category']);
+        $brand = KnowledgeBrand::create(['key' => 'alpha', 'name' => 'Alpha']);
+        $site = KnowledgeSite::create(['role' => 'primary', 'brand_id' => $brand->id, 'key' => 'alpha', 'canonical_host' => 'alpha.example']);
+
+        $workbook = new Spreadsheet;
+        $sheet = $workbook->getActiveSheet();
+        $sheet->fromArray([
+            ['site', 'preset', 'category', 'topic', 'brand', 'directory', 'knowledge_site', 'knowledge_mode', 'content_type', 'external_evidence_policy', 'external_general_domains'],
+            ['instructions'],
+            ['Publish (publish.example)', 'Preset (preset)', 'Category', 'General topic', '', '', '', 'general', 'educational', 'on_insufficient', 'wikipedia.org'],
+            ['Publish (publish.example)', 'Preset (preset)', 'Category', 'Brand topic', 'alpha', '', '', 'brand_auto', 'brand_policy', 'off', ''],
+        ]);
+        $path = tempnam(sys_get_temp_dir(), 'mode-bulk-').'.xlsx';
+        try {
+            (new Xlsx($workbook))->save($path);
+            $result = $this->app->make(BulkContentImportService::class)->import($path, $model->id, true, $admin);
+            $this->assertSame(['tasks_created' => 2, 'rows_imported' => 2], $result);
+            $general = Task::where('knowledge_mode', 'general')->firstOrFail();
+            $brandTask = Task::where('knowledge_mode', 'brand_auto')->firstOrFail();
+            $this->assertSame('on_insufficient', $general->external_evidence_policy);
+            $this->assertSame(['wikipedia.org'], $general->external_general_domains);
+            $this->assertSame('off', $brandTask->external_evidence_policy);
+            $this->assertSame($brand->id, $brandTask->knowledge_brand_id);
+            $this->assertSame($site->id, $brandTask->knowledge_site_id);
+        } finally {
+            @unlink($path);
+        }
+    }
+
     protected function setUp(): void
     {
         parent::setUp();

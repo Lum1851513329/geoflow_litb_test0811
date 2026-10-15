@@ -124,11 +124,18 @@ final class BulkContentImportParser
 
         $knowledgeBaseName = $get('knowledge_base');
         $knowledgeBase = null;
-        $scope = ['knowledge_mode' => 'legacy_manual', 'knowledge_brand_id' => null, 'knowledge_site_id' => null, 'knowledge_directory_id' => null];
+        $requestedMode = $get('knowledge_mode');
         $brandCell = $get('brand');
-        if ($knowledgeBaseName !== '' && ($brandCell !== '' || $get('directory') !== '' || $get('knowledge_site') !== '')) {
+        if ($requestedMode === '') {
+            $requestedMode = $brandCell !== '' ? 'brand_auto' : 'legacy_manual';
+        }
+        if (! in_array($requestedMode, ['legacy_manual', 'brand_auto', 'general', 'mixed'], true)) {
+            return ['error' => 'knowledge_mode must be one of legacy_manual, brand_auto, general, or mixed.'];
+        }
+        if ($knowledgeBaseName !== '' && ($brandCell !== '' || $get('directory') !== '' || $get('knowledge_site') !== '' || $requestedMode !== 'legacy_manual')) {
             return ['error' => 'Do not mix brand/directory/knowledge_site with legacy knowledge_base in one row.'];
         }
+        $scope = ['knowledge_mode' => $requestedMode, 'knowledge_brand_id' => null, 'knowledge_site_id' => null, 'knowledge_directory_id' => null];
         if ($brandCell !== '') {
             $brand = $this->resolveUnique(KnowledgeBrand::query(), $brandCell, ['key', 'name']);
             if ($brand === null) {
@@ -180,19 +187,24 @@ final class BulkContentImportParser
             }
             try {
                 $scope = app(GenerationKnowledgeScopeResolver::class)->normalize([
-                    'knowledge_mode' => 'brand_auto', 'knowledge_brand_id' => $brand->id,
+                    'knowledge_mode' => $requestedMode, 'knowledge_brand_id' => $brand->id,
                     'knowledge_site_id' => $site?->id, 'knowledge_directory_id' => $directory?->id,
                 ]);
             } catch (ValidationException $exception) {
                 return ['error' => implode(' ', $exception->validator->errors()->all())];
             }
         } else {
-            if ($get('directory') !== '' || $get('knowledge_site') !== '' || $knowledgeBaseName === '') {
+            if ($requestedMode === 'legacy_manual' && ($get('directory') !== '' || $get('knowledge_site') !== '' || $knowledgeBaseName === '')) {
                 return ['error' => 'brand is required (or supply knowledge_base alone for a legacy row).'];
             }
-            $knowledgeBase = $this->resolveUnique(KnowledgeBase::query(), $knowledgeBaseName, ['name']);
-            if ($knowledgeBase === null) {
-                return ['error' => "Could not resolve knowledge base \"{$knowledgeBaseName}\" uniquely."];
+            if ($requestedMode !== 'general' || $knowledgeBaseName !== '') {
+                $knowledgeBase = $this->resolveUnique(KnowledgeBase::query(), $knowledgeBaseName, ['name']);
+                if ($knowledgeBase === null) {
+                    return ['error' => "Could not resolve knowledge base \"{$knowledgeBaseName}\" uniquely."];
+                }
+            }
+            if ($get('directory') !== '' || $get('knowledge_site') !== '') {
+                return ['error' => 'directory and knowledge_site require a selected brand.'];
             }
         }
 
@@ -202,6 +214,16 @@ final class BulkContentImportParser
         }
 
         $referenceUrls = array_values(array_filter(array_map('trim', explode("\n", $get('reference_urls')))));
+        $externalGeneralDomains = array_values(array_unique(array_filter(array_map(
+            static fn (string $domain): string => strtolower(trim($domain, " .\t\n\r\0\x0B")),
+            preg_split('/[,\s]+/', $get('external_general_domains')) ?: [],
+        ))));
+        $externalEvidencePolicy = $get('external_evidence_policy');
+        if ($externalEvidencePolicy === '') {
+            $externalEvidencePolicy = null;
+        } elseif (! in_array($externalEvidencePolicy, ['off', 'on_insufficient'], true)) {
+            return ['error' => 'external_evidence_policy must be off or on_insufficient.'];
+        }
 
         return ['row' => new BulkContentImportRow(
             rowNumber: $rowNumber,
@@ -217,6 +239,10 @@ final class BulkContentImportParser
             knowledgeBrandId: $scope['knowledge_brand_id'],
             knowledgeSiteId: $scope['knowledge_site_id'],
             knowledgeDirectoryId: $scope['knowledge_directory_id'],
+            contentType: ($get('content_type') !== '') ? $get('content_type') : null,
+            externalEvidencePolicy: $externalEvidencePolicy,
+            externalGeneralDomains: $externalGeneralDomains,
+            brandProfileSnapshotHash: ($get('brand_profile_snapshot_hash') !== '') ? $get('brand_profile_snapshot_hash') : null,
         )];
     }
 
