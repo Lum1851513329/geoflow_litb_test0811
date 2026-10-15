@@ -105,6 +105,7 @@ return [
         'analytics' => '增长中心',
         'tasks' => '任务管理',
         'bulk_content_import' => '批量导入',
+        'workbuddy_tasks' => 'WorkBuddy 任务',
         'distribution' => '分发管理',
         'articles' => '内容管理',
         'content_strategy' => '内容策略',
@@ -756,6 +757,9 @@ return [
             'retrying' => '重试中',
             'completed' => '本轮执行完成',
             'failed' => '执行失败',
+        ],
+        'filter' => [
+            'all' => '全部',
         ],
         'mode' => [
             'fixed' => '固定模型',

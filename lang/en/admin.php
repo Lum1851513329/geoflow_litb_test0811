@@ -132,6 +132,7 @@ return [
         'analytics' => 'Growth Center',
         'tasks' => 'Tasks',
         'bulk_content_import' => 'Bulk import',
+        'workbuddy_tasks' => 'WorkBuddy Tasks',
         'distribution' => 'Distribution',
         'articles' => 'Content Management',
         'content_strategy' => 'Content Strategy',
@@ -783,6 +784,9 @@ return [
             'retrying' => 'Retrying',
             'completed' => 'Run Completed',
             'failed' => 'Execution Failed',
+        ],
+        'filter' => [
+            'all' => 'All',
         ],
         'mode' => [
             'fixed' => 'Fixed',

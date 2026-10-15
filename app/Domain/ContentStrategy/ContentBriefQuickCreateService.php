@@ -8,13 +8,17 @@ use App\Models\ContentBrief;
 use App\Models\ContentStrategyVersion;
 use App\Models\PromptPreset;
 use App\Services\GeoFlow\KnowledgeGovernance\GenerationKnowledgeScopeResolver;
+use App\Services\GeoFlow\BlueprintSectionPlanner;
 use App\Services\GeoFlow\BriefQuestionPolishingService;
 use DomainException;
 use Illuminate\Support\Facades\DB;
 
 final class ContentBriefQuickCreateService
 {
-    public function __construct(private readonly BriefQuestionPolishingService $questionPolisher) {}
+    public function __construct(
+        private readonly BriefQuestionPolishingService $questionPolisher,
+        private readonly BlueprintSectionPlanner $sectionPlanner,
+    ) {}
     /**
      * @param  array{topic: string, core_question?: ?string, category_id?: ?int, primary_keyword_id?: ?int, keyword_cluster_id?: ?int, reference_urls?: list<string>, task_id?: ?int}  $data
      */
@@ -34,16 +38,15 @@ final class ContentBriefQuickCreateService
         if ($coreQuestion === '') {
             $coreQuestion = $this->defaultCoreQuestion($topic, $preset, (string) (($preset->currentVersion?->default_brief_fields ?? [])['content_type'] ?? ''));
         }
-        if ((int) ($data['ai_model_id'] ?? 0) > 0 && $originalQuestion !== '') {
-            $model = \App\Models\AiModel::query()->find((int) $data['ai_model_id']);
-            if ($model) {
-                $coreQuestion = $this->questionPolisher->polish($model, $topic, $coreQuestion, (string) ($data['language_code'] ?? 'en')) ?: $coreQuestion;
-            }
+        $model = (int) ($data['ai_model_id'] ?? 0) > 0 ? \App\Models\AiModel::query()->find((int) $data['ai_model_id']) : null;
+        if ($model !== null && $originalQuestion !== '') {
+            $coreQuestion = $this->questionPolisher->polish($model, $topic, $coreQuestion, (string) ($data['language_code'] ?? 'en')) ?: $coreQuestion;
         }
+        $plannedSections = $this->sectionPlanner->planSections($model, $topic, $coreQuestion, (array) $presetVersion->blueprint_template);
 
         $defaults = (array) ($presetVersion->default_brief_fields ?? []);
 
-        return DB::transaction(function () use ($data, $presetVersion, $actor, $topic, $coreQuestion, $defaults): ContentBrief {
+        return DB::transaction(function () use ($data, $presetVersion, $actor, $topic, $coreQuestion, $defaults, $plannedSections): ContentBrief {
             $scopeData = $data;
             if (($scopeData['knowledge_mode'] ?? 'legacy_manual') === 'legacy_manual') {
                 $scopeData = ['knowledge_mode' => 'legacy_manual'];
@@ -96,7 +99,7 @@ final class ContentBriefQuickCreateService
                 'confirmed_at' => now(),
             ]);
 
-            $blueprint = $this->instantiateBlueprint((array) $presetVersion->blueprint_template, $topic, $coreQuestion);
+            $blueprint = $this->instantiateBlueprint((array) $presetVersion->blueprint_template, $topic, $coreQuestion, $plannedSections);
             ContentBlueprintVersion::forceCreate([
                 'content_brief_id' => $brief->id,
                 'content_strategy_version_id' => $strategyVersion->id,
@@ -136,6 +139,26 @@ final class ContentBriefQuickCreateService
     }
 
     /**
+     * 同一 preset 下所有文章的 blueprint.sections[].heading 原样来自模板，字面完全一致；
+     * 这是多篇文章结构趋同、被判定为蚕食/近似重复内容的直接原因（2026-09-21 结构多样性修复）。
+     * 这里不改变 heading 本身（它仍是给模型的"这节写什么"的角色标签），而是按
+     * hash(topic + 该节 key) 确定性地选一种改写方向塞进 `heading_style_hint`，随
+     * 整份 blueprint 一起被 PromptCompiler::render() dump 进 CONTENT BLUEPRINT 段落。
+     * `litb.seo.structure` 模块内容明确要求模型不得照抄 heading 字面文本，须按
+     * hint 指定的方向改写成具体到本文主题的小标题——同一篇文章每次生成结果一致
+     * （幂等），不同主题的文章大概率落在不同改写方向上，避免模型在多次独立生成里
+     * 收敛回同一种"默认措辞"。
+     *
+     * @var list<string>
+     */
+    private const HEADING_STYLE_HINTS = [
+        'Phrase this heading as a direct question the reader is asking, grounded in the article topic.',
+        'Phrase this heading as an imperative/action phrase (e.g. "Check ... before ...", "How to ...").',
+        'Phrase this heading as a concise noun phrase naming the concrete topic, not a generic category label.',
+        'Phrase this heading around the specific product, brand, or keyword this article is about, not a generic term.',
+    ];
+
+    /**
      * 注意：`show_references_section` 刻意**不**复制进 per-brief blueprint。
      * `PromptCompiler::render()` 会把这份 blueprint 整体 dump 成提示词里的
      * CONTENT BLUEPRINT 段落，模型因此会看到一个毫无上下文的
@@ -145,16 +168,21 @@ final class ContentBriefQuickCreateService
      * 消费方（采纳时渲染引用列表）应当直接读 Preset 版本的 `blueprint_template`。
      *
      * @param  array<string, mixed>  $template
+     * @param  list<array<string, mixed>>  $resolvedSections  pre-resolved by BlueprintSectionPlanner —
+     *   either template['sections'] unchanged, or a per-topic section_pool selection.
      * @return array<string, mixed>
      */
-    private function instantiateBlueprint(array $template, string $topic, string $coreQuestion): array
+    private function instantiateBlueprint(array $template, string $topic, string $coreQuestion, array $resolvedSections): array
     {
         $sections = [];
-        foreach ((array) ($template['sections'] ?? []) as $section) {
+        foreach ($resolvedSections as $section) {
             $section['questions_to_answer'] = array_map(
                 fn (string $question): string => str_replace('{{core_question}}', $coreQuestion, $question),
                 (array) ($section['questions_to_answer'] ?? []),
             );
+            $sectionKey = (string) ($section['key'] ?? $section['heading'] ?? '');
+            $hintIndex = crc32($topic.'|'.$sectionKey) % count(self::HEADING_STYLE_HINTS);
+            $section['heading_style_hint'] = self::HEADING_STYLE_HINTS[$hintIndex];
             $sections[] = $section;
         }
 

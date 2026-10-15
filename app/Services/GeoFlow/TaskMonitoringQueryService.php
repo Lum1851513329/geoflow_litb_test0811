@@ -33,10 +33,12 @@ class TaskMonitoringQueryService
      *     pagination:array{page:int,per_page:int,total:int,total_pages:int},
      *     task_summary:array{total_tasks:int,enabled_tasks:int,total_articles:int,published_articles:int}
      * }
+     *
+     * @param  array<string,mixed>  $filters
      */
-    public function buildAdminOverview(int $page = 1, int $perPage = 50): array
+    public function buildAdminOverview(int $page = 1, int $perPage = 50, array $filters = []): array
     {
-        $paginatedTasks = $this->listTasksPaginated($page, $perPage);
+        $paginatedTasks = $this->listTasksPaginated($page, $perPage, $filters);
 
         return [
             'tasks' => $paginatedTasks['items'],

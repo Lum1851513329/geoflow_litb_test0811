@@ -20,6 +20,8 @@ use App\Http\Controllers\Admin\ArticleEditorAssetController;
 use App\Http\Controllers\Admin\ArticleEditorAssistantController;
 use App\Http\Controllers\Admin\AuthorController;
 use App\Http\Controllers\Admin\BulkContentImportController;
+use App\Http\Controllers\Admin\SemrushImportController;
+use App\Http\Controllers\Admin\WorkBuddyTaskController;
 use App\Http\Controllers\Admin\CategoryController;
 use App\Http\Controllers\Admin\ContentAnalyticsController;
 use App\Http\Controllers\Admin\ContentBriefController;
@@ -147,6 +149,7 @@ Route::prefix($adminPrefix)->name('admin.')->middleware(['admin.locale'])->group
         Route::prefix('content-generations')->name('content-generations.')->group(function (): void {
             Route::get('{run}', [ContentGenerationController::class, 'show'])->can('view', 'run')->name('show');
             Route::post('{run}/adopt', [ContentGenerationController::class, 'adopt'])->can('adopt', 'run')->name('adopt');
+            Route::post('{run}/workbuddy-submit', [ContentGenerationController::class, 'workbuddySubmit'])->can('adopt', 'run')->name('workbuddy-submit');
         });
         // 批量导入：上传表格按 站点/内容模板/分类 分组创建任务。
         // 它无条件创建 generation_engine=quality_gated 的任务，因此必须和质量门禁
@@ -157,7 +160,10 @@ Route::prefix($adminPrefix)->name('admin.')->middleware(['admin.locale'])->group
             Route::get('/', [BulkContentImportController::class, 'index'])->name('index');
             Route::post('/', [BulkContentImportController::class, 'store'])->name('store');
             Route::get('template', [BulkContentImportController::class, 'template'])->name('template');
+            Route::post('semrush/preview', [SemrushImportController::class, 'preview'])->name('semrush.preview');
+            Route::post('semrush/confirm', [SemrushImportController::class, 'confirm'])->name('semrush.confirm');
         });
+        Route::get('workbuddy-tasks', [WorkBuddyTaskController::class, 'index'])->name('workbuddy-tasks.index');
     });
 
     // 后台受保护路由

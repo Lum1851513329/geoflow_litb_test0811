@@ -74,6 +74,13 @@
             </div>
         </div>
 
+        <div class="mb-4 flex items-center gap-2 text-sm">
+            @php $statusFilter = $statusFilter ?? 'active'; @endphp
+            <a href="{{ route('admin.tasks.index', ['status' => 'active']) }}" class="px-3 py-1 rounded-full border {{ $statusFilter === 'active' ? 'bg-blue-600 text-white border-blue-600' : 'text-gray-600 border-gray-300 hover:bg-gray-50' }}">{{ __('admin.tasks.status.enabled') }}</a>
+            <a href="{{ route('admin.tasks.index', ['status' => 'paused']) }}" class="px-3 py-1 rounded-full border {{ $statusFilter === 'paused' ? 'bg-blue-600 text-white border-blue-600' : 'text-gray-600 border-gray-300 hover:bg-gray-50' }}">{{ __('admin.tasks.status.disabled') }}</a>
+            <a href="{{ route('admin.tasks.index', ['status' => 'all']) }}" class="px-3 py-1 rounded-full border {{ $statusFilter === 'all' ? 'bg-blue-600 text-white border-blue-600' : 'text-gray-600 border-gray-300 hover:bg-gray-50' }}">{{ __('admin.tasks.filter.all') }}</a>
+        </div>
+
         @if (!empty($legacyError))
             <div class="admin-flash-alert mb-4 bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative">
                 <span class="block sm:inline">{{ $legacyError }}</span>

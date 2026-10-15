@@ -37,6 +37,16 @@ final class ContentGenerationRun extends Model
 
     public const STATUS_ADOPTED = 'adopted';
 
+    /**
+     * Terminal for the internal AI pipeline: the prompt/evidence/knowledge
+     * are compiled and saved (see ContentGenerationCoordinator::generate()'s
+     * early branch), but no model call was made — an external writer
+     * (WorkBuddy) is expected to supply raw_output via
+     * WorkBuddyTaskController, at which point the run moves on to article
+     * adoption without ever calling the paid AI model.
+     */
+    public const STATUS_AWAITING_EXTERNAL_OUTPUT = 'awaiting_external_output';
+
     protected $fillable = [
         'article_id', 'raw_output', 'adopted_output', 'status', 'error_message',
         'adopted_by_admin_id', 'started_at', 'completed_at', 'adopted_at',

@@ -73,8 +73,19 @@
         <div class="mt-4 overflow-x-auto"><table class="min-w-full divide-y divide-gray-200 text-sm"><thead class="bg-gray-50 text-left text-xs uppercase tracking-wide text-gray-500"><tr><th class="px-4 py-3">#</th><th class="px-4 py-3">{{ __('admin.content_strategy.fields.step') }}</th><th class="px-4 py-3">{{ __('admin.content_strategy.fields.status') }}</th><th class="px-4 py-3">{{ __('admin.content_strategy.fields.token_usage') }}</th><th class="px-4 py-3">{{ __('admin.content_strategy.fields.cost') }}</th><th class="px-4 py-3">{{ __('admin.content_strategy.fields.completed_at') }}</th></tr></thead><tbody class="divide-y divide-gray-100">@forelse($run->steps as $step)<tr><td class="px-4 py-3">{{ $step->sequence }}</td><td class="px-4 py-3 text-xs">{{ data_get(__('admin.content_strategy.step_types'), $step->step_type, $step->step_type) }}</td><td class="px-4 py-3">{{ data_get(__('admin.content_strategy.step_statuses'), $step->status, $step->status) }}</td><td class="px-4 py-3">{{ number_format((int) $step->input_tokens) }} + {{ number_format((int) $step->output_tokens) }}</td><td class="px-4 py-3">{{ $step->cost ?? '—' }}</td><td class="px-4 py-3 text-gray-500">{{ $step->completed_at?->format('Y-m-d H:i:s') ?? '—' }}@if($step->error_message)<div class="mt-1 text-xs text-red-600">{{ $step->error_message }}</div>@endif</td></tr>@empty<tr><td colspan="6" class="px-4 py-8 text-center text-gray-500">{{ __('admin.content_strategy.run.trace_pending') }}</td></tr>@endforelse</tbody></table></div>
     </section>
 
+    @if($isWorkBuddyRun && $workBuddyPrompt)
+        <section class="rounded-lg bg-white p-6 shadow">
+            <div class="flex items-center justify-between">
+                <h2 class="text-lg font-semibold text-gray-900">给 WorkBuddy 的写作任务书</h2>
+                <button type="button" onclick="navigator.clipboard.writeText(document.getElementById('workbuddy-prompt-text').textContent); this.textContent='已复制';" class="rounded-md border border-gray-300 px-3 py-1.5 text-xs font-semibold text-gray-700 hover:bg-gray-50">复制全部</button>
+            </div>
+            <p class="mt-1 text-sm text-gray-500">把下面这一整段复制给 WorkBuddy 就行——这是专门为它整理成自然语言的版本，和内部技术版本（下方"内部编译 Prompt"）是同一份材料，只是格式不一样。</p>
+            <pre id="workbuddy-prompt-text" class="mt-4 max-h-[36rem] overflow-auto whitespace-pre-wrap rounded-lg bg-indigo-950 p-5 text-xs leading-5 text-indigo-50">{{ $workBuddyPrompt }}</pre>
+        </section>
+    @endif
+
     <section class="rounded-lg bg-white p-6 shadow">
-        <h2 class="text-lg font-semibold text-gray-900">{{ __('admin.content_strategy.run.compiled_prompt') }}</h2>
+        <h2 class="text-lg font-semibold text-gray-900">{{ $isWorkBuddyRun ? '内部编译 Prompt（技术排错用，不用给 WorkBuddy 看）' : __('admin.content_strategy.run.compiled_prompt') }}</h2>
         @if($canViewCompiledPrompt)
             <pre class="mt-4 max-h-[36rem] overflow-auto whitespace-pre-wrap rounded-lg bg-gray-950 p-5 text-xs leading-5 text-gray-100">{{ $run->compiled_prompt ?? __('admin.content_strategy.run.trace_pending') }}</pre>
         @else
@@ -84,6 +95,21 @@
 
     @if($run->raw_output)
         <section class="rounded-lg bg-white p-6 shadow"><h2 class="text-lg font-semibold text-gray-900">{{ __('admin.content_strategy.run.generated_output') }}</h2><pre class="mt-4 max-h-[40rem] overflow-auto whitespace-pre-wrap rounded-lg bg-gray-50 p-5 text-sm leading-6 text-gray-800">{{ $run->raw_output }}</pre></section>
+    @endif
+
+    @if($run->status === \App\Models\ContentGenerationRun::STATUS_AWAITING_EXTERNAL_OUTPUT)
+        <section class="rounded-lg border border-purple-200 bg-purple-50 p-6">
+            <h2 class="text-lg font-semibold text-purple-950">等待 WorkBuddy 提交生成内容</h2>
+            <p class="mt-1 text-sm text-purple-800">Prompt、检索到的知识库片段、外部证据都已经准备好（见上方"编译后的 Prompt"），本次不会调用付费模型。把 WorkBuddy 写好的正文粘贴到下面提交，提交后本页会出现正式的"采纳发布"表单。</p>
+            <form method="POST" action="{{ route('admin.content-generations.workbuddy-submit', $run) }}" class="mt-5 space-y-4">
+                @csrf
+                <label class="block text-sm font-medium text-gray-700">WorkBuddy 生成的文章正文
+                    <textarea required name="raw_output" rows="18" class="mt-1 w-full rounded-md border-gray-300 font-mono text-xs" placeholder="把 WorkBuddy 输出的完整文章正文粘贴在这里">{{ old('raw_output') }}</textarea>
+                </label>
+                @error('raw_output')<p class="text-sm text-red-700">{{ $message }}</p>@enderror
+                <button class="rounded-md bg-purple-700 px-5 py-2.5 text-sm font-semibold text-white hover:bg-purple-800">提交生成内容</button>
+            </form>
+        </section>
     @endif
 
     @if($run->status === \App\Models\ContentGenerationRun::STATUS_READY_FOR_REVIEW)

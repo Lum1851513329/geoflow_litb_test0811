@@ -23,6 +23,7 @@
         'analytics' => ['route' => 'admin.analytics', 'name' => __('admin.nav.analytics')],
         'tasks' => ['route' => 'admin.tasks.index', 'name' => __('admin.nav.tasks')],
         'bulk_content_import' => ['route' => 'admin.bulk-content-import.index', 'name' => __('admin.nav.bulk_content_import')],
+        'workbuddy_tasks' => ['route' => 'admin.workbuddy-tasks.index', 'name' => __('admin.nav.workbuddy_tasks')],
         'distribution' => ['route' => 'admin.distribution.index', 'name' => __('admin.nav.distribution')],
         'articles' => ['route' => 'admin.articles.index', 'name' => __('admin.nav.articles')],
         'content_strategy' => ['route' => 'admin.content-briefs.index', 'name' => __('admin.nav.content_strategy')],
@@ -38,9 +39,11 @@
         || !(bool) config('geoflow.modular_prompts_enabled', false)
         || !(bool) config('geoflow.generation_quality_gate_enabled', false)) {
         unset($menu['content_strategy']);
-        // 批量导入的路由与内容策略挂同一组功能开关，开关关闭时路由不存在，
-        // 菜单项也必须一起隐藏，否则 route() 会直接抛错。
+        // 批量导入、WorkBuddy 任务的路由都与内容策略挂同一组功能开关（workbuddy
+        // 引擎复用的是同一套 brief/strategy/blueprint 创建流水线），开关关闭时
+        // 路由不存在，菜单项也必须一起隐藏，否则 route() 会直接抛错。
         unset($menu['bulk_content_import']);
+        unset($menu['workbuddy_tasks']);
     }
     if ($isSuperAdmin) {
         $menu['admin_users'] = ['route' => 'admin.admin-users.index', 'name' => __('admin.nav.admin_users')];
@@ -86,6 +89,8 @@
         'admin.content-briefs.show' => 'content_strategy',
         'admin.content-generations.show' => 'content_strategy',
         'admin.content-generations.adopt' => 'content_strategy',
+        'admin.content-generations.workbuddy-submit' => 'content_strategy',
+        'admin.workbuddy-tasks.index' => 'workbuddy_tasks',
         'admin.manual-publications.index' => 'articles',
         'admin.manual-publications.create' => 'articles',
         'admin.manual-publications.show' => 'articles',

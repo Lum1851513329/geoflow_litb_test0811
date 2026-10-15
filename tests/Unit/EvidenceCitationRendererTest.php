@@ -22,6 +22,20 @@ final class EvidenceCitationRendererTest extends TestCase
         self::assertStringNotContainsString('Local note](', $result);
     }
 
+    public function test_does_not_repeat_the_same_source_link_inline_for_every_citation(): void
+    {
+        $evidence = [
+            ['fact_id' => 'e1', 'title' => 'What makes a gift cool', 'source_url' => 'https://example.com/gift-cool', 'source_type' => 'external'],
+        ];
+        $markdown = "- Bullet one. [[evidence:e1]]\n- Bullet two. [[evidence:e1]]\n- Bullet three. [[evidence:e1]]";
+
+        $result = (new EvidenceCitationRenderer)->render($markdown, $evidence);
+
+        self::assertSame(0, substr_count($result, 'evidence:e1'));
+        self::assertSame(1, substr_count($result, '[What makes a gift cool](https://example.com/gift-cool)'));
+        self::assertStringContainsString("- Bullet one.\n- Bullet two.\n- Bullet three.", $result);
+    }
+
     public function test_rejects_unknown_or_unsafe_citation_ids(): void
     {
         foreach ([

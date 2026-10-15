@@ -18,7 +18,14 @@ final class EvidenceCitationRenderer
             }
         }
         $sources = [];
-        $rendered = preg_replace_callback('/\[\[evidence:([A-Za-z0-9_.:-]+)\]\]/', function (array $match) use ($byId, &$sources): string {
+        // Citations are surfaced only once, in the "## Sources" footer below —
+        // not inline. The old behavior linked every [[evidence:id]] occurrence
+        // in place, so a fact cited on N bullets produced the same
+        // "[source title](url)" link repeated N times in the body, which read
+        // as spammy repetition rather than a citation. The marker is still
+        // validated and still feeds the footer; it's just removed from the
+        // body instead of expanded into a link.
+        $rendered = preg_replace_callback('/[ \t]*\[\[evidence:([A-Za-z0-9_.:-]+)\]\]/', function (array $match) use ($byId, &$sources): string {
             $id = $match[1];
             if (! isset($byId[$id])) {
                 throw new DomainException("Unknown evidence citation: {$id}");
@@ -32,14 +39,16 @@ final class EvidenceCitationRenderer
             }
             $title = trim((string) ($byId[$id]['title'] ?? 'Source')) ?: 'Source';
             $label = str_replace(['\\', '[', ']'], ['\\\\', '\\[', '\\]'], $title);
-            $link = "[{$label}]({$url})";
-            $sources[$url] ??= $link;
+            $sources[$url] ??= "[{$label}]({$url})";
 
-            return $link;
+            return '';
         }, $markdown);
         if ($rendered === null) {
             throw new DomainException('Unable to render evidence citations.');
         }
+        // Marker removal can leave a stray space before punctuation
+        // ("claim .") — tidy that without touching newlines/markdown structure.
+        $rendered = preg_replace('/[ \t]+([.,;:!?])/', '$1', $rendered) ?? $rendered;
         foreach (array_values(array_unique(array_map('strval', $requiredSourceIds))) as $id) {
             if (! isset($byId[$id])) {
                 throw new DomainException("Unknown required evidence source: {$id}");

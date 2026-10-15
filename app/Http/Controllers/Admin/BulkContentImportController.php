@@ -8,6 +8,12 @@ use App\Domain\ContentGeneration\BulkContentImportValidationException;
 use App\Http\Controllers\Controller;
 use App\Models\Admin;
 use App\Models\AiModel;
+use App\Models\DistributionChannel;
+use App\Models\KnowledgeBrand;
+use App\Models\KnowledgeDirectory;
+use App\Models\KnowledgeSite;
+use App\Models\PromptPreset;
+use App\Models\PromptPresetVersion;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\View\View;
@@ -39,6 +45,15 @@ final class BulkContentImportController extends Controller
             'pageTitle' => '批量导入文章任务',
             'activeMenu' => 'tasks',
             'aiModels' => $aiModels,
+            'distributionChannels' => DistributionChannel::query()->select(['id', 'name', 'domain'])->orderBy('name')->get(),
+            'eligiblePresets' => PromptPreset::query()
+                ->select(['id', 'preset_key', 'display_name'])
+                ->whereHas('currentVersion', fn ($q) => $q->where('lifecycle_status', PromptPresetVersion::STATUS_PRODUCTION)->whereNotNull('blueprint_template'))
+                ->orderBy('display_name')
+                ->get(),
+            'knowledgeBrands' => KnowledgeBrand::query()->select(['id', 'key', 'name'])->orderBy('name')->get(),
+            'knowledgeSites' => KnowledgeSite::query()->select(['id', 'brand_id', 'key', 'canonical_host'])->orderBy('key')->get(),
+            'knowledgeDirectories' => KnowledgeDirectory::query()->select(['id', 'brand_id', 'path', 'name'])->orderBy('path')->get(),
         ]);
     }
 

@@ -118,3 +118,13 @@ Schedule::command('geoflow:telemetry:heartbeat')
     ->dailyAt('03:17')
     ->onOneServer()
     ->withoutOverlapping(10);
+
+/**
+ * litbstyle.com 内链补全：每天一次，给当天新发布（及历史遗留）文章插入
+ * "Related reading" 内链区块。幂等（按内容里的标记跳过已处理过的文章），
+ * 默认按 channel=3（litbstyle.com）、每篇最多 3 条链接。
+ */
+Schedule::command('geoflow:litb:attach-internal-links', ['--apply'])
+    ->dailyAt('04:10')
+    ->onOneServer()
+    ->withoutOverlapping(10);
